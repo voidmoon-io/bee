@@ -134,14 +134,14 @@ shippable and SHOULD land as their own PRs (git-pr-workflow).
 
 ### Control channel and store (contracts/proxy-control.md, contracts/store.md)
 
-- [ ] T027 [P] Write codec tests in `src/intercept/control.rs` `#[cfg(test)]` (fail first): round-trip every frame type; reject over-size JSON and segments; close on malformed length; segments delivered in order.
-- [ ] T028 Implement `src/intercept/control.rs` (depends: T027):
+- [X] T027 [P] Write codec tests in `src/intercept/control.rs` `#[cfg(test)]` (fail first): round-trip every frame type; reject over-size JSON and segments; close on malformed length; segments delivered in order.
+- [X] T028 Implement `src/intercept/control.rs` (depends: T027):
   - frame types for both directions per contracts/proxy-control.md;
   - an async `FrameReader`/`FrameWriter` over `tokio` stdio and child pipes;
   - a 4-byte big-endian length prefix;
   - declared binary segments;
   - limits: 1 MiB JSON and `max_body_bytes` segments.
-- [ ] T029 [P] Write `tests/intercept_store.rs` (fails first):
+- [X] T029 [P] Write `tests/intercept_store.rs` (fails first):
   - schema v1 is created;
   - insert and read an exchange with blobs;
   - identical bodies share one blob file;
@@ -149,7 +149,7 @@ shippable and SHOULD land as their own PRs (git-pr-workflow).
   - an unknown newer `schema_version` opens read-only;
   - eviction above `store_cap_bytes` removes the oldest blobs, sets `evicted`, keeps the rows, and reports an eviction summary;
   - over-`max_body_bytes` bodies are stored truncated with the flag set.
-- [ ] T030 Implement `src/intercept/store.rs` per contracts/store.md (depends: T029):
+- [X] T030 Implement `src/intercept/store.rs` per contracts/store.md (depends: T029):
   - `Store::open(project_root)` creating `.bee/http/` with `0700`;
   - WAL and `busy_timeout(5s)`;
   - `insert_exchange` and `insert_tunnel`, `insert_refusal`;

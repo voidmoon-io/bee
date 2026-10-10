@@ -109,6 +109,23 @@ on any branch today; 019 M1 does not wait for it.
 - **Wait for 018**: blocks the whole feature on an unimplemented restructuring. Rejected; the sidecar
   is a small, deletable bridge.
 
+### R2 addendum (implementation, 2026-10-10) — name resolution happens in the harness
+
+Found while implementing T025/T036. The proxy scope's network rules are **exactly** the resolved
+`targets ∪ egress` addresses, so the worker cannot reach a DNS server: `getaddrinfo` connects a UDP
+socket to the resolver (`127.0.0.53:53`, or whatever `/etc/resolv.conf` names), and the kernel denies
+it. As planned, the connect-time drift check (`resolve_checked`, R14) could never succeed for a
+hostname target under enforcement.
+
+**Decision**: the worker asks the harness. It sends `resolve {req_id, host}`, and the harness, which is
+unconfined and already resolved the scope at compile time, answers `resolved {req_id, addrs | error}`.
+The worker then applies the drift check: it keeps only addresses in the entry's compiled set, and if
+none remain it refuses with `refused_address_drift`. An IP-literal target needs no lookup.
+
+**Rejected alternative**: adding the system resolvers to the proxy scope's network rules. That gives
+a confined process a general-purpose channel out (DNS tunnelling), and the destination is whatever
+`/etc/resolv.conf` says rather than anything the operator listed.
+
 ## R3 — Harness ↔ worker control channel
 
 **Decision**: Length-prefixed JSON frames over the worker's stdin/stdout (stderr remains diagnostic).

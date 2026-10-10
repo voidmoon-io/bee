@@ -35,6 +35,7 @@ channel (fail closed).
 | `fuzz.cancel` | `run_id` | `fuzz.done {cancelled}` |
 | `rule.add` / `rule.remove` | `rule` / `rule_id` | `ack` |
 | `hold.release` | `hold_id`, `decision` | `ack` |
+| `resolved` | `req_id`, `addrs` or `error` — the answer to a worker `resolve` (research R2 addendum) | — |
 | `shutdown` | — | worker exits 0 |
 | `debug.connect` / `debug.read` | `addr` / `path` — **only in `vm-test` builds**; never decodable otherwise | `error` with the errno |
 
@@ -46,9 +47,10 @@ the worker has one send path (the raw writer) for all model-originated traffic.
 | Frame | Fields |
 |---|---|
 | `hello` | `version`, `ca_cert_pem` (present iff `inspect` non-empty; **certificate only**) |
-| `exchange` | the full `Exchange` record minus blob ids; bodies as segments `[req_body, resp_body]` |
+| `exchange` | the full `Exchange` record minus blob ids; bytes as segments `[req_head, req_body, resp_head, resp_body]`, plus `[req_original_head, req_original_body]` iff `has_original` (heads are segments too, because a byte-exact head is not JSON) |
 | `tunnel` | `TunnelRecord` |
 | `proxy_event` | `ProxyEvent` (refusals, rule fires, holds, auto-forwards) |
+| `resolve` | `req_id`, `host`: the proxy scope cannot reach a DNS server, so the harness resolves; the worker drift-checks the answer against the compiled set |
 | `held` | `hold_id`, request summary, deadline |
 | `fuzz.done` | `run_id`, counts, `state` |
 | `error` | `req_id?`, `code`, `message` |

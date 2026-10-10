@@ -182,10 +182,17 @@ intercept = [
     "dep:brotli-decompressor",
     "dep:ruzstd",
     "dep:json-patch",
+    # Content addressing for stored bodies (blobs/<aa>/<sha256>). Already optional for `findings`.
+    "dep:sha2",
     "tokio/net",
     "tokio/sync",
     "tokio/io-util",
 ]
+# Test-only (019 T048): compiles the proxy worker's `debug.connect`/`debug.read` control frames, which
+# the `http-proxy-scope` and `http-proxy-fs-deny` VM cases use to probe the proxy scope from inside.
+# NEVER in a shipping build — only `test/vm/matrix.sh` enables it; every other build fails to decode
+# those frames (asserted in `src/intercept/control.rs`).
+vm-test = ["intercept"]
 
 [dependencies]
 bee-core = { workspace = true }

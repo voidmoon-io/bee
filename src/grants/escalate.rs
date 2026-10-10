@@ -107,8 +107,7 @@ pub async fn escalate(
         filesystem: &fs_display,
         net: &delta.net,
         exec: &delta.exec,
-        // Target-scope widening arrives with 019 US3 (`GrantDelta.http_targets`).
-        http_targets: &[],
+        http_targets: &delta.http_targets,
     };
     let decision = match tokio::time::timeout(timeout, consent.confirm(&request)).await {
         Ok(d) => d,
@@ -120,6 +119,7 @@ pub async fn escalate(
 
     // 3. Apply the lease (re-validates ⊆ ceiling and recomputes `active`).
     let tools = delta.tools.clone();
+    let http_targets = delta.http_targets.clone();
     let id = match active.try_apply(origin, delta, ttl, turn) {
         Ok(id) => id,
         Err(e) => return EscalateOutcome::Refused(e),
@@ -129,6 +129,18 @@ pub async fn escalate(
     if let Err(e) = sandbox.reload(active.active()) {
         active.release(&id);
         return EscalateOutcome::Refused(format!("reload failed: {e}"));
+    }
+
+    // 4b. A target-scope widening (019 US3) also reaches the proxy, atomically across both layers:
+    //     the proxy scope's kernel rules, then the worker's own scope. If the worker cannot take it,
+    //     the sidecar is rolled back to its previous plan and the lease released — the operator's
+    //     "yes" never leaves the two layers disagreeing.
+    if !http_targets.is_empty() {
+        if let Err(e) = sandbox.apply_http_scope(active.active()).await {
+            active.release(&id);
+            let _ = sandbox.reload(active.active());
+            return EscalateOutcome::Refused(format!("target-scope widening failed: {e}"));
+        }
     }
 
     // 5. Register granted tools (Layer 1 membership).
@@ -223,6 +235,79 @@ pub async fn reactive_step(
     )
 }
 
+/// The proxy-refusal escalation step (019 US3), shared by both loops.
+///
+/// Dispatches [`StepEvent::ProxyRefusal`] for the first `refused_out_of_scope` proxy event of this
+/// call and, if a hook proposes a grant, runs the widen cycle for exactly that `host:port`. As with
+/// [`reactive_step`], the caller retries **only** on [`EscalateOutcome::is_granted`], and only once.
+#[allow(clippy::too_many_arguments)]
+pub async fn proxy_refusal_step(
+    esc: &LoopEscalation,
+    active: &mut ActivePolicy,
+    events: &[crate::proxy_event::ProxyEvent],
+    call: &crate::provider::ToolCall,
+    turn: u32,
+    sandbox: &mut Sandbox,
+    registry: &mut ToolRegistry,
+) -> Option<EscalateOutcome> {
+    let ev = events
+        .iter()
+        .find(|e| e.kind == crate::proxy_event::ProxyEventKind::RefusedOutOfScope)?;
+    let step = StepEvent::ProxyRefusal {
+        host: &ev.host,
+        port: ev.port,
+        call,
+    };
+    let Flow::Escalate(delta) = crate::hooks::dispatch(&esc.hooks, &step).await else {
+        return None;
+    };
+    Some(
+        escalate(
+            active,
+            GrantOrigin::ProxyRefusal {
+                host: ev.host.clone(),
+                port: ev.port,
+                call: call.id.clone(),
+            },
+            delta,
+            esc.default_ttl,
+            turn,
+            esc.consent.as_ref(),
+            esc.timeout,
+            sandbox,
+            registry,
+        )
+        .await,
+    )
+}
+
+/// Proposes exactly the refused `host:port` as a target-scope widening (019 US3). Gated like the
+/// kernel-denial hook: on only where a ceiling authorises widening at all.
+pub struct ProxyRefusalHook {
+    pub enabled: bool,
+}
+
+#[async_trait::async_trait]
+impl LoopHook for ProxyRefusalHook {
+    fn observes(&self, kind: StepEventKind) -> bool {
+        self.enabled && kind == StepEventKind::ProxyRefusal
+    }
+
+    async fn on_event(&self, ev: &StepEvent<'_>) -> Flow {
+        if let StepEvent::ProxyRefusal { host, port, .. } = ev {
+            let hp = bee_core::HostPort {
+                host: (*host).to_string(),
+                port: *port,
+            };
+            return Flow::Escalate(GrantDelta {
+                http_targets: vec![hp.to_string()],
+                ..Default::default()
+            });
+        }
+        Flow::Continue
+    }
+}
+
 /// The first denial in a drained audit batch, as `(op, target)`. Both loops locate the reactive
 /// trigger the same way; only one of them should own the spelling of "the first denial".
 pub fn first_denial(audit: &[bee_core::AuditEvent]) -> Option<(String, String)> {
@@ -245,6 +330,7 @@ fn origin_label(origin: &GrantOrigin) -> &str {
         GrantOrigin::ReactiveDenial { .. } => "reactive-denial",
         GrantOrigin::SkillRequires { skill } => skill,
         GrantOrigin::Explicit => "explicit",
+        GrantOrigin::ProxyRefusal { .. } => "proxy-refusal",
     }
 }
 

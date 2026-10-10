@@ -187,6 +187,7 @@ impl Tool for HttpScope {
 pub fn scope_view(icpt: &Interceptor) -> Value {
     let scope = icpt.http_scope();
     let checker = crate::intercept::worker::scope::ScopeChecker::new(scope.clone());
+    let scope = &scope;
     let enforcement = icpt.enforcement();
     let entries: Vec<Value> = scope
         .targets

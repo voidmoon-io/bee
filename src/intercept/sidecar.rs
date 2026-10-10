@@ -130,6 +130,9 @@ struct Inner {
     notices: Mutex<Vec<String>>,
     ca_cert_pem: Mutex<Option<String>>,
     on_event: Mutex<Option<Box<dyn Fn(&ProxyEvent) + Send + Sync>>>,
+    /// The scope the worker currently enforces: the configured one, replaced on each acknowledged
+    /// `scope.update` (US3). A restarted worker is initialised with this, not the original.
+    scope: Mutex<HttpScope>,
 }
 
 /// The harness's handle on the session proxy. Cheap to clone.
@@ -157,6 +160,7 @@ impl Interceptor {
                     .into(),
             );
         }
+        let cfg_scope = cfg.http_scope.clone();
         let inner = Arc::new(Inner {
             cfg,
             port,
@@ -177,6 +181,7 @@ impl Interceptor {
             notices: Mutex::new(Vec::new()),
             ca_cert_pem: Mutex::new(None),
             on_event: Mutex::new(None),
+            scope: Mutex::new(cfg_scope),
         });
         let me = Interceptor { inner };
         me.launch().await?;
@@ -192,8 +197,9 @@ impl Interceptor {
         &self.inner.cfg.session_id
     }
 
-    pub fn http_scope(&self) -> &HttpScope {
-        &self.inner.cfg.http_scope
+    /// The scope the worker currently enforces.
+    pub fn http_scope(&self) -> HttpScope {
+        self.inner.scope.lock().expect("scope lock").clone()
     }
 
     pub fn enforcement(&self) -> &Enforcement {
@@ -347,12 +353,14 @@ impl Interceptor {
         self.write(
             &ToWorker::ScopeUpdate {
                 req_id,
-                http_scope: scope,
+                http_scope: scope.clone(),
             },
             &[],
         )
         .await?;
-        self.await_reply(req_id, rx, ACK_TIMEOUT).await.map(|_| ())
+        self.await_reply(req_id, rx, ACK_TIMEOUT).await?;
+        *self.inner.scope.lock().expect("scope lock") = scope;
+        Ok(())
     }
 
     /// VM-test builds only: ask the worker to `connect(2)` to `addr` (or `open(2)` `path`) from inside
@@ -542,7 +550,7 @@ impl Interceptor {
             .write(
                 &ToWorker::Init {
                     session_id: self.inner.cfg.session_id.clone(),
-                    http_scope: self.inner.cfg.http_scope.clone(),
+                    http_scope: self.http_scope(),
                 },
                 &[],
             )

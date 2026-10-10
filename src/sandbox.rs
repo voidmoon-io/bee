@@ -108,6 +108,22 @@ fn refused_overlay_key(key: &str, strip_env: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// What the interception session plugs into the sandbox so a consented target-scope widening
+/// reaches the proxy (019 US3): compile the widened policy's proxy scope, and push the worker's new
+/// scope. The kernel half — reloading the sidecar — is the sandbox's own.
+pub trait HttpScopeHook: Send + Sync {
+    /// The proxy scope's kernel policy and the worker's scope for `policy`.
+    fn compile(
+        &self,
+        policy: &bee_core::Policy,
+    ) -> Result<(bee_core::CompiledPolicy, bee_core::compiler::HttpScope), String>;
+    /// Tell the worker; `Err` if it did not acknowledge.
+    fn update<'a>(
+        &'a self,
+        scope: bee_core::compiler::HttpScope,
+    ) -> futures_util::future::BoxFuture<'a, Result<(), String>>;
+}
+
 /// Computes the [`EnvOverlay`] for a call. Installed by the harness only (019 interception).
 pub type EnvProvider = Box<dyn Fn(&CallContext) -> EnvOverlay + Send + Sync>;
 
@@ -132,6 +148,7 @@ struct ChildEnv {
     call: Option<CallContext>,
     provider: Option<EnvProvider>,
     hooks: Option<std::sync::Arc<dyn CallHooks>>,
+    http_scope: Option<std::sync::Arc<dyn HttpScopeHook>>,
 }
 
 impl ChildEnv {
@@ -426,6 +443,44 @@ impl Sandbox {
             }
             _ => Vec::new(),
         }
+    }
+
+    /// Install the interception session's scope hook (019 US3).
+    pub fn set_http_scope_hook(&mut self, hook: std::sync::Arc<dyn HttpScopeHook>) {
+        self.child_env_mut().http_scope = Some(hook);
+    }
+
+    /// Apply `policy`'s `[policy.http]` to the running proxy, atomically across both layers: reload
+    /// the sidecar scope's kernel rules, then update the worker; if the worker update fails, put the
+    /// previous kernel plan back and return the error (019 T065). Advisory sessions have no sidecar,
+    /// so only the worker is updated.
+    pub async fn apply_http_scope(&mut self, policy: &bee_core::Policy) -> Result<(), String> {
+        let hook = self
+            .child_env()
+            .http_scope
+            .clone()
+            .ok_or("this session has no interception proxy")?;
+        let (proxy_scope, scope) = hook.compile(policy)?;
+        #[cfg(feature = "enforce")]
+        let previous = self.sidecar_plan().cloned();
+        #[cfg(feature = "enforce")]
+        if previous.is_some() {
+            self.reload_sidecar(&proxy_scope)?;
+        }
+        #[cfg(not(feature = "enforce"))]
+        let _ = proxy_scope;
+        if let Err(e) = hook.update(scope).await {
+            #[cfg(feature = "enforce")]
+            if let Some(p) = previous {
+                if let Err(r) = self.reload_sidecar_plan(&p) {
+                    return Err(format!(
+                        "{e}; and the proxy scope rollback also failed: {r}"
+                    ));
+                }
+            }
+            return Err(e);
+        }
+        Ok(())
     }
 
     /// Install the harness's per-call hooks (019 interception).

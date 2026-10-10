@@ -6,9 +6,9 @@
 //!   a body, serialised to raw bytes **here, in the harness**, so the worker has one send path.
 //!   `Host` and `Content-Length` are added only when absent.
 //!
-//! The harness checks scope first for a clear refusal; the worker checks again before any connect
-//! (proxy-control invariant 2). `follow_redirects` (≤ 5) scope-checks every hop and stops at the
-//! first that leaves scope, reporting it (FR-023).
+//! The worker checks scope before any connect (proxy-control invariant 2) and records a refusal as a
+//! proxy event attributed to the call. `follow_redirects` (≤ 5) scope-checks every hop and stops at
+//! the first that leaves scope, reporting it (FR-023).
 
 use std::time::Duration;
 
@@ -98,17 +98,16 @@ impl Tool for HttpSend {
             return invalid("http_send", "baseline requires http_replay (M2)");
         }
         let ctx = call_ctx(sandbox);
-        let scope = ScopeChecker::new(icpt.http_scope().clone());
+        let scope = ScopeChecker::new(icpt.http_scope());
 
         let mut target = parsed.target;
         let mut bytes = parsed.bytes;
         let mut redirects: Vec<Value> = Vec::new();
         let mut hops_left = parsed.follow_redirects;
         loop {
-            // The harness-side check, for an actionable refusal. The worker checks again.
-            if let Err(r) = scope.check_testable(&target.host, target.port) {
-                return refusal(&r.kind, &target, &redirects);
-            }
+            // No harness-side gate here: the worker decides, and records the refusal as a proxy
+            // event attributed to this call — which is what lets the operator be asked to widen
+            // the scope (US3). One decision, in one place, on the proxy layer.
             let sent = match icpt
                 .send(
                     target.clone(),

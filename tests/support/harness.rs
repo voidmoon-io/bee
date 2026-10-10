@@ -103,6 +103,10 @@ impl Session {
         .expect("proxy starts");
         let mut sandbox = Sandbox::host(bee::sandbox::key_vars(None));
         ProxyCredentials::new(icpt.clone(), None).install(&mut sandbox);
+        sandbox.set_http_scope_hook(bee::intercept::session::scope_hook(
+            icpt.clone(),
+            PathBuf::from("/bin/true"),
+        ));
         let names: Vec<String> = tools.iter().map(|s| s.to_string()).collect();
         let mut registry = bee::tools::registry_for(&names, None);
         bee::tools::http::configure_http_tools(&mut registry, &icpt);
@@ -118,6 +122,16 @@ impl Session {
     /// One tool call, bracketed by `begin_call`/`end_call` exactly as the loops do. Returns the
     /// result and the call id.
     pub async fn call(&mut self, tool: &str, args: serde_json::Value) -> (ToolResult, String) {
+        let (r, id, _) = self.call_with_events(tool, args).await;
+        (r, id)
+    }
+
+    /// [`Session::call`], also returning the proxy events the call produced.
+    pub async fn call_with_events(
+        &mut self,
+        tool: &str,
+        args: serde_json::Value,
+    ) -> (ToolResult, String, Vec<bee::proxy_event::ProxyEvent>) {
         self.turn += 1;
         let id = format!("call_{}_{}", self.turn, rand_suffix());
         self.sandbox
@@ -138,8 +152,8 @@ impl Session {
                 &self.sandbox,
             )
             .await;
-        self.sandbox.end_call().await;
-        (r, id)
+        let events = self.sandbox.end_call().await;
+        (r, id, events)
     }
 
     /// Parse a tool's JSON result (the body before any `[bee]` notices).

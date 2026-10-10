@@ -122,6 +122,7 @@ pub async fn start(
     enforcement: Enforcement,
 ) -> Result<HttpSession, String> {
     let spawn = spawn_fn(sandbox, &prepared.worker_exe, session_id, &enforcement)?;
+    let prepared_exe = prepared.worker_exe.clone();
     sandbox.set_proxy_loopback(prepared.port);
     let interceptor = Interceptor::start(
         InterceptorConfig {
@@ -137,6 +138,7 @@ pub async fn start(
     .await?;
     let credentials = ProxyCredentials::new(interceptor.clone(), None);
     credentials.install(sandbox);
+    sandbox.set_http_scope_hook(scope_hook(interceptor.clone(), prepared_exe));
     Ok(HttpSession {
         interceptor,
         credentials,
@@ -210,4 +212,46 @@ pub fn attach_sidecar(
         scope,
         plan,
     })
+}
+
+/// The [`crate::sandbox::HttpScopeHook`] for `interceptor`: how a consented target-scope widening
+/// reaches this session's proxy (019 US3).
+pub fn scope_hook(
+    interceptor: Interceptor,
+    worker_exe: PathBuf,
+) -> Arc<dyn crate::sandbox::HttpScopeHook> {
+    Arc::new(ScopeHook {
+        interceptor,
+        worker_exe,
+    })
+}
+
+struct ScopeHook {
+    interceptor: Interceptor,
+    worker_exe: PathBuf,
+}
+
+impl crate::sandbox::HttpScopeHook for ScopeHook {
+    fn compile(
+        &self,
+        policy: &Policy,
+    ) -> Result<(bee_core::CompiledPolicy, bee_core::compiler::HttpScope), String> {
+        let c = policy
+            .compile_http(&bee_userspace::SystemResolver::current(), &self.worker_exe)
+            .map_err(|e| format!("[policy.http]: {e}"))?
+            .ok_or("the widened policy has no [policy.http] targets")?;
+        Ok((c.proxy_scope, c.http_scope))
+    }
+
+    fn update<'a>(
+        &'a self,
+        scope: bee_core::compiler::HttpScope,
+    ) -> futures_util::future::BoxFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            self.interceptor
+                .update_scope(scope)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
 }

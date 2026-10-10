@@ -646,6 +646,7 @@ pub async fn run_exchange(
                     origin: crate::sandbox::CallOrigin::Tool,
                 })
                 .await;
+            let mut retried = false;
             let mut result = match tokio::time::timeout(
                 Duration::from_secs(config.tool_timeout_secs),
                 registry.execute(tc, sandbox),
@@ -693,6 +694,7 @@ pub async fn run_exchange(
                                 sandbox.settle().await;
                                 let retry_audit = sandbox.drain_audit();
                                 result = r;
+                                retried = true;
                                 audit = retry_audit;
                             }
                         }
@@ -700,7 +702,58 @@ pub async fn run_exchange(
                 }
             }
 
-            let proxy_events = sandbox.end_call().await;
+            #[cfg_attr(not(feature = "intercept"), allow(unused_mut))]
+            let mut proxy_events = sandbox.end_call().await;
+
+            // 019 US3: a proxy refusal may become a consented target-scope widening (the operator is
+            // asked, and the prompt shows the exact host:port), then the call is retried once —
+            // unless a kernel-denial widening already spent the one retry.
+            #[cfg(feature = "intercept")]
+            if let (false, Some(esc), Some(turn_no)) =
+                (retried, config.escalation.as_ref(), turn_no)
+            {
+                let mut active = esc.active.lock().await;
+                if let Some(out) = crate::grants::escalate::proxy_refusal_step(
+                    &esc.config,
+                    &mut active,
+                    &proxy_events,
+                    tc,
+                    turn_no,
+                    sandbox,
+                    registry,
+                )
+                .await
+                {
+                    let target = proxy_events
+                        .iter()
+                        .find(|e| e.kind.is_refusal())
+                        .map(|e| format!("http target {}:{}", e.host, e.port))
+                        .unwrap_or_default();
+                    report_escalation(output, &target, &out);
+                    if out.is_granted() {
+                        sandbox
+                            .begin_call(crate::sandbox::CallContext {
+                                call_id: tc.id.clone(),
+                                turn: turns.len() as u32,
+                                origin: crate::sandbox::CallOrigin::Tool,
+                            })
+                            .await;
+                        if let Ok(r) = tokio::time::timeout(
+                            Duration::from_secs(config.tool_timeout_secs),
+                            registry.execute(tc, sandbox),
+                        )
+                        .await
+                        {
+                            result = r;
+                        }
+                        sandbox.settle().await;
+                        audit = sandbox.drain_audit();
+                        proxy_events = sandbox.end_call().await;
+                    }
+                }
+            }
+            #[cfg(not(feature = "intercept"))]
+            let _ = retried;
             // The proxy scope's kernel events, tagged `scope_id = "proxy"`, join the call's audit
             // only now — after escalation, which they must never drive (019 T047).
             audit.extend(sandbox.drain_sidecar_audit());

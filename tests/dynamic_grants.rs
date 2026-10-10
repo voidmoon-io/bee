@@ -457,6 +457,10 @@ fn wide_ceiling() -> Policy {
     let mut p = policy("ceil", &[("/tmp", Access::Write)]);
     p.network.allow = vec!["1.2.3.4:443".into(), "10.0.0.5:443".into()];
     p.exec.allow = vec!["/usr/bin/x".into(), "/bin/true".into()];
+    p.http = Some(bee_core::HttpPolicy {
+        targets: vec![bee_core::HostPort::try_from("app.test:443".to_string()).unwrap()],
+        ..Default::default()
+    });
     p
 }
 
@@ -478,7 +482,9 @@ async fn shown_for(delta: GrantDelta) -> String {
         &mut reg,
     )
     .await;
-    assert!(out.is_granted(), "{out:?}");
+    // What matters here is what the operator was shown. (An `http_targets` grant is then refused
+    // in this proxy-less host sandbox — the fail-closed path, covered in tests/intercept_escalation.rs.)
+    let _ = out;
     let seen = sink.seen.lock().unwrap();
     assert_eq!(seen.len(), 1, "consent consulted exactly once");
     seen[0].clone()
@@ -517,9 +523,16 @@ async fn every_field_of_a_grant_is_rendered() {
             .collect(),
         exec: vec!["/bin/true".into()],
         net: vec!["10.0.0.5:443".into()],
+        http_targets: vec!["app.test:443".into()],
     };
     let shown = shown_for(delta).await;
-    for needle in ["bash", "/tmp/w", "/bin/true", "10.0.0.5:443"] {
+    for needle in [
+        "bash",
+        "/tmp/w",
+        "/bin/true",
+        "10.0.0.5:443",
+        "http target: app.test:443",
+    ] {
         assert!(shown.contains(needle), "missing {needle}: {shown}");
     }
 }

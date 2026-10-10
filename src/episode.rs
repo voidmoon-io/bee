@@ -312,6 +312,7 @@ pub async fn run_loop(
                     origin: crate::sandbox::CallOrigin::Tool,
                 })
                 .await;
+            let mut retried = false;
             let (mut result, timed_out) =
                 match tokio::time::timeout(remaining, registry.execute(tc, sandbox)).await {
                     Ok(r) => (r, false),
@@ -355,6 +356,7 @@ pub async fn run_loop(
                                     let retry_audit = sandbox.drain_audit();
                                     audit_trail.extend(retry_audit.iter().cloned());
                                     result = r;
+                                    retried = true;
                                     audit = retry_audit;
                                 }
                             }
@@ -363,7 +365,53 @@ pub async fn run_loop(
                 }
             }
 
-            let proxy_events = sandbox.end_call().await;
+            #[cfg_attr(not(feature = "intercept"), allow(unused_mut))]
+            let mut proxy_events = sandbox.end_call().await;
+
+            // 019 US3: a proxy refusal may become a consented target-scope widening, then the call is
+            // retried once under it — unless a kernel-denial widening already spent the one retry.
+            #[cfg(feature = "intercept")]
+            if !retried {
+                if let (Some(esc), Some(active)) =
+                    (opts.escalation.as_ref(), active_policy.as_mut())
+                {
+                    if let Some(out) = crate::grants::escalate::proxy_refusal_step(
+                        esc,
+                        active,
+                        &proxy_events,
+                        tc,
+                        index,
+                        sandbox,
+                        registry,
+                    )
+                    .await
+                    {
+                        emit(opts, format!("  escalate(proxy): {out:?}"));
+                        let left = deadline.saturating_duration_since(Instant::now());
+                        if out.is_granted() && !left.is_zero() {
+                            sandbox
+                                .begin_call(crate::sandbox::CallContext {
+                                    call_id: tc.id.clone(),
+                                    turn: index as u32,
+                                    origin: crate::sandbox::CallOrigin::Tool,
+                                })
+                                .await;
+                            if let Ok(r) =
+                                tokio::time::timeout(left, registry.execute(tc, sandbox)).await
+                            {
+                                result = r;
+                            }
+                            sandbox.settle().await;
+                            let retry_audit = sandbox.drain_audit();
+                            audit_trail.extend(retry_audit.iter().cloned());
+                            audit = retry_audit;
+                            proxy_events = sandbox.end_call().await;
+                        }
+                    }
+                }
+            }
+            #[cfg(not(feature = "intercept"))]
+            let _ = retried;
             // The proxy scope's kernel events join the call's audit only now, after escalation —
             // which they must never drive — tagged `scope_id = "proxy"` (019 T047).
             let sidecar_audit = sandbox.drain_sidecar_audit();
@@ -827,6 +875,11 @@ pub async fn run_episode_with(
         }
         let hooks: Vec<Box<dyn crate::hooks::LoopHook>> = vec![
             Box::new(crate::grants::escalate::DenialEscalationHook {
+                enabled: scenario.ceiling_policy_path.is_some(),
+            }),
+            // 019 US3: a proxy refusal proposes exactly the refused host:port. The ceiling's
+            // `[policy.http]` bounds it; the scenario's ceiling file is the authorisation.
+            Box::new(crate::grants::escalate::ProxyRefusalHook {
                 enabled: scenario.ceiling_policy_path.is_some(),
             }),
             Box::new(crate::grants::escalate::SkillEscalationHook::new(

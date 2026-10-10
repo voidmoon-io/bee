@@ -220,6 +220,11 @@ async fn repl(args: ReplArgs) -> ExitCode {
             Box::new(bee::grants::escalate::DenialEscalationHook {
                 enabled: cfg.ceiling.is_some(),
             }),
+            // 019 US3: a proxy refusal asks the operator — showing the exact host:port — whether to
+            // widen the target scope, within the ceiling's `[policy.http]`.
+            Box::new(bee::grants::escalate::ProxyRefusalHook {
+                enabled: cfg.ceiling.is_some(),
+            }),
             Box::new(bee::grants::escalate::SkillEscalationHook::new(
                 skills.clone(),
             )),

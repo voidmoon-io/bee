@@ -304,7 +304,7 @@ applied atomically to the kernel and proxy layers, then retried once.
 
 **Independent Test**: spec US3, in `tests/intercept_escalation.rs`.
 
-- [ ] T062 [P] [US3] Write `tests/intercept_escalation.rs` (fails first). It checks that:
+- [X] T062 [P] [US3] Write `tests/intercept_escalation.rs` (fails first). It checks that:
   - a refusal with escalation enabled produces a consent request whose `http_targets` is exactly the refused `host:port`;
   - approve leads to a successful retry, and the transcript records the decision and the approver;
   - decline or timeout leaves the scope unchanged, and the model is told so;
@@ -312,9 +312,9 @@ applied atomically to the kernel and proxy layers, then retried once.
   - a worker `scope.update` failure after a kernel reload rolls the sidecar back to the previous plan and reports failure;
   - the model has no tool that widens scope (registry scan);
   - proptest: no sequence of grants yields a scope outside the ceiling (SC-010).
-- [ ] T063 [US3] Add `http_targets: Vec<String>` to `GrantDelta` in `src/grants/mod.rs:30-35`, folded into a second, target-scope `ActivePolicy`. `try_apply` checks it against the ceiling's `[policy.http]` with the core attenuation from T026.
-- [ ] T064 [US3] Add an escalation origin `ProxyRefusal { host, port, call }` and a `ProxyRefusalHook` in `src/grants/escalate.rs`. The episode and REPL loops (`src/episode.rs`, `src/repl.rs`) dispatch it when a tool result carries a `refused_out_of_scope` `ProxyEvent` and escalation is enabled. On a granted widen, retry once (existing rule).
-- [ ] T065 [US3] Implement the atomic apply in `src/intercept/sidecar.rs` (depends: T063, T017):
+- [X] T063 [US3] Add `http_targets: Vec<String>` to `GrantDelta` in `src/grants/mod.rs:30-35`, folded into a second, target-scope `ActivePolicy`. `try_apply` checks it against the ceiling's `[policy.http]` with the core attenuation from T026.
+- [X] T064 [US3] Add an escalation origin `ProxyRefusal { host, port, call }` and a `ProxyRefusalHook` in `src/grants/escalate.rs`. The episode and REPL loops (`src/episode.rs`, `src/repl.rs`) dispatch it when a tool result carries a `refused_out_of_scope` `ProxyEvent` and escalation is enabled. On a granted widen, retry once (existing rule).
+- [X] T065 [US3] Implement the atomic apply in `src/intercept/sidecar.rs` (depends: T063, T017):
   - recompile `proxy_scope`;
   - call `Sandbox::reload_sidecar` (kernel, transactional);
   - send `scope.update` to the worker;

@@ -32,6 +32,9 @@ pub struct GrantDelta {
     pub filesystem: BTreeMap<String, Access>,
     pub exec: Vec<String>,
     pub net: Vec<String>,
+    /// `host:port` entries to add to the interception **target** scope (019 US3). Folded into
+    /// `[policy.http].targets`; the ceiling's `[policy.http]` bounds them like any other grant.
+    pub http_targets: Vec<String>,
 }
 
 impl GrantDelta {
@@ -41,6 +44,7 @@ impl GrantDelta {
             && self.filesystem.is_empty()
             && self.exec.is_empty()
             && self.net.is_empty()
+            && self.http_targets.is_empty()
     }
 }
 
@@ -53,6 +57,12 @@ pub enum GrantOrigin {
     SkillRequires { skill: String },
     /// Explicitly requested (e.g. a de-escalatable manual grant).
     Explicit,
+    /// The interception proxy refused a call's request to `host:port` (019 US3).
+    ProxyRefusal {
+        host: String,
+        port: u16,
+        call: String,
+    },
 }
 
 /// How long a grant lives. Turn counts are deterministic (the default, reproducible in scored runs);
@@ -109,6 +119,18 @@ fn fold_delta(policy: &mut Policy, delta: &GrantDelta) {
     for n in &delta.net {
         if !policy.network.allow.contains(n) {
             policy.network.allow.push(n.clone());
+        }
+    }
+    // Target-scope additions (019). A malformed entry is dropped here and so cannot widen; with no
+    // `[policy.http]` section there is nothing to add to — and the ceiling check then refuses the
+    // grant, because a section created from nothing has no parent to be a subset of.
+    for t in &delta.http_targets {
+        let Ok(hp) = bee_core::HostPort::try_from(t.clone()) else {
+            continue;
+        };
+        let http = policy.http.get_or_insert_with(Default::default);
+        if !http.targets.contains(&hp) {
+            http.targets.push(hp);
         }
     }
 }
@@ -236,6 +258,17 @@ impl ActivePolicy {
         for n in &delta.net {
             if !self.active.network.allow.contains(n) {
                 out.net.push(n.clone());
+            }
+        }
+        for t in &delta.http_targets {
+            let held = bee_core::HostPort::try_from(t.clone()).is_ok_and(|hp| {
+                self.active
+                    .http
+                    .as_ref()
+                    .is_some_and(|h| h.targets.contains(&hp))
+            });
+            if !held {
+                out.http_targets.push(t.clone());
             }
         }
         out

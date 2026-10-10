@@ -424,17 +424,11 @@ fn prompt_consent(request: &bee::skills::GrantRequest<'_>) -> bool {
     // frontmatter, but this prompt is the consent boundary itself and takes a `GrantRequest` from
     // any source, so it escapes what it prints rather than trusting an upstream check: a forged
     // prompt is a granted capability. One line per field, so nothing can smuggle in a second line.
-    let safe = bee::safe_text::safe_line;
-    eprintln!(
-        "\nskill '{}' requests extra capabilities:",
-        safe(request.skill)
-    );
-    if !request.tools.is_empty() {
-        let tools: Vec<_> = request.tools.iter().map(|t| safe(t)).collect();
-        eprintln!("  tools: {}", tools.join(", "));
-    }
-    for (path, access) in request.filesystem {
-        eprintln!("  filesystem: {} = {}", safe(path), safe(access));
+    // `render_lines` escapes every field and covers every one — net and exec included, which this
+    // prompt once silently omitted (019 P2).
+    eprintln!();
+    for line in request.render_lines() {
+        eprintln!("{line}");
     }
     eprint!("grant these (within the ceiling)? [y/N] ");
     let _ = std::io::stderr().flush();

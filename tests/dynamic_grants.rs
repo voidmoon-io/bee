@@ -425,3 +425,123 @@ async fn a_consent_sink_that_never_answers_times_out_and_denies() {
         out.dump()
     );
 }
+
+// ── 019-http-intercept P2: what the consent prompt shows, and what a denial asks for ────────────
+//
+// Two verified 007 defects (research R13). A `GrantDelta.net` or `.exec` entry was approved without
+// ever being displayed, because `GrantRequest` carried only tools and filesystem. And reactive
+// escalation matched op names the kernel never emits (`socket_connect`, `bprm_check_security`),
+// so a network or exec denial produced an empty delta.
+
+use bee::grants::escalate::{delta_from_denial, escalate};
+use bee::grants::{ActivePolicy, GrantDelta, GrantOrigin};
+use bee::sandbox::Sandbox;
+
+/// A sink that records the console rendering of every request it is asked about, then grants.
+#[derive(Default)]
+struct RenderingSink {
+    seen: Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl bee::skills::ConsentSink for RenderingSink {
+    async fn confirm(&self, r: &GrantRequest<'_>) -> bee::skills::Decision {
+        self.seen.lock().unwrap().push(r.render_lines().join("\n"));
+        bee::skills::Decision::Granted
+    }
+}
+
+/// A ceiling wide enough that every delta below is within it, so consent is always consulted.
+fn wide_ceiling() -> Policy {
+    let mut p = policy("ceil", &[("/tmp", Access::Write)]);
+    p.network.allow = vec!["1.2.3.4:443".into(), "10.0.0.5:443".into()];
+    p.exec.allow = vec!["/usr/bin/x".into(), "/bin/true".into()];
+    p
+}
+
+/// Run `delta` through the real escalation cycle and return what the operator was shown.
+async fn shown_for(delta: GrantDelta) -> String {
+    let mut ap = ActivePolicy::new(policy("base", &[]), wide_ceiling());
+    let mut reg = ToolRegistry::new();
+    let mut sb = Sandbox::host(Vec::new());
+    let sink = RenderingSink::default();
+    let out = escalate(
+        &mut ap,
+        GrantOrigin::Explicit,
+        delta,
+        Ttl::Turns(1),
+        0,
+        &sink,
+        Duration::from_secs(5),
+        &mut sb,
+        &mut reg,
+    )
+    .await;
+    assert!(out.is_granted(), "{out:?}");
+    let seen = sink.seen.lock().unwrap();
+    assert_eq!(seen.len(), 1, "consent consulted exactly once");
+    seen[0].clone()
+}
+
+// (a)
+#[tokio::test]
+async fn a_network_grant_is_shown_to_the_operator() {
+    let shown = shown_for(GrantDelta {
+        net: vec!["1.2.3.4:443".into()],
+        ..Default::default()
+    })
+    .await;
+    assert!(shown.contains("1.2.3.4:443"), "{shown}");
+}
+
+// (b)
+#[tokio::test]
+async fn an_exec_grant_is_shown_to_the_operator() {
+    let shown = shown_for(GrantDelta {
+        exec: vec!["/usr/bin/x".into()],
+        ..Default::default()
+    })
+    .await;
+    assert!(shown.contains("/usr/bin/x"), "{shown}");
+}
+
+// (c) The struct literal is exhaustive on purpose: a new `GrantDelta` field fails to compile here
+// until this test renders it too, which is exactly the review this guard exists to force.
+#[tokio::test]
+async fn every_field_of_a_grant_is_rendered() {
+    let delta = GrantDelta {
+        tools: vec!["bash".into()],
+        filesystem: [("/tmp/w".to_string(), Access::Write)]
+            .into_iter()
+            .collect(),
+        exec: vec!["/bin/true".into()],
+        net: vec!["10.0.0.5:443".into()],
+    };
+    let shown = shown_for(delta).await;
+    for needle in ["bash", "/tmp/w", "/bin/true", "10.0.0.5:443"] {
+        assert!(shown.contains(needle), "missing {needle}: {shown}");
+    }
+}
+
+// (d)
+#[test]
+fn a_connect_denial_asks_for_that_destination() {
+    let d = delta_from_denial("connect", "1.2.3.4:443");
+    assert_eq!(d.net, vec!["1.2.3.4:443".to_string()]);
+    assert!(d.exec.is_empty() && d.filesystem.is_empty());
+}
+
+// (e)
+#[test]
+fn an_exec_denial_asks_for_that_binary() {
+    let d = delta_from_denial("exec", "/usr/bin/x");
+    assert_eq!(d.exec, vec!["/usr/bin/x".to_string()]);
+    assert!(d.net.is_empty() && d.filesystem.is_empty());
+}
+
+/// Before P5 a kernel connect audit carried no target. An empty target must not become a grant of
+/// "" — it asks for nothing.
+#[test]
+fn a_connect_denial_without_a_destination_asks_for_nothing() {
+    assert!(delta_from_denial("connect", "").is_empty());
+}

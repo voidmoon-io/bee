@@ -105,6 +105,10 @@ pub async fn escalate(
         skill: origin_label(&origin),
         tools: &delta.tools,
         filesystem: &fs_display,
+        net: &delta.net,
+        exec: &delta.exec,
+        // Target-scope widening arrives with 019 US3 (`GrantDelta.http_targets`).
+        http_targets: &[],
     };
     let decision = match tokio::time::timeout(timeout, consent.confirm(&request)).await {
         Ok(d) => d,
@@ -257,20 +261,28 @@ pub fn delta_from_requires(req: &SkillRequires) -> Result<GrantDelta, String> {
     Ok(delta)
 }
 
-/// Build a minimal [`GrantDelta`] for a kernel denial (reactive path). `file_open` → write access to
-/// the target (write implies read, so it covers both a read- and a write-denial); `socket_connect` →
-/// a net rule; `bprm_check_security` → an exec-allow entry. Unknown ops yield an empty delta.
+/// Build a minimal [`GrantDelta`] for a kernel denial (reactive path). The `op` vocabulary is the
+/// kernel audit's own (`op_str` in `crates/core/src/audit.rs`): `file_open` → write access to the
+/// target (write implies read, so it covers both a read- and a write-denial); `connect` → a net rule;
+/// `exec` → an exec-allow entry. Unknown ops, and an empty target, yield an empty delta.
+///
+/// Until 019 matched these against the LSM *hook* names (`socket_connect`, `bprm_check_security`),
+/// which no audit event ever carries, so network and exec denials never escalated (research R13).
+/// A connect target reads `ip:port` only from kernels running the P5 eBPF object; on an older object
+/// it is empty, and the delta stays empty rather than granting "".
 pub fn delta_from_denial(op: &str, target: &str) -> GrantDelta {
     let mut delta = GrantDelta::default();
+    if target.is_empty() {
+        return delta;
+    }
     match op {
         "file_open" => {
             delta.filesystem.insert(target.to_string(), Access::Write);
         }
-        "socket_connect" => {
-            // `target` is already `host:port` in the audit event.
+        "connect" => {
             delta.net.push(target.to_string());
         }
-        "bprm_check_security" => {
+        "exec" => {
             delta.exec.push(target.to_string());
         }
         _ => {}

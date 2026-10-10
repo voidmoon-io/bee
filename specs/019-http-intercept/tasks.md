@@ -79,14 +79,14 @@ shippable and SHOULD land as their own PRs (git-pr-workflow).
 
 ### P2 — 007 defects (research R13)
 
-- [ ] T010 [P] Extend `tests/dynamic_grants.rs` (fails first):
+- [X] T010 [P] Extend `tests/dynamic_grants.rs` (fails first):
   - (a) a `GrantDelta` with only `net` produces a consent request whose rendered text contains the `host:port`;
   - (b) the same for `exec`;
   - (c) a test asserting every non-empty `GrantDelta` field is rendered by the console `ConsentSink`;
   - (d) `delta_from_denial("connect", "1.2.3.4:443")` yields `net = ["1.2.3.4:443"]`;
   - (e) `delta_from_denial("exec", "/usr/bin/x")` yields `exec = ["/usr/bin/x"]`.
-- [ ] T011 Add `net: &'a [String]`, `exec: &'a [String]` and `http_targets: &'a [String]` to `GrantRequest` in `src/skills/grant.rs:25-32`. Render them in every `ConsentSink` impl (console, REPL, TUI). Populate them in `escalate()` at `src/grants/escalate.rs:96-104` (depends: T010).
-- [ ] T012 Change `delta_from_denial` in `src/grants/escalate.rs:263-280` to match the kernel's op vocabulary from `crates/core/src/audit.rs` `op_str`: `"file_open"`, `"exec"` and `"connect"`. Fix the doc comment. Add a comment that kernel connect audits currently carry no target (`crates/ebpf/src/main.rs:206`), so reactive network escalation still yields an empty delta until that tracked gap closes (depends: T010).
+- [X] T011 Add `net: &'a [String]`, `exec: &'a [String]` and `http_targets: &'a [String]` to `GrantRequest` in `src/skills/grant.rs:25-32`. Render them in every `ConsentSink` impl (console, REPL, TUI). Populate them in `escalate()` at `src/grants/escalate.rs:96-104` (depends: T010).
+- [X] T012 Change `delta_from_denial` in `src/grants/escalate.rs:263-280` to match the kernel's op vocabulary from `crates/core/src/audit.rs` `op_str`: `"file_open"`, `"exec"` and `"connect"`. Fix the doc comment. Add a comment that kernel connect audits currently carry no target (`crates/ebpf/src/main.rs:206`), so reactive network escalation still yields an empty delta until that tracked gap closes (depends: T010).
 
 ### P3 — call context and environment injection (research R6)
 

@@ -110,7 +110,9 @@ pub fn start_with(tls: bool) -> (SocketAddr, Option<SocketAddr>, ShutdownHandle)
                 let c2 = c.clone();
                 tokio::spawn(async move {
                     loop {
-                        let Ok((sock, _)) = l.accept().await else { break };
+                        let Ok((sock, _)) = l.accept().await else {
+                            break;
+                        };
                         c2.https_accepts.fetch_add(1, Ordering::SeqCst);
                         let acc = acceptor.clone();
                         let c3 = c2.clone();
@@ -128,7 +130,9 @@ pub fn start_with(tls: bool) -> (SocketAddr, Option<SocketAddr>, ShutdownHandle)
             let c2 = c.clone();
             tokio::spawn(async move {
                 loop {
-                    let Ok((sock, _)) = http.accept().await else { break };
+                    let Ok((sock, _)) = http.accept().await else {
+                        break;
+                    };
                     c2.http_accepts.fetch_add(1, Ordering::SeqCst);
                     let c3 = c2.clone();
                     tokio::spawn(async move {

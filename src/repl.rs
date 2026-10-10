@@ -715,6 +715,7 @@ pub async fn run_exchange(
                 name: tc.name.clone(),
                 content: result.content.clone(),
                 is_error: result.is_error,
+                provenance: result.provenance.clone(),
             });
             audit_all.extend(audit.iter().cloned());
             recorded.push(RecordedCall {

@@ -36,6 +36,7 @@ pub mod http;
 #[cfg(feature = "scanners")]
 pub mod scanner;
 
+pub use crate::provider::Provenance;
 pub use outcome::{ToolOutcome, UnavailableReason};
 
 use crate::render_spec::{EffectSpec, PanelOp, RenderSpec, RenderTarget};
@@ -151,6 +152,11 @@ pub struct ToolResult {
     /// The effect the agent attached to the inline widget via `.effect()` (009 FR-022).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inline_effect: Option<EffectSpec>,
+    /// Where `content` came from, which decides whether it reaches the model inside an
+    /// `<untrusted-data>` envelope (019 P1). Defaults to `Harness`: a tool must opt its output *in* to
+    /// being treated as data, and every path that relays child or remote bytes does.
+    #[serde(default, skip_serializing_if = "Provenance::is_harness")]
+    pub provenance: Provenance,
 }
 
 impl ToolResult {
@@ -167,6 +173,7 @@ impl ToolResult {
             render_target: RenderTarget::Inline,
             panel_ops: Vec::new(),
             inline_effect: None,
+            provenance: Provenance::Harness,
         }
     }
 
@@ -183,6 +190,7 @@ impl ToolResult {
             render_target: RenderTarget::Inline,
             panel_ops: Vec::new(),
             inline_effect: None,
+            provenance: Provenance::Harness,
         }
     }
 
@@ -230,6 +238,11 @@ impl ToolResult {
     /// The FR-016 malformed-arguments result: `"<tool>: invalid arguments: <detail>"`.
     pub fn invalid_args(tool: &str, detail: impl std::fmt::Display) -> Self {
         ToolResult::error(format!("{tool}: invalid arguments: {detail}"))
+    }
+
+    /// This result, with its content marked as coming from `provenance` (019 P1).
+    pub fn with_provenance(self, provenance: Provenance) -> Self {
+        ToolResult { provenance, ..self }
     }
 }
 

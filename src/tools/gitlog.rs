@@ -142,11 +142,14 @@ impl Tool for GitLogTool {
                     .map(str::to_string)
                     .collect();
                 let truncated = commits.len() >= COMMIT_LIMIT;
+                // Commit messages and authors are repository content: child output, framed as
+                // untrusted data (019 P1).
                 ToolOutcome::Completed {
                     value: commits,
                     truncated,
                 }
                 .into_tool_result(render)
+                .with_provenance(crate::tools::Provenance::Child)
             }
             Some(EXIT_NOT_A_REPOSITORY) => {
                 let reason = UnavailableReason::NotARepository {

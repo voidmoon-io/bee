@@ -78,6 +78,7 @@ pub async fn run_child(
         content.push_str(&String::from_utf8_lossy(&out.stderr));
     }
     tool_result_from_output(content, out.status.code(), !out.status.success(), cap)
+        .with_provenance(crate::provider::Provenance::Child)
 }
 
 /// What a timed child left behind (016-native-tools, T039a).

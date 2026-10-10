@@ -68,14 +68,14 @@ shippable and SHOULD land as their own PRs (git-pr-workflow).
 
 ### P1 — model framing (FR-001, FR-002; contracts/model-framing.md)
 
-- [ ] T007 [P] Write `tests/tool_output_framing.rs` (fails first). It checks that:
+- [X] T007 [P] Write `tests/tool_output_framing.rs` (fails first). It checks that:
   - an `is_error` result reaches the provider request prefixed `[tool error] `;
   - `Child` content is wrapped in `<untrusted-data source=… nonce=N>…</untrusted-data nonce=N>`;
   - content containing a bare `</untrusted-data>` does not terminate the envelope;
   - `Harness` content is not wrapped;
   - nonces differ between two results.
-- [ ] T008 Add `pub enum Provenance { Harness, Child, Remote { source: String } }` and a `provenance` field defaulting to `Harness` to `ToolResult` in `src/tools.rs:115-152`. Update every constructor at `:154-231`. Set `Child` in `src/tools/exec.rs` `run_child`/`run_child_timed` results, and `Remote { source: "mcp:<server>" }` in the MCP proxy tool `src/mcp/proxy.rs` (depends: T007).
-- [ ] T009 Implement the rendering in `src/provider/rig_model.rs:306-309`: error prefix, plus a nonce'd envelope for `Child`/`Remote`. The nonce is 12 bytes from `/dev/urandom`, base64url. Add the fixed system-prompt clause from contracts/model-framing.md §Rendering.3 where the system prompt is assembled. Make `HMessage::ToolResult` carry `is_error` and `provenance` through `src/provider.rs`. Update affected snapshot tests (depends: T008).
+- [X] T008 Add `pub enum Provenance { Harness, Child, Remote { source: String } }` and a `provenance` field defaulting to `Harness` to `ToolResult` in `src/tools.rs:115-152`. Update every constructor at `:154-231`. Set `Child` in `src/tools/exec.rs` `run_child`/`run_child_timed` results, and `Remote { source: "mcp:<server>" }` in the MCP proxy tool `src/mcp/proxy.rs` (depends: T007).
+- [X] T009 Implement the rendering in `src/provider/rig_model.rs:306-309`: error prefix, plus a nonce'd envelope for `Child`/`Remote`. The nonce is 12 bytes from `/dev/urandom`, base64url. Add the fixed system-prompt clause from contracts/model-framing.md §Rendering.3 where the system prompt is assembled. Make `HMessage::ToolResult` carry `is_error` and `provenance` through `src/provider.rs`. Update affected snapshot tests (depends: T008).
 
 ### P2 — 007 defects (research R13)
 

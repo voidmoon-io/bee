@@ -133,8 +133,12 @@ impl Tool for McpToolProxy {
         params.arguments = args;
 
         match tokio::time::timeout(self.timeout, self.peer.call_tool(params)).await {
+            // The server's reply is a remote peer's bytes: framed as untrusted data (019 P1).
             Ok(Ok(res)) => {
                 call_tool_result_to_tool_result(res, crate::transcript::DEFAULT_OUTPUT_CAP)
+                    .with_provenance(crate::provider::Provenance::Remote {
+                        source: format!("mcp:{}", self.server),
+                    })
             }
             Ok(Err(e)) => {
                 use rmcp::service::ServiceError;

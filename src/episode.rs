@@ -381,6 +381,7 @@ pub async fn run_loop(
                 name: tc.name.clone(),
                 content: result.content.clone(),
                 is_error: result.is_error,
+                provenance: result.provenance.clone(),
             });
 
             // A terminal tool (`submit_flag`/`give_up`, US3) ends the episode immediately. The loop

@@ -147,6 +147,70 @@ pub struct HostSandbox {
     env: ChildEnv,
 }
 
+/// A second kernel scope beside the tool scope, holding one long-lived harness child (019 P4,
+/// research R2) — today the interception proxy worker, in its *proxy scope*.
+///
+/// A bridge: the 018 Supervisor generalises "several scopes per session" and absorbs this, deleting
+/// the field (task T092). Until then exactly one sidecar is supported, on [`EnforcedSandbox`] only.
+#[cfg(feature = "enforce")]
+pub struct SidecarScope {
+    /// Tags this scope's audit events (`"proxy"`).
+    pub label: String,
+    pub scope: bee_userspace::Scope,
+    /// The plan currently installed, kept so a failed widening can be rolled back to it.
+    pub plan: bee_userspace::EnforcementPlan,
+}
+
+/// Why a sandbox cannot host a sidecar scope. Refusing is the fail-closed answer: a proxy that no
+/// kernel scope confines is an unconfined deputy (Constitution III).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("sidecar scope unsupported: {reason}")]
+pub struct SidecarUnsupported {
+    pub reason: &'static str,
+}
+
+/// An audit event from the drain, tagged with the scope it came from: `None` for the tool scope,
+/// the sidecar's label otherwise.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaggedAudit {
+    pub event: AuditEvent,
+    pub scope_label: Option<String>,
+}
+
+/// Route one drained event (019 P4). The tool scope's events pass untagged; the sidecar's are tagged
+/// with its label, which also becomes the event's `scope_id` so the tag survives into transcripts;
+/// every other cgroup's are dropped. With no sidecar this is exactly the single-scope filter it
+/// replaces.
+pub fn route_audit(
+    ev: &AuditEvent,
+    tool_cg: u64,
+    sidecar: Option<(u64, &str)>,
+) -> Option<TaggedAudit> {
+    if ev.cgroup_id == tool_cg {
+        return Some(TaggedAudit {
+            event: ev.clone(),
+            scope_label: None,
+        });
+    }
+    match sidecar {
+        Some((cg, label)) if ev.cgroup_id == cg => {
+            let mut event = ev.clone();
+            event.scope_id = Some(label.to_string());
+            Some(TaggedAudit {
+                event,
+                scope_label: Some(label.to_string()),
+            })
+        }
+        _ => None,
+    }
+}
+
+/// The cgroup a sidecar reload writes to. Never falls back to the tool scope: reloading the tool
+/// scope with the proxy scope's rules would hand tool children the targets directly.
+pub fn sidecar_reload_target(_tool_cg: u64, sidecar_cg: Option<u64>) -> Result<u64, String> {
+    sidecar_cg.ok_or_else(|| "no sidecar scope to reload".to_string())
+}
+
 /// A tool child confined to a live bee scope, with its audit ring.
 #[cfg(feature = "enforce")]
 pub struct EnforcedSandbox {
@@ -157,6 +221,10 @@ pub struct EnforcedSandbox {
     pub scope: bee_userspace::Scope,
     pub reader: bee_userspace::events::AuditReader,
     env: ChildEnv,
+    /// The optional second scope (019 P4). Its events are drained alongside the tool scope's and
+    /// buffered here until [`Sandbox::drain_sidecar_audit`] collects them.
+    sidecar: Option<SidecarScope>,
+    sidecar_audit: Vec<AuditEvent>,
 }
 
 /// A tool child confined to a live bee scope whose audit events arrive via a demux subscription
@@ -199,6 +267,51 @@ impl Sandbox {
 
 #[cfg(feature = "enforce")]
 impl EnforcedSandbox {
+    /// Drain the ring once: return the tool scope's events, buffer the sidecar's (019 P4).
+    fn drain_into_buffers(&mut self) -> Vec<AuditEvent> {
+        let tool_cg = self.scope.cgroup_id;
+        let side = self
+            .sidecar
+            .as_ref()
+            .map(|s| (s.scope.cgroup_id, s.label.clone()));
+        let mut tool = Vec::new();
+        let sidecar_buf = &mut self.sidecar_audit;
+        self.reader.drain(&mut |ev| {
+            let routed = route_audit(&ev, tool_cg, side.as_ref().map(|(c, l)| (*c, l.as_str())));
+            match routed {
+                Some(TaggedAudit {
+                    event,
+                    scope_label: None,
+                }) => tool.push(event),
+                Some(TaggedAudit { event, .. }) => sidecar_buf.push(event),
+                None => {}
+            }
+        });
+        tool
+    }
+
+    fn reload_sidecar(&mut self, policy: &bee_core::CompiledPolicy) -> Result<(), String> {
+        use bee_userspace::{EnforcementPlan, ScopeMode};
+        let plan = EnforcementPlan::prepare(policy, ScopeMode::Enforce)
+            .map_err(|e| format!("sidecar reload plan: {e}"))?;
+        self.install_sidecar_plan(plan)
+    }
+
+    fn install_sidecar_plan(&mut self, plan: bee_userspace::EnforcementPlan) -> Result<(), String> {
+        let target = sidecar_reload_target(
+            self.scope.cgroup_id,
+            self.sidecar.as_ref().map(|s| s.scope.cgroup_id),
+        )?;
+        let side = self.sidecar.as_mut().expect("target implies a sidecar");
+        let new_keys = self
+            .engine
+            .reload_scope(target, &plan, &side.scope.net_keys)
+            .map_err(|e| format!("sidecar reload scope: {e}"))?;
+        side.scope.net_keys = new_keys;
+        side.plan = plan;
+        Ok(())
+    }
+
     /// Compile `policy` and hand the fresh plan to `Engine::reload_scope`, updating the scope's
     /// tracked `NET_ALLOW` keys. On any error the prior enforced maps are left in place.
     fn reload(&mut self, policy: &bee_core::Policy) -> Result<(), String> {
@@ -288,6 +401,8 @@ impl Sandbox {
             scope,
             reader,
             env: ChildEnv::new(strip_env),
+            sidecar: None,
+            sidecar_audit: Vec::new(),
         }))
     }
 
@@ -304,6 +419,120 @@ impl Sandbox {
             subscription,
             env: ChildEnv::new(strip_env),
         }))
+    }
+
+    /// Whether this sandbox can host a sidecar scope (019 P4). Only an [`EnforcedSandbox`] can: a host
+    /// sandbox has no kernel scope to give it, and the concurrent runner's engine is shared and owned
+    /// elsewhere (018 generalises this).
+    pub fn sidecar_supported(&self) -> Result<(), SidecarUnsupported> {
+        match self {
+            Sandbox::Host(_) => Err(SidecarUnsupported {
+                reason: "host sandbox has no kernel scope",
+            }),
+            #[cfg(feature = "enforce")]
+            Sandbox::Enforced(_) => Ok(()),
+            #[cfg(feature = "concurrent")]
+            Sandbox::Concurrent(_) => Err(SidecarUnsupported {
+                reason: "concurrent runner; see specs/018",
+            }),
+        }
+    }
+
+    /// Attach a sidecar scope created on this sandbox's engine before it moved in (019 P4). Refused,
+    /// fail-closed, on any sandbox that cannot host one; the scope is handed back so the caller can
+    /// tear it down.
+    #[cfg(feature = "enforce")]
+    #[allow(clippy::result_large_err)]
+    pub fn with_sidecar(
+        self,
+        sidecar: SidecarScope,
+    ) -> Result<Self, (Self, SidecarScope, SidecarUnsupported)> {
+        if let Err(e) = self.sidecar_supported() {
+            return Err((self, sidecar, e));
+        }
+        match self {
+            Sandbox::Enforced(mut e) => {
+                e.sidecar = Some(sidecar);
+                Ok(Sandbox::Enforced(e))
+            }
+            other => {
+                let e = SidecarUnsupported {
+                    reason: "not an enforced sandbox",
+                };
+                Err((other, sidecar, e))
+            }
+        }
+    }
+
+    /// The sidecar's cgroup id, when one is attached.
+    #[cfg(feature = "enforce")]
+    pub fn sidecar_cgroup_id(&self) -> Option<u64> {
+        match self {
+            Sandbox::Enforced(e) => e.sidecar.as_ref().map(|s| s.scope.cgroup_id),
+            _ => None,
+        }
+    }
+
+    /// A fork-safe `pre_exec` closure joining the sidecar scope — what the sidecar's one child is
+    /// spawned with. `Err` when there is no sidecar.
+    #[cfg(feature = "enforce")]
+    pub fn sidecar_join_closure(
+        &self,
+    ) -> Result<impl Fn() -> io::Result<()> + Send + Sync + 'static, String> {
+        match self {
+            Sandbox::Enforced(e) => match &e.sidecar {
+                Some(s) => s.scope.join_closure().map_err(|err| err.to_string()),
+                None => Err("no sidecar scope".into()),
+            },
+            _ => Err("no sidecar scope".into()),
+        }
+    }
+
+    /// Recompile `policy` into the **sidecar** scope's maps (019 US3). On error the prior maps stay
+    /// in place, exactly as [`Sandbox::reload`] does for the tool scope.
+    #[cfg_attr(not(feature = "enforce"), allow(unused_variables))]
+    pub fn reload_sidecar(&mut self, policy: &bee_core::CompiledPolicy) -> Result<(), String> {
+        match self {
+            #[cfg(feature = "enforce")]
+            Sandbox::Enforced(e) => e.reload_sidecar(policy),
+            _ => Err("no sidecar scope to reload".into()),
+        }
+    }
+
+    /// Restore the sidecar's previous plan — the rollback after a widening the worker could not
+    /// apply (019 US3). Reinstalls exactly what was there.
+    #[cfg(feature = "enforce")]
+    pub fn reload_sidecar_plan(
+        &mut self,
+        plan: &bee_userspace::EnforcementPlan,
+    ) -> Result<(), String> {
+        match self {
+            Sandbox::Enforced(e) => e.install_sidecar_plan(plan.clone()),
+            _ => Err("no sidecar scope to reload".into()),
+        }
+    }
+
+    /// The sidecar's currently installed plan, for a caller that wants to roll back to it.
+    #[cfg(feature = "enforce")]
+    pub fn sidecar_plan(&self) -> Option<&bee_userspace::EnforcementPlan> {
+        match self {
+            Sandbox::Enforced(e) => e.sidecar.as_ref().map(|s| &s.plan),
+            _ => None,
+        }
+    }
+
+    /// The sidecar scope's kernel events drained since the last call, each with `scope_id` set to
+    /// the sidecar's label. Kept apart from [`drain_audit`](Self::drain_audit) on purpose: a proxy
+    /// scope denial is not the tool call's denial and must never drive tool-scope escalation.
+    pub fn drain_sidecar_audit(&mut self) -> Vec<AuditEvent> {
+        match self {
+            #[cfg(feature = "enforce")]
+            Sandbox::Enforced(e) => {
+                e.drain_into_buffers();
+                std::mem::take(&mut e.sidecar_audit)
+            }
+            _ => Vec::new(),
+        }
     }
 
     /// The scope's cgroup id, when enforcing (used to filter audit events).
@@ -369,16 +598,7 @@ impl Sandbox {
         match self {
             Sandbox::Host(_) => Vec::new(),
             #[cfg(feature = "enforce")]
-            Sandbox::Enforced(e) => {
-                let cg = e.scope.cgroup_id;
-                let mut out = Vec::new();
-                e.reader.drain(&mut |ev| {
-                    if ev.cgroup_id == cg {
-                        out.push(ev);
-                    }
-                });
-                out
-            }
+            Sandbox::Enforced(e) => e.drain_into_buffers(),
             #[cfg(feature = "concurrent")]
             Sandbox::Concurrent(c) => {
                 // The demux already routes only this scope's events here; re-filter by cgroup_id
@@ -404,10 +624,24 @@ impl Sandbox {
     pub fn teardown(&self) -> Result<(), String> {
         #[cfg(feature = "enforce")]
         if let Sandbox::Enforced(e) = self {
-            return e
+            // Sidecar scope first, then the tool scope (019 P4). The caller has already stopped the
+            // sidecar's process; the kill here is the backstop for anything it left behind. A
+            // sidecar failure is reported, but the tool scope is still torn down — leaving it up
+            // would compound one escape with a second.
+            let side = e.sidecar.as_ref().map(|s| {
+                s.scope
+                    .teardown()
+                    .map_err(|err| format!("sidecar scope teardown failed: {err}"))
+            });
+            let tool = e
                 .scope
                 .teardown()
                 .map_err(|err| format!("scope teardown failed: {err}"));
+            return match (side, tool) {
+                (Some(Err(a)), Err(b)) => Err(format!("{a}; {b}")),
+                (Some(Err(a)), Ok(())) => Err(a),
+                (_, r) => r,
+            };
         }
         #[cfg(feature = "concurrent")]
         if let Sandbox::Concurrent(c) = self {
@@ -441,6 +675,68 @@ fn restrict_env(cmd: &mut Command, keys: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ev(cg: u64) -> AuditEvent {
+        AuditEvent {
+            ts: "1970-01-01T00:00:00Z".into(),
+            scope_id: Some("bee-session-1".into()),
+            cgroup_id: cg,
+            pid: Some(1),
+            tgid: Some(1),
+            op: "connect".into(),
+            decision: "denied".into(),
+            errno: -1,
+            target: "10.0.0.5:443".into(),
+        }
+    }
+
+    // 019 P4 (T016): the drain keeps the tool scope's events untagged, tags the sidecar's with its
+    // label, and drops every other cgroup's — so a second scope can never contaminate the first's
+    // audit, and nothing from an unrelated scope leaks into either.
+    #[test]
+    fn route_audit_separates_tool_and_sidecar_scopes() {
+        let side = Some((20u64, "proxy"));
+        let t = route_audit(&ev(10), 10, side).expect("tool event kept");
+        assert_eq!(t.scope_label, None);
+        assert_eq!(t.event.cgroup_id, 10);
+
+        let s = route_audit(&ev(20), 10, side).expect("sidecar event kept");
+        assert_eq!(s.scope_label.as_deref(), Some("proxy"));
+        assert_eq!(s.event.scope_id.as_deref(), Some("proxy"));
+
+        assert!(
+            route_audit(&ev(30), 10, side).is_none(),
+            "foreign cgroup dropped"
+        );
+    }
+
+    #[test]
+    fn route_audit_without_a_sidecar_is_the_single_scope_filter() {
+        assert!(route_audit(&ev(10), 10, None).is_some());
+        assert!(route_audit(&ev(20), 10, None).is_none());
+        assert_eq!(route_audit(&ev(10), 10, None).unwrap().event, ev(10));
+    }
+
+    #[test]
+    fn a_sidecar_reload_targets_the_sidecar_cgroup() {
+        assert_eq!(sidecar_reload_target(10, Some(20)), Ok(20));
+        assert_ne!(sidecar_reload_target(10, Some(20)), Ok(10));
+        assert!(
+            sidecar_reload_target(10, None).is_err(),
+            "no sidecar ⇒ refuse, never the tool scope"
+        );
+    }
+
+    // T018: the concurrent runner and the host sandbox refuse a sidecar — fail closed rather than run
+    // a proxy that no kernel scope confines.
+    #[test]
+    fn a_host_sandbox_refuses_a_sidecar_scope() {
+        let sb = Sandbox::host(Vec::new());
+        assert!(matches!(
+            sb.sidecar_supported(),
+            Err(SidecarUnsupported { .. })
+        ));
+    }
 
     fn env_of(cmd: &Command) -> Vec<(String, Option<String>)> {
         cmd.get_envs()

@@ -99,12 +99,12 @@ shippable and SHOULD land as their own PRs (git-pr-workflow).
 
 ### P4 — sidecar scope (research R2)
 
-- [ ] T016 [P] Write tests (fail first):
+- [X] T016 [P] Write tests (fail first):
   - Extract the drain filter at `src/sandbox.rs:247-270` into a pure function, `fn route_audit(ev: &AuditEvent, tool_cg: u64, sidecar: Option<(u64, &str)>) -> Option<TaggedAudit>`, and unit-test it in `src/sandbox.rs` `#[cfg(test)]`. It returns tool-scope events untagged, sidecar events tagged with the sidecar label, and `None` for every other cgroup. The existing single-scope behaviour is unchanged when `sidecar` is `None`.
   - Unit-test that `reload_sidecar` targets the sidecar cgroup id. Factor the cgroup-id choice into a pure helper so this test needs no engine; no mock engine exists in `crates/userspace`, and none is added.
   - The live kernel half is covered by the `http-proxy-scope` VM case (T048).
-- [ ] T017 Add `sidecar: Option<SidecarScope { label, scope: Scope, cgroup_id, plan }>` to `EnforcedSandbox` in `src/sandbox.rs:58`. Add `Sandbox::with_sidecar(...)`, used before the engine moves (`src/sandbox.rs:153-166`). Change the drain filter at `src/sandbox.rs:254-257` to keep events whose cgroup is the tool scope **or** the sidecar, and add `scope_label: Option<String>` to the drained event wrapper. Add `Sandbox::reload_sidecar(&CompiledPolicy)` via `Engine::reload_scope`, plus `Sandbox::sidecar_join_closure()`. Teardown order: sidecar process (caller), sidecar scope, then tool scope (depends: T016).
-- [ ] T018 Make `Sandbox::Concurrent` refuse sidecar creation with a typed error, `SidecarUnsupported { reason: "concurrent runner; see specs/018" }` (fail closed). Add a unit test.
+- [X] T017 Add `sidecar: Option<SidecarScope { label, scope: Scope, cgroup_id, plan }>` to `EnforcedSandbox` in `src/sandbox.rs:58`. Add `Sandbox::with_sidecar(...)`, used before the engine moves (`src/sandbox.rs:153-166`). Change the drain filter at `src/sandbox.rs:254-257` to keep events whose cgroup is the tool scope **or** the sidecar, and add `scope_label: Option<String>` to the drained event wrapper. Add `Sandbox::reload_sidecar(&CompiledPolicy)` via `Engine::reload_scope`, plus `Sandbox::sidecar_join_closure()`. Teardown order: sidecar process (caller), sidecar scope, then tool scope (depends: T016).
+- [X] T018 Make `Sandbox::Concurrent` refuse sidecar creation with a typed error, `SidecarUnsupported { reason: "concurrent runner; see specs/018" }` (fail closed). Add a unit test.
 
 ### P5 — kernel connect target (FR-009; research R13)
 

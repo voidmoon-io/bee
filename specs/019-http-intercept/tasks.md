@@ -391,7 +391,7 @@ back clustered with outliers flagged.
 
 **Independent Test**: spec US6, in `tests/intercept_fuzz.rs` (SC-006).
 
-- [ ] T075 [P] [US6] Write `tests/intercept_fuzz.rs` (fails first):
+- [X] T075 [P] [US6] Write `tests/intercept_fuzz.rs` (fails first):
   - 1,000 variants against a fixture route that 500s for 2 specific payloads: both appear as outlier groups, 10 of 10 runs;
   - the summary stays ≤ 16 KiB;
   - the planned count above `max_requests_per_run` is refused before any send (fixture saw zero requests);
@@ -399,13 +399,13 @@ back clustered with outliers flagged.
   - an out-of-scope variant, made by a payload in the `Host` position, is recorded as refused and not counted as a response;
   - `rps` arguments can only lower the policy limit;
   - `project_file` payloads are read through a `cat` child in the tool scope, not the harness. A path the scope denies yields a kernel-denied refusal, and a scope without `cat` granted yields `NotGranted`.
-- [ ] T076 [US6] Implement template expansion in `src/intercept/fuzz.rs`:
+- [X] T076 [US6] Implement template expansion in `src/intercept/fuzz.rs`:
   - `sniper`, `battering_ram`, `pitchfork` and `cluster_bomb` modes over `§`-delimited markers;
   - payload sets: `builtin` (ship `sqli-basic`, `xss-basic`, `path-traversal` and `common-paths` as `include_str!` lists under `src/intercept/payloads/`), `range`, `inline`, and `project_file`;
   - `project_file` is read exactly as `read_file` does (`src/tools/files.rs:44-57`): `run_child(sandbox, "cat", ["--", path], None, 1 MiB)` in the **tool scope**, so the kernel decides whether the file is readable (016 rule: the harness never opens project files). If `cat` is not in the scope's exec allowlist, return `Unavailable { NotGranted }`. Payload files are capped at 1 MiB and 100,000 lines; above that, `invalid_args` names the limit.
-- [ ] T077 [US6] Handle `fuzz.start`/`fuzz.cancel` in the worker in `src/intercept/worker/mod.rs`: batches of ≤ 256, each variant through `scope.rs` and `pace.rs`, emitting `exchange` frames tagged with `fuzz_run`, then `fuzz.done`.
-- [ ] T078 [US6] Implement clustering in `src/intercept/fuzz.rs` per research R15 (length and word buckets, reflection including URL/HTML-decoded payloads, MAD-based `slow`, outlier rule) producing `ClusterSummary`. Persist the `fuzz_runs` row.
-- [ ] T079 [US6] Implement the `http_fuzz` tool in `src/tools/http.rs` and register it (depends: T076–T078).
+- [X] T077 [US6] Handle `fuzz.start`/`fuzz.cancel` in the worker in `src/intercept/worker/mod.rs`: batches of ≤ 256, each variant through `scope.rs` and `pace.rs`, emitting `exchange` frames tagged with `fuzz_run`, then `fuzz.done`.
+- [X] T078 [US6] Implement clustering in `src/intercept/fuzz.rs` per research R15 (length and word buckets, reflection including URL/HTML-decoded payloads, MAD-based `slow`, outlier rule) producing `ClusterSummary`. Persist the `fuzz_runs` row.
+- [X] T079 [US6] Implement the `http_fuzz` tool in `src/tools/http.rs` and register it (depends: T076–T078).
 
 ---
 

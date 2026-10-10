@@ -408,7 +408,7 @@ async fn an_egress_host_is_not_forwarded_or_testable() {
                 host: "127.0.0.1".into(),
                 port: http.port(),
             },
-            b"GET / HTTP/1.1\r\nHost: x\r\n\r\n".to_vec(),
+            format!("GET / HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n", http.port()).into_bytes(),
             WireCtx {
                 call_id: "toolu_f2".into(),
                 turn: 1,
@@ -437,8 +437,8 @@ async fn a_websocket_upgrade_gets_501() {
     let resp = through(
         p.addr(),
         format!(
-            "GET http://127.0.0.1:{}/ws HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\
-             Proxy-Authorization: Basic {}\r\n\r\n",
+            "GET http://127.0.0.1:{0}/ws HTTP/1.1\r\nHost: 127.0.0.1:{0}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\
+             Proxy-Authorization: Basic {1}\r\n\r\n",
             http.port(),
             basic("toolu_g", &tok)
         ),
@@ -638,7 +638,7 @@ async fn a_dead_worker_restarts_once_then_fails_closed() {
                     host: "127.0.0.1".into(),
                     port: http.port(),
                 },
-                format!("GET /search?q={call} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                format!("GET /search?q={call} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n", http.port())
                     .into_bytes(),
                 WireCtx {
                     call_id: call.into(),

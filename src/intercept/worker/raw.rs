@@ -361,6 +361,20 @@ pub fn request_line(raw: &[u8]) -> (Option<String>, Option<String>) {
     (method, target)
 }
 
+/// Every `Host` header value in a raw request head.
+pub fn host_headers(raw: &[u8]) -> Vec<String> {
+    let (head, _) = split_head(raw);
+    String::from_utf8_lossy(head)
+        .split('\n')
+        .skip(1)
+        .map(|l| l.trim_end_matches('\r'))
+        .take_while(|l| !l.is_empty())
+        .filter_map(|l| l.split_once(':'))
+        .filter(|(k, _)| k.trim().eq_ignore_ascii_case("host"))
+        .map(|(_, v)| v.trim().to_string())
+        .collect()
+}
+
 /// Split a raw request into head (through the blank line) and body.
 pub fn split_head(raw: &[u8]) -> (&[u8], &[u8]) {
     for i in 0..raw.len() {

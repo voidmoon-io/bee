@@ -131,6 +131,32 @@ impl ScopeChecker {
         }
     }
 
+    /// The `Host` header of a request to `host:port` must name an in-scope **target** too (T036).
+    /// Otherwise one in-scope address could be used to test any virtual host behind it — a name the
+    /// operator never listed. A request with no `Host` header passes (HTTP/1.0); one with several is
+    /// checked on each.
+    pub fn check_host_header(
+        &self,
+        values: &[String],
+        host: &str,
+        port: u16,
+    ) -> Result<(), Refusal> {
+        for v in values {
+            let named = match split_authority(v.trim()) {
+                Some((h, p)) => (h, p),
+                None => (strip_brackets(v.trim()).to_string(), port),
+            };
+            let same =
+                normalize_host(&named.0) == normalize_host(strip_brackets(host)) && named.1 == port;
+            if !same && self.check_testable(&named.0, named.1).is_err() {
+                let mut r = Refusal::new(ProxyEventKind::RefusedOutOfScope, &named.0, named.1);
+                r.detail = serde_json::json!({ "reason": "Host header names an out-of-scope host", "authority": format!("{host}:{port}") });
+                return Err(r);
+            }
+        }
+        Ok(())
+    }
+
     /// Whether `host` is decrypted (∈ `inspect`).
     pub fn is_inspected(&self, host: &str) -> bool {
         self.scope.inspect.iter().any(|p| p.matches(host))
@@ -292,6 +318,36 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(lit, "10.0.0.5:8080".parse().unwrap());
+    }
+
+    #[test]
+    fn a_host_header_must_name_an_in_scope_target() {
+        let c = checker();
+        assert!(c
+            .check_host_header(&["app.test".into()], "app.test", 443)
+            .is_ok());
+        assert!(c
+            .check_host_header(&["APP.test:443".into()], "app.test", 443)
+            .is_ok());
+        assert!(
+            c.check_host_header(&[], "app.test", 443).is_ok(),
+            "HTTP/1.0: no Host"
+        );
+        // Another in-scope target on the same address is fine; an unlisted vhost is not.
+        assert!(c
+            .check_host_header(&["10.0.0.5:8080".into()], "app.test", 443)
+            .is_ok());
+        let r = c
+            .check_host_header(&["admin.internal".into()], "app.test", 443)
+            .unwrap_err();
+        assert_eq!(r.kind, ProxyEventKind::RefusedOutOfScope);
+        assert!(c
+            .check_host_header(&["app.test".into(), "evil.test".into()], "app.test", 443)
+            .is_err());
+        // An egress host is never testable, even by Host header.
+        assert!(c
+            .check_host_header(&["crates.io:443".into()], "app.test", 443)
+            .is_err());
     }
 
     #[test]

@@ -34,6 +34,8 @@ pub mod gitlog;
 #[cfg(feature = "intercept")]
 pub mod http;
 #[cfg(feature = "intercept")]
+pub mod http_fuzz;
+#[cfg(feature = "intercept")]
 pub mod http_get;
 #[cfg(feature = "intercept")]
 pub mod http_history;
@@ -104,6 +106,7 @@ pub const HTTP_TOOLS: &[&str] = &[
     "http_history",
     "http_replay",
     "http_sitemap",
+    "http_fuzz",
 ];
 
 /// Every tool name the harness knows how to build. A scenario may only list names from this set

@@ -63,6 +63,8 @@ pub struct Worker {
     pub limits: HttpLimits,
     /// The session CA, when `inspect` is non-empty (US4). Its key never leaves this process.
     ca: Option<mitm::SessionCa>,
+    /// Fuzz runs in flight (US6).
+    fuzz: Mutex<HashMap<String, Arc<FuzzRun>>>,
 }
 
 impl Worker {
@@ -75,6 +77,7 @@ impl Worker {
         let limits = scope.limits;
         Worker {
             ca,
+            fuzz: Mutex::new(HashMap::new()),
             session_id,
             scope: RwLock::new(ScopeChecker::new(scope)),
             creds: Mutex::new(HashMap::new()),
@@ -325,21 +328,57 @@ async fn control_loop<R: AsyncRead + Unpin>(
                 let bytes = segs.into_iter().next().unwrap_or_default();
                 let w = worker.clone();
                 tokio::spawn(async move {
-                    handle_send(&w, req_id, raw, timeout_ms, ctx, kind, parent, tags, bytes).await;
+                    send_one(
+                        &w,
+                        Some(req_id),
+                        raw,
+                        timeout_ms,
+                        ctx,
+                        kind,
+                        parent,
+                        None,
+                        tags,
+                        bytes,
+                    )
+                    .await;
                 });
             }
             ToWorker::Shutdown => return Ok(()),
-            ToWorker::FuzzStart { run_id, .. } | ToWorker::FuzzCancel { run_id } => {
-                worker.emit(
-                    FromWorker::FuzzDone {
-                        run_id,
-                        sent: 0,
-                        refused: 0,
-                        failed: 0,
-                        state: "unsupported".into(),
-                    },
-                    Vec::new(),
-                );
+            ToWorker::FuzzStart {
+                run_id,
+                raw,
+                timeout_ms,
+                ctx,
+                count: _,
+                offset,
+                last,
+                rps,
+                concurrency,
+            } => {
+                use std::sync::atomic::Ordering::SeqCst;
+                let run = worker.fuzz_run(&run_id, rps, concurrency);
+                run.outstanding.fetch_add(1, SeqCst);
+                if last {
+                    run.last_seen.store(true, SeqCst);
+                }
+                tokio::spawn(fuzz_batch(
+                    worker.clone(),
+                    run_id,
+                    run,
+                    raw,
+                    timeout_ms,
+                    ctx,
+                    offset,
+                    segs,
+                ));
+            }
+            ToWorker::FuzzCancel { run_id } => {
+                let run = worker.fuzz.lock().expect("fuzz lock").get(&run_id).cloned();
+                if let Some(run) = run {
+                    run.cancelled
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    worker.maybe_finish(&run_id, &run);
+                }
             }
             ToWorker::RuleAdd { req_id, .. }
             | ToWorker::RuleRemove { req_id, .. }
@@ -365,31 +404,33 @@ async fn control_loop<R: AsyncRead + Unpin>(
     }
 }
 
-/// A model-originated request: re-check scope (proxy-control invariant 2 — the harness checked too),
-/// pace, resolve with the drift check, then send byte-exact.
+/// A model-originated request: re-check scope (proxy-control invariant 2 — the harness may have
+/// checked too), pace, resolve with the drift check, then send byte-exact. Shared by `send` and every
+/// fuzz variant. Returns how it ended, for a fuzz run's counts.
 #[allow(clippy::too_many_arguments)]
-async fn handle_send(
+async fn send_one(
     worker: &Worker,
-    req_id: u64,
+    req_id: Option<u64>,
     raw: RawTarget,
     timeout_ms: u64,
     ctx: WireCtx,
     kind: OriginKind,
     parent: Option<String>,
+    fuzz_run: Option<String>,
     tags: Vec<String>,
     bytes: Vec<u8>,
-) {
+) -> SendEnd {
     let (method, target) = raw::request_line(&bytes);
     let (req_head, req_body) = raw::split_head(&bytes);
     let mut rec = ExchangeRecord {
-        req_id: Some(req_id),
+        req_id,
         call_id: Some(ctx.call_id.clone()),
         turn: Some(ctx.turn),
         origin: Origin {
             kind,
             path: SendPath::Raw,
             parent,
-            fuzz_run: None,
+            fuzz_run,
             rule_ids: vec![],
         },
         scheme: raw.scheme.clone(),
@@ -417,7 +458,10 @@ async fn handle_send(
     };
 
     let scope = worker.scope();
-    let addr = match scope.check_testable(&raw.host, raw.port) {
+    let checked = scope
+        .check_testable(&raw.host, raw.port)
+        .and_then(|_| scope.check_host_header(&raw::host_headers(&bytes), &raw.host, raw.port));
+    let addr = match checked {
         Err(r) => {
             refused(&mut rec, r);
             None
@@ -468,10 +512,141 @@ async fn handle_send(
             Err(e) => rec.outcome = Outcome::Failed { reason: e },
         }
     }
+    let end = match &rec.outcome {
+        Outcome::Refused { .. } => SendEnd::Refused,
+        Outcome::Failed { .. } => SendEnd::Failed,
+        _ => SendEnd::Sent,
+    };
     worker.emit(
         FromWorker::Exchange(rec),
         vec![req_head.to_vec(), req_body.to_vec(), resp_head, resp_body],
     );
+    end
+}
+
+/// How one send ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendEnd {
+    Sent,
+    Refused,
+    Failed,
+}
+
+/// One fuzz run in the worker (US6): its own pacer — never looser than the policy's, which every
+/// variant also passes through — its counts, and its batches in flight.
+pub struct FuzzRun {
+    pacer: pace::Pacer,
+    sent: std::sync::atomic::AtomicU32,
+    refused: std::sync::atomic::AtomicU32,
+    failed: std::sync::atomic::AtomicU32,
+    outstanding: std::sync::atomic::AtomicU32,
+    last_seen: std::sync::atomic::AtomicBool,
+    cancelled: std::sync::atomic::AtomicBool,
+    done: std::sync::atomic::AtomicBool,
+}
+
+impl Worker {
+    fn fuzz_run(&self, id: &str, rps: u32, concurrency: u32) -> Arc<FuzzRun> {
+        self.fuzz
+            .lock()
+            .expect("fuzz lock")
+            .entry(id.to_string())
+            .or_insert_with(|| {
+                Arc::new(FuzzRun {
+                    pacer: pace::Pacer::new(
+                        rps.clamp(1, self.limits.rps),
+                        concurrency.clamp(1, self.limits.concurrency),
+                    ),
+                    sent: Default::default(),
+                    refused: Default::default(),
+                    failed: Default::default(),
+                    outstanding: Default::default(),
+                    last_seen: Default::default(),
+                    cancelled: Default::default(),
+                    done: Default::default(),
+                })
+            })
+            .clone()
+    }
+
+    /// Emit `fuzz.done` once: when the last batch has arrived and no batch is still running.
+    fn maybe_finish(&self, id: &str, run: &FuzzRun) {
+        use std::sync::atomic::Ordering::SeqCst;
+        let finished = run.outstanding.load(SeqCst) == 0
+            && (run.last_seen.load(SeqCst) || run.cancelled.load(SeqCst));
+        if finished && !run.done.swap(true, SeqCst) {
+            self.fuzz.lock().expect("fuzz lock").remove(id);
+            self.emit(
+                FromWorker::FuzzDone {
+                    run_id: id.to_string(),
+                    sent: run.sent.load(SeqCst),
+                    refused: run.refused.load(SeqCst),
+                    failed: run.failed.load(SeqCst),
+                    state: if run.cancelled.load(SeqCst) {
+                        "cancelled".into()
+                    } else {
+                        "completed".into()
+                    },
+                },
+                Vec::new(),
+            );
+        }
+    }
+}
+
+/// One batch of a fuzz run: every variant through scope, the run's pacer and the session's, then the
+/// raw writer. Variants run concurrently up to the run's concurrency.
+#[allow(clippy::too_many_arguments)]
+async fn fuzz_batch(
+    worker: Arc<Worker>,
+    run_id: String,
+    run: Arc<FuzzRun>,
+    raw: RawTarget,
+    timeout_ms: u64,
+    ctx: WireCtx,
+    offset: u32,
+    variants: Vec<Vec<u8>>,
+) {
+    use std::sync::atomic::Ordering::SeqCst;
+    let mut tasks = tokio::task::JoinSet::new();
+    for (i, bytes) in variants.into_iter().enumerate() {
+        if run.cancelled.load(SeqCst) {
+            break;
+        }
+        let permit = run.pacer.acquire().await;
+        let (w, r, raw, ctx, id) = (
+            worker.clone(),
+            run.clone(),
+            raw.clone(),
+            ctx.clone(),
+            run_id.clone(),
+        );
+        let idx = offset + i as u32;
+        tasks.spawn(async move {
+            let _permit = permit;
+            let end = send_one(
+                &w,
+                None,
+                raw,
+                timeout_ms,
+                ctx,
+                OriginKind::Fuzz,
+                None,
+                Some(id),
+                vec!["fuzz".into(), format!("v{idx}")],
+                bytes,
+            )
+            .await;
+            match end {
+                SendEnd::Sent => r.sent.fetch_add(1, SeqCst),
+                SendEnd::Refused => r.refused.fetch_add(1, SeqCst),
+                SendEnd::Failed => r.failed.fetch_add(1, SeqCst),
+            };
+        });
+    }
+    while tasks.join_next().await.is_some() {}
+    run.outstanding.fetch_sub(1, SeqCst);
+    worker.maybe_finish(&run_id, &run);
 }
 
 /// Verify fd 3 is a listening IPv4-loopback TCP socket and take ownership of it.

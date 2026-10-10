@@ -96,6 +96,9 @@ pub enum ToWorker {
         timeout_ms: u64,
         ctx: WireCtx,
         count: u32,
+        /// Index of this batch's first variant within the run; variant `i` is tagged `v{offset+i}`.
+        #[serde(default)]
+        offset: u32,
         /// Last batch of the run.
         last: bool,
         /// Effective limits — only ever ≤ the policy's, which the worker also enforces.
@@ -597,6 +600,7 @@ mod tests {
                 timeout_ms: 5,
                 ctx: ctx(),
                 count: 2,
+                offset: 0,
                 last: true,
                 rps: 1,
                 concurrency: 1,

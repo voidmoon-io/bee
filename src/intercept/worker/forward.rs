@@ -48,7 +48,16 @@ pub async fn handle(
     let host = auth.host().trim_matches(['[', ']']).to_string();
     let port = auth.port_u16().unwrap_or(80);
     let scope = worker.scope();
-    if let Err(r) = scope.check_testable(&host, port) {
+    let hosts: Vec<String> = req
+        .headers()
+        .get_all(hyper::header::HOST)
+        .iter()
+        .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned())
+        .collect();
+    if let Err(r) = scope
+        .check_testable(&host, port)
+        .and_then(|_| scope.check_host_header(&hosts, &host, port))
+    {
         worker.refuse(&r, Some(&ctx.call_id));
         return refusal_response(&r);
     }
@@ -83,7 +92,16 @@ pub async fn handle_inspected(
     req: Request<Incoming>,
 ) -> Response<ProxyBody> {
     let scope = worker.scope();
-    if let Err(r) = scope.check_testable(&host, port) {
+    let hosts: Vec<String> = req
+        .headers()
+        .get_all(hyper::header::HOST)
+        .iter()
+        .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned())
+        .collect();
+    if let Err(r) = scope
+        .check_testable(&host, port)
+        .and_then(|_| scope.check_host_header(&hosts, &host, port))
+    {
         worker.refuse(&r, Some(&ctx.call_id));
         return refusal_response(&r);
     }

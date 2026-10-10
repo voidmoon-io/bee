@@ -71,11 +71,14 @@ async fn a_structured_post_returns_a_bounded_summary() {
 async fn raw_bytes_arrive_byte_for_byte() {
     let (http, _, _fx) = vuln_target::start_with(false);
     let mut s = session_for(http, "").await;
-    let raw = "GET /echo HTTP/1.1\nHost: x\nX-Dup: 1\nx-DUP: 2\nWeIrD-CaSe:  spaced\n\n";
+    let raw = format!(
+        "GET /echo HTTP/1.1\nHost: 127.0.0.1:{}\nX-Dup: 1\nx-DUP: 2\nWeIrD-CaSe:  spaced\n\n",
+        http.port()
+    );
     let (r, _) = s
         .call(
             "http_send",
-            json!({ "raw": { "scheme": "http", "host": "127.0.0.1", "port": http.port(), "bytes": raw } }),
+            json!({ "raw": { "scheme": "http", "host": "127.0.0.1", "port": http.port(), "bytes": raw.clone() } }),
         )
         .await;
     assert!(!r.is_error, "{}", r.content);

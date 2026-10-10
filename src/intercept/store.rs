@@ -175,6 +175,10 @@ impl Store {
         let conn = Connection::open(&db)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
+        // WAL + NORMAL: durable across a process crash, and only the last transactions at risk on
+        // power loss — the standard pairing. FULL fsyncs every insert, which capped a fuzz run at
+        // ~50 exchanges/s no matter the policy's rate.
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
 
         // Version check before touching the schema: a newer store is never migrated down.
         let existing: Option<u32> = conn
@@ -379,6 +383,51 @@ impl Store {
             ],
         )?;
         Ok(id)
+    }
+
+    /// Persist a fuzz run's spec, counts and summary (US6).
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_fuzz_run(
+        &mut self,
+        id: &str,
+        call_id: Option<&str>,
+        spec: &serde_json::Value,
+        state: &str,
+        planned: u64,
+        sent: u32,
+        refused: u32,
+        failed: u32,
+        summary: &serde_json::Value,
+    ) -> Result<(), StoreError> {
+        self.writable()?;
+        self.conn.execute(
+            "INSERT OR REPLACE INTO fuzz_runs (id, session_id, call_id, spec, state, planned, sent,
+                                               refused, failed, summary)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                id,
+                self.session_id,
+                call_id,
+                spec.to_string(),
+                state,
+                planned as i64,
+                sent,
+                refused,
+                failed,
+                summary.to_string()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// A fresh run id for this session, `F<session-short>-<n>`.
+    pub fn next_fuzz_run_id(&self) -> Result<String, StoreError> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM fuzz_runs WHERE session_id = ?1",
+            params![self.session_id],
+            |r| r.get(0),
+        )?;
+        Ok(format!("F{}-{}", self.short, n + 1))
     }
 
     /// Record a proxy-layer refusal (research R14).

@@ -127,8 +127,16 @@ fn decode_b64(s: &str) -> Vec<u8> {
 }
 
 async fn get(tls: &mut tokio_rustls::client::TlsStream<TcpStream>, path: &str) -> String {
+    get_as(tls, path, "app.test").await
+}
+
+async fn get_as(
+    tls: &mut tokio_rustls::client::TlsStream<TcpStream>,
+    path: &str,
+    host: &str,
+) -> String {
     tls.write_all(
-        format!("GET {path} HTTP/1.1\r\nHost: app.test\r\nConnection: close\r\n\r\n").as_bytes(),
+        format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n").as_bytes(),
     )
     .await
     .unwrap();
@@ -306,7 +314,7 @@ async fn an_h2_only_upstream_is_reported_not_passed_through() {
     )
     .await
     .unwrap();
-    let resp = get(&mut tls, "/").await;
+    let resp = get_as(&mut tls, "/", "h2.test").await;
     assert!(resp.contains("upstream_protocol_unsupported"), "{resp}");
 }
 

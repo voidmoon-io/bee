@@ -133,6 +133,17 @@ struct Inner {
     /// The scope the worker currently enforces: the configured one, replaced on each acknowledged
     /// `scope.update` (US3). A restarted worker is initialised with this, not the original.
     scope: Mutex<HttpScope>,
+    /// Fuzz runs awaiting their `fuzz.done` (US6).
+    fuzz_waiters: Mutex<HashMap<String, oneshot::Sender<FuzzCounts>>>,
+}
+
+/// What a fuzz run did, as the worker counted it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FuzzCounts {
+    pub sent: u32,
+    pub refused: u32,
+    pub failed: u32,
+    pub state: String,
 }
 
 /// The harness's handle on the session proxy. Cheap to clone.
@@ -182,6 +193,7 @@ impl Interceptor {
             ca_cert_pem: Mutex::new(None),
             on_event: Mutex::new(None),
             scope: Mutex::new(cfg_scope),
+            fuzz_waiters: Mutex::new(HashMap::new()),
         });
         let me = Interceptor { inner };
         me.launch().await?;
@@ -343,6 +355,92 @@ impl Interceptor {
                 code: "protocol".into(),
                 message: "send answered without an exchange".into(),
             }),
+        }
+    }
+
+    /// Run a fuzz run (US6): stream `variants` to the worker in batches of ≤ 256, and wait for its
+    /// `fuzz.done`. The worker paces every variant at `min(rps, policy)` and the session's own limit,
+    /// re-checks scope on each, and records each as an exchange tagged `fuzz` and `v<index>`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn fuzz(
+        &self,
+        run_id: &str,
+        raw: RawTarget,
+        variants: Vec<Vec<u8>>,
+        ctx: WireCtx,
+        rps: u32,
+        concurrency: u32,
+        timeout: Duration,
+        budget: Duration,
+    ) -> Result<FuzzCounts, InterceptError> {
+        let (tx, rx) = oneshot::channel();
+        self.inner
+            .fuzz_waiters
+            .lock()
+            .expect("fuzz lock")
+            .insert(run_id.to_string(), tx);
+        let total = variants.len();
+        let mut offset = 0usize;
+        let mut chunks = variants.chunks(256).peekable();
+        if chunks.peek().is_none() {
+            // Nothing to send still completes the run.
+            self.write(
+                &ToWorker::FuzzStart {
+                    run_id: run_id.into(),
+                    raw: raw.clone(),
+                    timeout_ms: timeout.as_millis() as u64,
+                    ctx: ctx.clone(),
+                    count: 0,
+                    offset: 0,
+                    last: true,
+                    rps,
+                    concurrency,
+                },
+                &[],
+            )
+            .await?;
+        }
+        while let Some(chunk) = chunks.next() {
+            let segs: Vec<&[u8]> = chunk.iter().map(Vec::as_slice).collect();
+            self.write(
+                &ToWorker::FuzzStart {
+                    run_id: run_id.into(),
+                    raw: raw.clone(),
+                    timeout_ms: timeout.as_millis() as u64,
+                    ctx: ctx.clone(),
+                    count: chunk.len() as u32,
+                    offset: offset as u32,
+                    last: offset + chunk.len() >= total,
+                    rps,
+                    concurrency,
+                },
+                &segs,
+            )
+            .await?;
+            offset += chunk.len();
+        }
+        match tokio::time::timeout(budget, rx).await {
+            Ok(Ok(c)) => Ok(c),
+            Ok(Err(_)) => Err(InterceptError::Unavailable(
+                "the proxy worker exited".into(),
+            )),
+            Err(_) => {
+                let _ = self
+                    .write(
+                        &ToWorker::FuzzCancel {
+                            run_id: run_id.into(),
+                        },
+                        &[],
+                    )
+                    .await;
+                Err(InterceptError::Worker {
+                    code: "timeout".into(),
+                    message: format!(
+                        "the fuzz run exceeded its {}s budget and was cancelled",
+                        budget.as_secs()
+                    ),
+                })
+            }
         }
     }
 
@@ -687,7 +785,29 @@ impl Interceptor {
                         .await;
                 });
             }
-            FromWorker::Held { .. } | FromWorker::FuzzDone { .. } => {}
+            FromWorker::FuzzDone {
+                run_id,
+                sent,
+                refused,
+                failed,
+                state,
+            } => {
+                if let Some(tx) = self
+                    .inner
+                    .fuzz_waiters
+                    .lock()
+                    .expect("fuzz lock")
+                    .remove(&run_id)
+                {
+                    let _ = tx.send(FuzzCounts {
+                        sent,
+                        refused,
+                        failed,
+                        state,
+                    });
+                }
+            }
+            FromWorker::Held { .. } => {}
         }
     }
 
@@ -719,6 +839,7 @@ impl Interceptor {
         };
         // Dropping the senders wakes every waiter with "the proxy worker exited".
         self.inner.pending.lock().expect("pending lock").clear();
+        self.inner.fuzz_waiters.lock().expect("fuzz lock").clear();
         if restarts >= MAX_RESTARTS {
             self.inner.listener.lock().expect("listener lock").take();
             self.notice(

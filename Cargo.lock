@@ -368,6 +368,7 @@ dependencies = [
  "ast-grep-language",
  "async-stream",
  "async-trait",
+ "bee-common",
  "bee-core",
  "bee-userspace",
  "brotli-decompressor",

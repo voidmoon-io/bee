@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 786999f549c6b2e9d266d83d9b03b423ec45fa4460a7871af1f50bfde1d9cbee # shrinks to parent_t = [], extra = 0
+cc 5c64a41b8688faec2ac4f4c2192797db381be65f1ec81c9a2c9af9963da6fb8d # shrinks to parent_t = [], parent_e = [], child_t = [], child_e = [], child_limits = HttpLimits { rps: 1, concurrency: 1, max_requests_per_run: 2001, max_body_bytes: 1, store_cap_bytes: 1 }, child_absent = false

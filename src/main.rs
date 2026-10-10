@@ -251,13 +251,39 @@ fn cmd_validate(policy: &Path, parent: Option<&Path>) -> ExitCode {
         },
     };
 
-    let compiled = match effective.compile(&SystemResolver::current()) {
+    let resolver = SystemResolver::current();
+    let mut compiled = match effective.compile(&resolver) {
         Ok(compiled) => compiled,
         Err(e) => {
             eprintln!("compile error: {e}");
             return ExitCode::from(EX_POLICY);
         }
     };
+    // `[policy.http]` (019): compile the proxy scope too, and check the tool scope as a session
+    // would install it — with the proxy loopback as its only network rule. The port is chosen at
+    // session start; any value exercises the same plan.
+    let worker = match std::env::current_exe().and_then(|p| p.canonicalize()) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("cannot resolve the bee binary for the proxy scope: {e}");
+            return ExitCode::from(EX_POLICY);
+        }
+    };
+    match effective.compile_http(&resolver, &worker) {
+        Ok(Some(http)) => {
+            let proxy_scope = http.proxy_scope;
+            compiled = bee_core::compiler::with_proxy_loopback(compiled, 1);
+            if let Err(e) = EnforcementPlan::prepare(&proxy_scope, effective.mode.into()) {
+                eprintln!("enforcement plan error (proxy scope): {e}");
+                return ExitCode::from(EX_POLICY);
+            }
+        }
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!("compile error: {e}");
+            return ExitCode::from(EX_POLICY);
+        }
+    }
     if let Err(e) = EnforcementPlan::prepare(&compiled, effective.mode.into()) {
         eprintln!("enforcement plan error: {e}");
         return ExitCode::from(EX_POLICY);

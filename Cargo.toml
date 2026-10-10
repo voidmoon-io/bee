@@ -343,6 +343,8 @@ time = { workspace = true }
 libc = { workspace = true }
 
 [dev-dependencies]
+# 019: tests assert against the kernel rule budget and access bits the core compiles to.
+bee-common = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "process", "time"] }
 tempfile = "3"
 proptest = { workspace = true }

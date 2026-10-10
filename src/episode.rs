@@ -773,6 +773,7 @@ fn empty_policy() -> bee_core::Policy {
         exec: Default::default(),
         network: Default::default(),
         exfiltration: Default::default(),
+        http: None,
     }
 }
 

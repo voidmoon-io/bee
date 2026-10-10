@@ -96,6 +96,15 @@ pub struct CompiledPolicy {
     pub exfiltration_enabled: bool,
     /// Resolved sensitive paths for an exfiltration-capable backend.
     pub sensitive: Vec<FsPrimitive>,
+    /// Deny every write-open no rule grants, even when no rule grants a write (019, research R2).
+    /// The backend otherwise latches write-default-deny only on the presence of a `write` rule.
+    pub fs_write_default_deny: bool,
+    /// Set by [`Policy::compile`] when `[policy.http]` is active: the tool scope's only network rule
+    /// must be the session proxy's loopback port, which only the session builder knows. A plan
+    /// refuses to install a policy still carrying this flag, so no path — a session, a reload after
+    /// a grant, `bee exec` — can install the tool scope with *no* network rule, which the kernel
+    /// would read as unrestricted egress. [`with_proxy_loopback`] clears it.
+    pub proxy_loopback_required: bool,
 }
 
 impl Policy {
@@ -167,8 +176,252 @@ impl Policy {
             net,
             exfiltration_enabled: self.exfiltration.enabled,
             sensitive,
+            fs_write_default_deny: false,
+            proxy_loopback_required: self.http.as_ref().is_some_and(|h| h.is_active()),
         })
     }
+
+    /// Compile `[policy.http]` into the proxy scope (kernel) and the HTTP scope (worker) — 019,
+    /// contracts/policy-http.md. `Ok(None)` when the section is absent or has no targets.
+    ///
+    /// `worker_exe` is the resolved, canonical path of the binary the proxy worker execs — the caller
+    /// passes `std::env::current_exe()` canonicalised — so the core stays free of ambient I/O.
+    pub fn compile_http(
+        &self,
+        r: &dyn Resolver,
+        worker_exe: &std::path::Path,
+    ) -> Result<Option<CompiledHttp>, CompileError> {
+        let Some(http) = self.http.as_ref().filter(|h| h.is_active()) else {
+            return Ok(None);
+        };
+
+        if !self.network.allow.is_empty() {
+            return Err(CompileError::HttpWithDirectNetwork(
+                self.network.allow.join(", "),
+            ));
+        }
+        for e in &http.egress {
+            if http.targets.iter().any(|t| t.host == e.host) {
+                return Err(CompileError::HostRoleConflict(e.host.clone()));
+            }
+        }
+        for p in &http.inspect {
+            if !http.targets.iter().any(|t| p.matches(&t.host)) {
+                return Err(CompileError::InspectOutsideTargets(p.to_string()));
+            }
+        }
+        for p in &http.insecure_upstream {
+            if !http.inspect.iter().any(|i| i.covers(p) == Some(true)) {
+                return Err(CompileError::InsecureOutsideInspect(p.to_string()));
+            }
+        }
+        let l = &http.limits;
+        for (name, zero) in [
+            ("rps", l.rps == 0),
+            ("concurrency", l.concurrency == 0),
+            ("max_requests_per_run", l.max_requests_per_run == 0),
+            ("max_body_bytes", l.max_body_bytes == 0),
+            ("store_cap_bytes", l.store_cap_bytes == 0),
+        ] {
+            if zero {
+                return Err(CompileError::ZeroLimit(name.into()));
+            }
+        }
+
+        let entry =
+            |hp: &crate::policy::HostPort, role: Role| -> Result<ScopeEntry, CompileError> {
+                let mut resolved = r.resolve_host(&hp.host)?;
+                resolved.sort();
+                resolved.dedup();
+                let mut enforced_by: Vec<EnforcedBy> = resolved
+                    .iter()
+                    .map(|a| EnforcedBy::Kernel {
+                        addr: *a,
+                        port: hp.port,
+                    })
+                    .collect();
+                enforced_by.push(EnforcedBy::Proxy {
+                    host: hp.host.clone(),
+                });
+                Ok(ScopeEntry {
+                    host: hp.host.clone(),
+                    port: hp.port,
+                    resolved,
+                    role,
+                    enforced_by,
+                })
+            };
+        let targets = http
+            .targets
+            .iter()
+            .map(|t| entry(t, Role::Target))
+            .collect::<Result<Vec<_>, _>>()?;
+        let egress = http
+            .egress
+            .iter()
+            .map(|t| entry(t, Role::Egress))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut net: Vec<CompiledNet> = Vec::new();
+        for e in targets.iter().chain(&egress) {
+            for addr in &e.resolved {
+                let n = CompiledNet {
+                    addr: *addr,
+                    port: e.port,
+                };
+                if !net.contains(&n) {
+                    net.push(n);
+                }
+            }
+        }
+
+        let proxy_scope = CompiledPolicy {
+            mode: self.mode,
+            fs: proxy_scope_fs(r, worker_exe),
+            exec: vec![CompiledExec {
+                path: worker_exe.as_os_str().as_encoded_bytes().to_vec(),
+                pin_inode: false,
+                identity: None,
+            }],
+            net,
+            exfiltration_enabled: false,
+            sensitive: Vec::new(),
+            fs_write_default_deny: true,
+            proxy_loopback_required: false,
+        };
+        Ok(Some(CompiledHttp {
+            proxy_scope,
+            http_scope: HttpScope {
+                targets,
+                egress,
+                inspect: http.inspect.clone(),
+                insecure_upstream: http.insecure_upstream.clone(),
+                limits: http.limits,
+            },
+        }))
+    }
+}
+
+/// The proxy scope's filesystem rules (research R2).
+///
+/// The kernel file model is a **deny list** — reads with no matching rule are allowed — so this is a
+/// *reduced* read surface, not an empty one. It denies reads of the project, the operator's home,
+/// `/home`, `/root`, and every protected credential directory not already beneath one of those;
+/// leaves the loader, libc, `/etc/ssl`, `/etc/resolv.conf`, `/etc/hosts` and `/etc/nsswitch.conf`
+/// readable; and (with [`CompiledPolicy::fs_write_default_deny`]) refuses every write.
+///
+/// The one grant is an **exact read rule for the worker binary**. `file_open` fires on exec, the
+/// worker is exec'd after it joins the scope, and both a dev build (`target/debug/bee` under the
+/// project) and the VM matrix binary (`/home/ubuntu/bee`) sit under denied prefixes. Rules are
+/// installed most-specific-first and the first match decides, so the longer binary path outranks
+/// every prefix deny above it.
+///
+/// Bounded by the kernel's per-scope rule budget (`DENY_MAX_RULES` = 8): at most 1 + 4 + 2 rules.
+fn proxy_scope_fs(r: &dyn Resolver, worker_exe: &std::path::Path) -> Vec<FsPrimitive> {
+    let mut denies: Vec<Vec<u8>> = Vec::new();
+    let push_deny = |path: String, denies: &mut Vec<Vec<u8>>| {
+        let p = path.trim_end_matches('/').as_bytes().to_vec();
+        if p.is_empty() {
+            return;
+        }
+        // Skip a region a deny already covers: it adds a rule, not a restriction.
+        let covered = denies
+            .iter()
+            .any(|d| p == *d || (p.len() > d.len() && p.starts_with(d) && p[d.len()] == b'/'));
+        if !covered {
+            denies.retain(|d| !(d.len() > p.len() && d.starts_with(&p) && d[p.len()] == b'/'));
+            denies.push(p);
+        }
+    };
+    for p in [
+        r.project_root().to_string(),
+        r.home().to_string(),
+        "/home".to_string(),
+        "/root".to_string(),
+    ] {
+        push_deny(p, &mut denies);
+    }
+    for (raw, mode) in PROTECTED_DEFAULTS {
+        if mode.is_deny() {
+            push_deny(resolve_tokens(raw, r), &mut denies);
+        }
+    }
+
+    let mut fs = vec![FsPrimitive::Prefix {
+        path: worker_exe.as_os_str().as_encoded_bytes().to_vec(),
+        subtree: false,
+        mode: AccessMode::READ,
+    }];
+    fs.extend(denies.into_iter().map(|path| FsPrimitive::Prefix {
+        path,
+        subtree: true,
+        mode: AccessMode::DENY,
+    }));
+    fs
+}
+
+/// Replace a tool policy's network with exactly `127.0.0.1:<port>` — the session proxy (019,
+/// research R4). With `[policy.http]` present this is the tool scope's **only** network rule, so
+/// `FLAG_NET_ENFORCED` is always set and a child that ignores `HTTP_PROXY` reaches nothing.
+pub fn with_proxy_loopback(mut tool: CompiledPolicy, port: u16) -> CompiledPolicy {
+    tool.net = vec![CompiledNet {
+        addr: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        port,
+    }];
+    tool.proxy_loopback_required = false;
+    tool
+}
+
+/// Output of [`Policy::compile_http`]: what the kernel installs for the proxy, and what the proxy
+/// worker enforces in user space.
+#[derive(Debug, Clone)]
+pub struct CompiledHttp {
+    /// Network = resolved `targets ∪ egress`; filesystem per [`proxy_scope_fs`]; exec = the worker.
+    pub proxy_scope: CompiledPolicy,
+    pub http_scope: HttpScope,
+}
+
+/// The scope the proxy worker enforces: host names, roles, inspection and limits.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HttpScope {
+    pub targets: Vec<ScopeEntry>,
+    pub egress: Vec<ScopeEntry>,
+    pub inspect: Vec<crate::pattern::HostPattern>,
+    pub insecure_upstream: Vec<crate::pattern::HostPattern>,
+    pub limits: crate::policy::HttpLimits,
+}
+
+/// One scope host, its compiled addresses, and the layers that enforce it (FR-011).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ScopeEntry {
+    pub host: String,
+    pub port: u16,
+    /// The addresses the kernel permits for this entry, resolved at compile time.
+    pub resolved: Vec<IpAddr>,
+    pub role: Role,
+    /// One `Kernel` rule per resolved address, plus the `Proxy` host-name check.
+    pub enforced_by: Vec<EnforcedBy>,
+}
+
+/// What a scope host may be used for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Role {
+    /// Testable: model-originated requests and inspection allowed.
+    Target,
+    /// Reachable as a tunnel only; refused by model-originated tools.
+    Egress,
+}
+
+/// The layer that enforces a scope rule — shown with every rule so a user-space check is never
+/// presented as a kernel guarantee (Constitution III).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "layer", rename_all = "snake_case")]
+pub enum EnforcedBy {
+    /// The kernel permits the proxy scope to connect to this address and port.
+    Kernel { addr: IpAddr, port: u16 },
+    /// The proxy checks the host name (and CONNECT host = SNI, and the role).
+    Proxy { host: String },
 }
 
 /// FR-008: within any writable root, protect VCS/config/credential dirs unless explicitly overridden.

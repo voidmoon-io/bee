@@ -310,6 +310,7 @@ mod tests {
             exec: bee_core::ExecPolicy { allow },
             network: Default::default(),
             exfiltration: Default::default(),
+            http: None,
         }
     }
 

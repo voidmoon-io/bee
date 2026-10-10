@@ -225,6 +225,10 @@ pub struct EnforcedSandbox {
     /// buffered here until [`Sandbox::drain_sidecar_audit`] collects them.
     sidecar: Option<SidecarScope>,
     sidecar_audit: Vec<AuditEvent>,
+    /// The session proxy's loopback port, when `[policy.http]` is active (019). Every recompile of
+    /// the tool scope — a grant's reload included — re-applies it as the scope's only network rule;
+    /// without it the plan refuses to install (`ProxyLoopbackMissing`).
+    proxy_port: Option<u16>,
 }
 
 /// A tool child confined to a live bee scope whose audit events arrive via a demux subscription
@@ -317,9 +321,12 @@ impl EnforcedSandbox {
     fn reload(&mut self, policy: &bee_core::Policy) -> Result<(), String> {
         use bee_userspace::{EnforcementPlan, ScopeMode, SystemResolver};
         let resolver = SystemResolver::current();
-        let compiled = policy
+        let mut compiled = policy
             .compile(&resolver)
             .map_err(|e| format!("reload compile: {e}"))?;
+        if let Some(port) = self.proxy_port {
+            compiled = bee_core::compiler::with_proxy_loopback(compiled, port);
+        }
         let plan = EnforcementPlan::prepare(&compiled, ScopeMode::Enforce)
             .map_err(|e| format!("reload plan: {e}"))?;
         let new_keys = self
@@ -403,6 +410,7 @@ impl Sandbox {
             env: ChildEnv::new(strip_env),
             sidecar: None,
             sidecar_audit: Vec::new(),
+            proxy_port: None,
         }))
     }
 
@@ -461,6 +469,16 @@ impl Sandbox {
                 };
                 Err((other, sidecar, e))
             }
+        }
+    }
+
+    /// Record the session proxy's loopback port so a reload of the tool scope keeps it as the only
+    /// network rule (019). A no-op on a sandbox with no kernel scope.
+    #[cfg_attr(not(feature = "enforce"), allow(unused_variables))]
+    pub fn set_proxy_loopback(&mut self, port: u16) {
+        #[cfg(feature = "enforce")]
+        if let Sandbox::Enforced(e) = self {
+            e.proxy_port = Some(port);
         }
     }
 

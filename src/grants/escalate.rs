@@ -372,6 +372,7 @@ mod tests {
             exec: Default::default(),
             network: Default::default(),
             exfiltration: Default::default(),
+            http: None,
         };
         for (path, a) in fs {
             p.filesystem.insert(path.to_string(), *a);

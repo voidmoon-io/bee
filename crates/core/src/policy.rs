@@ -117,6 +117,113 @@ pub struct Policy {
     pub network: NetPolicy,
     #[serde(default)]
     pub exfiltration: ExfilPolicy,
+    /// HTTP(S) interception target scope (019-http-intercept). Present with non-empty `targets` ⇒
+    /// tool children reach only the session's interception proxy, and the proxy reaches only these
+    /// hosts (contracts/policy-http.md).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http: Option<HttpPolicy>,
+}
+
+pub use crate::pattern::HostPattern;
+
+/// `host:port` — a DNS name or IP literal and one port, the same shape as a `network.allow` entry.
+/// The host is normalised (lowercase, no trailing dot, no IPv6 brackets) so equality is semantic.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct HostPort {
+    pub host: String,
+    pub port: u16,
+}
+
+impl TryFrom<String> for HostPort {
+    type Error = String;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        let t = s.trim();
+        let (host, port) = t
+            .rsplit_once(':')
+            .ok_or_else(|| format!("'{s}' must be host:port"))?;
+        let host = host
+            .strip_prefix('[')
+            .and_then(|h| h.strip_suffix(']'))
+            .unwrap_or(host);
+        let host = crate::pattern::normalize_host(host);
+        if host.is_empty() || host.contains('*') || host.contains('/') {
+            return Err(format!("'{s}': invalid host"));
+        }
+        let port: u16 = port.parse().map_err(|_| format!("'{s}': invalid port"))?;
+        if port == 0 {
+            return Err(format!("'{s}': port 0"));
+        }
+        Ok(HostPort { host, port })
+    }
+}
+
+impl From<HostPort> for String {
+    fn from(h: HostPort) -> String {
+        h.to_string()
+    }
+}
+
+impl std::fmt::Display for HostPort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.host.contains(':') {
+            write!(f, "[{}]:{}", self.host, self.port)
+        } else {
+            write!(f, "{}:{}", self.host, self.port)
+        }
+    }
+}
+
+/// `[policy.http]` — the interception target scope (data-model.md §HttpPolicy). Unknown keys are a
+/// parse error naming the key (fail closed: a typo'd `inspect` must not silently inspect nothing).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HttpPolicy {
+    /// Hosts that may be **tested**. Non-empty ⇔ interception is active.
+    #[serde(default)]
+    pub targets: Vec<HostPort>,
+    /// Hosts that may be **reached** through the proxy as tunnels only; never testable.
+    #[serde(default)]
+    pub egress: Vec<HostPort>,
+    /// Hosts (⊆ `targets`) whose TLS the proxy decrypts.
+    #[serde(default)]
+    pub inspect: Vec<HostPattern>,
+    /// Hosts (⊆ `inspect`) whose upstream certificate is not verified.
+    #[serde(default)]
+    pub insecure_upstream: Vec<HostPattern>,
+    #[serde(default)]
+    pub limits: HttpLimits,
+}
+
+impl HttpPolicy {
+    /// Whether interception is active: there is something to test.
+    pub fn is_active(&self) -> bool {
+        !self.targets.is_empty()
+    }
+}
+
+/// Pacing and volume limits for `[policy.http]`. Every limit attenuates downward (child ≤ parent).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct HttpLimits {
+    pub rps: u32,
+    pub concurrency: u32,
+    pub max_requests_per_run: u32,
+    pub max_body_bytes: u64,
+    pub store_cap_bytes: u64,
+}
+
+impl Default for HttpLimits {
+    fn default() -> Self {
+        HttpLimits {
+            rps: 10,
+            concurrency: 4,
+            max_requests_per_run: 2000,
+            max_body_bytes: 16 * 1024 * 1024,
+            store_cap_bytes: 2 * 1024 * 1024 * 1024,
+        }
+    }
 }
 
 #[derive(Deserialize)]

@@ -464,16 +464,16 @@ turn start.
 
 ## Phase 12: Polish & Cross-Cutting Concerns
 
-- [ ] T093 [P] Add `benches/intercept_latency.rs` (criterion): direct vs proxied in-scope GET against `vuln_target`, 1,000 iterations after a 100-request warm-up. **Gate SC-007 in the VM matrix**, not on shared CI runners: add an `http-latency` case to `test/vm/remote-matrix.sh` that runs the bench on the dedicated VM and fails if added latency exceeds 50 ms median or 200 ms p95. Host CI runs the bench with `--no-run` (compile-only) so it cannot rot. Record the VM numbers in `checklists/validation.md`.
-- [ ] T094 [P] Update `THREAT_MODEL.md`:
+- [X] T093 [P] *(Bench, VM case and host numbers done; the VM numbers are pending the VM, see checklists/validation.md.)* Add `benches/intercept_latency.rs` (criterion): direct vs proxied in-scope GET against `vuln_target`, 1,000 iterations after a 100-request warm-up. **Gate SC-007 in the VM matrix**, not on shared CI runners: add an `http-latency` case to `test/vm/remote-matrix.sh` that runs the bench on the dedicated VM and fails if added latency exceeds 50 ms median or 200 ms p95. Host CI runs the bench with `--no-run` (compile-only) so it cannot rot. Record the VM numbers in `checklists/validation.md`.
+- [X] T094 [P] Update `THREAT_MODEL.md`:
   - a new entry point E13 for the proxy worker and the store;
   - T6-style redirect revalidation, now addressed for HTTP tools;
   - target-response prompt injection, mitigated by P1;
   - the proxy-layer vs kernel-layer distinction;
   - the CA key lifecycle.
-- [ ] T095 [P] Add **Target scope**, **Exchange**, **Lead**, **Proxy scope** and **Interceptor** to `CONTEXT.md`, with `_Avoid_` lines, for example "Lead — _Avoid_: finding, alert".
-- [ ] T096 [P] Add an `intercept` row to the workspace and feature docs in `README.md` and a usage section pointing to the quickstart.
-- [ ] T097 Run `cargo clippy --workspace --all-targets --features intercept,enforce,sec` and `cargo fmt`, and fix findings. Confirm `cargo tree` for the default build is unchanged against `main` (SC-009).
+- [X] T095 [P] Add **Target scope**, **Exchange**, **Lead**, **Proxy scope** and **Interceptor** to `CONTEXT.md`, with `_Avoid_` lines, for example "Lead — _Avoid_: finding, alert".
+- [X] T096 [P] Add an `intercept` row to the workspace and feature docs in `README.md` and a usage section pointing to the quickstart.
+- [X] T097 Run `cargo clippy --workspace --all-targets --features intercept,enforce,sec` and `cargo fmt`, and fix findings. Confirm `cargo tree` for the default build is unchanged against `main` (SC-009).
 - [ ] T098 Run the full quickstart (host tier and `./test/vm/matrix.sh`) and record the results in `specs/019-http-intercept/checklists/validation.md`.
 
 ---

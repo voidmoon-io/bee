@@ -479,18 +479,16 @@ impl Sandbox {
         }
         #[cfg(not(feature = "enforce"))]
         let _ = proxy_scope;
-        if let Err(e) = hook.update(scope).await {
-            #[cfg(feature = "enforce")]
-            if let Some(p) = previous {
-                if let Err(r) = self.reload_sidecar_plan(&p) {
-                    return Err(format!(
-                        "{e}; and the proxy scope rollback also failed: {r}"
-                    ));
-                }
+        let updated = hook.update(scope).await;
+        #[cfg(feature = "enforce")]
+        if let (Err(e), Some(p)) = (&updated, previous) {
+            if let Err(r) = self.reload_sidecar_plan(&p) {
+                return Err(format!(
+                    "{e}; and the proxy scope rollback also failed: {r}"
+                ));
             }
-            return Err(e);
         }
-        Ok(())
+        updated
     }
 
     /// Harness notes for the top of the next turn (019 US8).

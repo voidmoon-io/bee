@@ -314,7 +314,7 @@ pub async fn run_loop(
             sandbox
                 .begin_call(crate::sandbox::CallContext {
                     call_id: tc.id.clone(),
-                    turn: index as u32,
+                    turn: index,
                     origin: crate::sandbox::CallOrigin::Tool,
                 })
                 .await;
@@ -398,7 +398,7 @@ pub async fn run_loop(
                             sandbox
                                 .begin_call(crate::sandbox::CallContext {
                                     call_id: tc.id.clone(),
-                                    turn: index as u32,
+                                    turn: index,
                                     origin: crate::sandbox::CallOrigin::Tool,
                                 })
                                 .await;
@@ -1100,9 +1100,8 @@ fn build_enforced_sandbox(
     let sidecar = match &prepared {
         Some(p) => Some(
             crate::intercept::session::attach_sidecar(&mut engine, &scope_id, &p.compiled)
-                .map_err(|e| {
+                .inspect_err(|_| {
                     let _ = scope.teardown();
-                    e
                 })?,
         ),
         None => None,
@@ -1187,6 +1186,7 @@ mod mcp_cgroup_spike {
             mcp: Default::default(),
             skills: Vec::new(),
             ceiling_policy_path: None,
+            security: Default::default(),
         };
         (scn, dir)
     }
@@ -1199,7 +1199,7 @@ mod mcp_cgroup_spike {
         let (scenario, tmp) = spike_scenario();
         let policy =
             bee_core::Policy::from_path(&scenario.policy_path).expect("parse spike policy");
-        let sandbox = build_enforced_sandbox(&scenario, policy, sandbox::key_vars(None))
+        let (sandbox, _http) = build_enforced_sandbox(&scenario, policy, sandbox::key_vars(None))
             .expect("build enforced sandbox (need root + BPF-LSM)");
 
         let scope_cgid = match &sandbox {

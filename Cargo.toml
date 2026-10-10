@@ -354,6 +354,8 @@ libc = { workspace = true }
 [dev-dependencies]
 # 019: tests assert against the kernel rule budget and access bits the core compiles to.
 bee-common = { workspace = true }
+# 019 SC-007: the interception latency bench (benches/intercept_latency.rs).
+criterion = { workspace = true, features = ["async_tokio"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "process", "time", "test-util"] }
 tempfile = "3"
 proptest = { workspace = true }
@@ -363,4 +365,10 @@ insta = "1"
 # 019-http-intercept: the fixture target needs the `intercept` dependency set (hyper/rustls/rcgen).
 [[example]]
 name = "vuln_target"
+required-features = ["intercept"]
+
+# 019 SC-007. Gated in the VM matrix (`http-latency`), compiled-only on host CI.
+[[bench]]
+name = "intercept_latency"
+harness = false
 required-features = ["intercept"]

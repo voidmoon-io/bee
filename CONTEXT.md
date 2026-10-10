@@ -35,3 +35,23 @@ _Avoid_: Issue, alert, hit
 **Verdict**:
 A person's adjudication of a finding — confirmed, false positive, fixed, duplicate, deferred — recorded only through `bee findings adjudicate`. It is never writable by an agent: a verdict is worth something precisely because a human formed it.
 _Avoid_: Status, triage state, disposition
+
+**Target scope**:
+The hosts a session may test, declared in `[policy.http]` as `targets` (testable) and `egress` (reachable as tunnels only, never testable), with `inspect` naming the hosts whose TLS is decrypted. It is policy data, attenuated like the rest of a policy, and widened only by an operator's consent within the ceiling.
+_Avoid_: Allowlist, target list, in-scope list
+
+**Exchange**:
+One recorded HTTP request and its response (or its refusal), with the call that caused it, stored in `.bee/http/` and named by an id like `E1a2b3c4-42`. Tools return exchange ids and bounded slices, never whole bodies.
+_Avoid_: Request log entry, flow, history item
+
+**Lead**:
+A passive observation over recorded traffic — a reflected parameter, a weak session cookie — offered for the model to check. Never a finding until the model confirms it and records one citing exchanges; its summary is bee's own words, never the target's.
+_Avoid_: Finding, alert, issue
+
+**Proxy scope**:
+The kernel scope the interception proxy runs in, separate from the tool scope: it may reach only the resolved target and egress addresses, write nothing, and read a reduced filesystem. Tool children reach only the proxy.
+_Avoid_: Proxy sandbox, sidecar container
+
+**Interceptor**:
+The session's HTTP(S) interception proxy as a whole — the confined `bee proxy-worker` and the harness side that drives it and owns the exchange store.
+_Avoid_: MITM, Burp, proxy server

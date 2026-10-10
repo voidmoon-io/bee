@@ -293,6 +293,16 @@ async fn run_turn(
     }
 }
 
+/// Upsert the live HTTP history pane when new exchanges have arrived (019 US9). A no-op in a session
+/// without `[policy.http]`, and between arrivals.
+fn refresh_http_pane(app: &mut App, config: &ReplConfig) {
+    if let Some(source) = &config.http_pane {
+        if let Some(spec) = source() {
+            app.panels.upsert("http", spec);
+        }
+    }
+}
+
 #[cfg(test)]
 mod scheduler_tests {
     use super::*;
@@ -424,15 +434,5 @@ mod scheduler_tests {
             tick_interval(&app).is_none(),
             "the poll retires with the panel"
         );
-    }
-}
-
-/// Upsert the live HTTP history pane when new exchanges have arrived (019 US9). A no-op in a session
-/// without `[policy.http]`, and between arrivals.
-fn refresh_http_pane(app: &mut App, config: &ReplConfig) {
-    if let Some(source) = &config.http_pane {
-        if let Some(spec) = source() {
-            app.panels.upsert("http", spec);
-        }
     }
 }

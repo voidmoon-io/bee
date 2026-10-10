@@ -49,6 +49,8 @@ const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 const SEGMENT_HEADROOM: u64 = 1 << 20;
 
 type Outgoing = (FromWorker, Vec<Vec<u8>>);
+/// A name lookup waiting for the harness's answer.
+type ResolveWaiter = oneshot::Sender<Result<Vec<IpAddr>, String>>;
 
 /// State shared by every connection and control handler.
 pub struct Worker {
@@ -57,7 +59,7 @@ pub struct Worker {
     /// token → the call it was issued to. Revoked tokens are removed.
     creds: Mutex<HashMap<String, WireCtx>>,
     out: mpsc::UnboundedSender<Outgoing>,
-    resolves: Mutex<HashMap<u64, oneshot::Sender<Result<Vec<IpAddr>, String>>>>,
+    resolves: Mutex<HashMap<u64, ResolveWaiter>>,
     next_req: AtomicU64,
     pub pacer: pace::Pacer,
     pub limits: HttpLimits,

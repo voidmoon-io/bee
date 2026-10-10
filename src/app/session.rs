@@ -347,12 +347,10 @@ pub fn build_sandbox(
     #[cfg(feature = "intercept")]
     let sidecar = match &prepared {
         Some(p) => Some(
-            bee::intercept::session::attach_sidecar(&mut engine, &scope_id, &p.compiled).map_err(
-                |e| {
+            bee::intercept::session::attach_sidecar(&mut engine, &scope_id, &p.compiled)
+                .inspect_err(|_| {
                     let _ = scope.teardown();
-                    e
-                },
-            )?,
+                })?,
         ),
         None => None,
     };

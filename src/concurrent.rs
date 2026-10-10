@@ -291,6 +291,7 @@ mod tests {
             mcp: Default::default(),
             skills: Vec::new(),
             ceiling_policy_path: None,
+            security: Default::default(),
         }
     }
 

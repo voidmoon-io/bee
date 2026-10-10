@@ -12,7 +12,9 @@ mod harness;
 mod vuln_target;
 
 use std::net::SocketAddr;
+#[cfg(not(feature = "enforce"))]
 use std::path::Path;
+#[cfg(not(feature = "enforce"))]
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
@@ -418,6 +420,7 @@ fn the_bundle_holds_system_roots_plus_one_ca_and_no_key_anywhere() {
     }
 }
 
+#[cfg(not(feature = "enforce"))]
 fn walk(p: &Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     if let Ok(rd) = std::fs::read_dir(p) {

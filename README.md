@@ -37,6 +37,7 @@ crates/
 | `crates/core` | Policy types, TOML parsing, compiler/glob-lowering, attenuation validator, audit types | ✅ implemented + tested |
 | `crates/userspace` | Support detection, cgroup lifecycle, hardened launcher (incl. process hardening, FR-011), engine gating | ✅ host logic tested; ⏳ eBPF attach behind `--features enforce` |
 | `crates/ebpf` | LSM programs (`file_open`, `bprm_check_security`, `socket_connect`), built as `bee-lsm` | ⏳ requires nightly bpf toolchain + BPF-LSM kernel |
+| `src/intercept` (feature `intercept`) | HTTP(S) interception: the confined `bee proxy-worker`, the exchange store, and the `http_*` tools (019) | ✅ host-tested; ⏳ kernel half on the VM matrix |
 
 The four `crates/` packages stay separate because their runtime, kernel, `no_std`, and BPF-target
 constraints earn it. The harness library does not: it has exactly one consumer.
@@ -182,6 +183,45 @@ when it did not run is worse than one that was never installed.
 
 > **MSRV note.** The application package declares Rust **1.88** (`ast-grep-core`'s floor). The
 > embeddable crates — `bee-core`, `bee-common`, `bee-userspace` — keep **1.85**.
+
+## HTTP(S) interception (opt-in, `intercept`)
+
+For testing web applications in scope: an interception proxy the agent drives through tools, whose
+target scope the kernel holds rather than a filter over a history view.
+
+```bash
+cargo build --features intercept            # host tier
+cargo build --features intercept,enforce    # kernel-enforced
+```
+
+```toml
+[policy.http]
+targets = ["app.test:443", "10.20.0.5:8080"]   # may be tested
+egress  = ["index.crates.io:443"]              # reachable as a tunnel, never testable
+inspect = ["app.test"]                         # decrypt TLS for these hosts only
+```
+
+With `[policy.http]` present, tool children reach **only** the session proxy, and the proxy, in its
+own kernel scope, reaches only the resolved targets and egress hosts. The proxy adds the checks an
+address cannot express: host name, CONNECT host = SNI, the `Host` header, the role, and pacing. It
+labels which layer enforces every rule. A session whose kernel would not block (host mode, a build
+without `enforce`, an observe-mode policy) refuses to start unless you pass `--http-scope-advisory`.
+
+| Tool | What it does |
+|---|---|
+| `http_scope` | What may be tested, what is only reachable, and which layer enforces each rule. Read-only. |
+| `http_send` | One request, structured or **byte-exact raw**; returns an exchange id and a bounded preview. |
+| `http_get` | One bounded view of an exchange: headers, a decoded byte range, a grep, a JSON pointer, the raw head. |
+| `http_history` | Typed filters over recorded traffic, as compact rows. |
+| `http_replay` | Re-send with edits and get a **measured** diff (a noise probe suppresses volatile values). |
+| `http_sitemap` | A tree of paths, methods, statuses and parameter names seen. |
+| `http_fuzz` | Marker templates × payload sets within the policy's limits, answered with clusters and outliers. |
+| `http_intercept` | Session-only modify/drop/hold rules over other tools' traffic. |
+| `http_leads` | Passive leads noticed in traffic. Leads are not findings. |
+
+Widening the target scope is the operator's call: a refused host becomes a consent prompt naming
+exactly that `host:port`, bounded by the ceiling. `bee http export --har` writes HAR 1.2 with proxy
+credentials stripped. The walkthrough is `specs/019-http-intercept/quickstart.md`.
 
 ## Kernel requirements (for enforcement)
 

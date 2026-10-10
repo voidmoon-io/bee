@@ -297,6 +297,9 @@ pub struct TunnelRecord {
 pub use crate::proxy_event::{ProxyEvent, ProxyEventKind};
 
 /// Worker → harness.
+// `Exchange` dominates the size; frames are moved once, from the codec to the handler, so boxing it
+// would cost an allocation per exchange to save a copy that never happens.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum FromWorker {

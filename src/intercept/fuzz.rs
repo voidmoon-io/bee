@@ -112,7 +112,7 @@ impl Template {
                 "the template marks no position (wrap one in {marker}…{marker})"
             ));
         }
-        if pieces.len() % 2 == 0 {
+        if pieces.len().is_multiple_of(2) {
             return Err(format!("unbalanced {marker} markers in the template"));
         }
         let mut parts = Vec::new();
@@ -396,8 +396,14 @@ mod tests {
     #[test]
     fn modes_count_and_expand() {
         let set = vec!["p".to_string(), "q".to_string()];
-        assert_eq!(planned(Mode::Sniper, 2, &[set.clone()]).unwrap(), 4);
-        assert_eq!(planned(Mode::BatteringRam, 2, &[set.clone()]).unwrap(), 2);
+        assert_eq!(
+            planned(Mode::Sniper, 2, std::slice::from_ref(&set)).unwrap(),
+            4
+        );
+        assert_eq!(
+            planned(Mode::BatteringRam, 2, std::slice::from_ref(&set)).unwrap(),
+            2
+        );
         assert_eq!(
             planned(Mode::Pitchfork, 2, &[set.clone(), vec!["z".into()]]).unwrap(),
             1
@@ -406,9 +412,9 @@ mod tests {
             planned(Mode::ClusterBomb, 2, &[set.clone(), set.clone()]).unwrap(),
             4
         );
-        assert!(planned(Mode::Pitchfork, 2, &[set.clone()]).is_err());
+        assert!(planned(Mode::Pitchfork, 2, std::slice::from_ref(&set)).is_err());
 
-        let v = expand(&t(), Mode::Sniper, &[set.clone()]);
+        let v = expand(&t(), Mode::Sniper, std::slice::from_ref(&set));
         let texts: Vec<&str> = v.iter().map(|v| v.text.as_str()).collect();
         assert!(texts.contains(&"GET /item?id=p&x=a HTTP/1.1\r\n\r\n"));
         assert!(texts.contains(&"GET /item?id=1&x=q HTTP/1.1\r\n\r\n"));

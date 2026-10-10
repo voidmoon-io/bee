@@ -22,6 +22,16 @@ use crate::tools::{Provenance, Tool, ToolOutcome, ToolResult, UnavailableReason}
 
 pub const BOUND: usize = 16 * 1024;
 
+/// A fuzz exchange as read back: id, status, response blob, total ms, tags, outcome.
+type FuzzRow = (
+    String,
+    Option<u16>,
+    Option<String>,
+    Option<i64>,
+    Option<String>,
+    String,
+);
+
 pub struct HttpFuzz {
     pub(crate) icpt: Option<Interceptor>,
 }
@@ -204,7 +214,7 @@ async fn run(icpt: &Interceptor, sandbox: &Sandbox, args: &Value) -> Result<(Str
         .await?;
 
     // Gather the run's responses and cluster them.
-    let rows = icpt.with_store(|s| -> rusqlite::Result<Vec<(String, Option<u16>, Option<String>, Option<i64>, Option<String>, String)>> {
+    let rows = icpt.with_store(|s| -> rusqlite::Result<Vec<FuzzRow>> {
         let mut stmt = s.conn().prepare(
             "SELECT id, status, resp_body, total_ms, tags, outcome FROM exchanges WHERE fuzz_run = ?1",
         )?;

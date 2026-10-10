@@ -883,7 +883,7 @@ fi
 # (its own call id), so every probe is attributed separately in the transcript. The in-VM targets are
 # python http.servers on loopback; 18081 is deliberately NOT in scope and logs every request it gets,
 # so "no upstream connection" is checked at the destination, not inferred.
-HTTP_CASES="http-in-scope http-out-of-scope http-direct-target http-direct-other http-proxy-scope http-sni-mismatch http-store-protected http-proxy-fs-deny"
+HTTP_CASES="http-in-scope http-out-of-scope http-direct-target http-direct-other http-proxy-scope http-sni-mismatch http-store-protected http-proxy-fs-deny http-latency"
 if [ -x "$BEE" ] && "$BEE" run --help 2>/dev/null | grep -q -- '--http-scope-advisory' \
    && "$BEE" proxy-worker --help >/dev/null 2>&1; then
   HW=/home/ubuntu/httpwork
@@ -934,9 +934,43 @@ print("[[provider.script]]\ntext = \"done\"")
 PYPROV
   ( cd "$HW" && "$BEE" run --scenario "$HW/scn.toml" --provider "$HW/prov.toml" \
       --out "$HW/t.json" ) >"$HW/run.log" 2>&1
+  # http-latency (SC-007, T093): added latency of the proxy for an in-scope GET, gated here on the
+  # dedicated VM rather than on shared CI runners (research R19a). Direct timings come from this
+  # root shell (outside any scope); proxied ones from a tool child going through the session proxy.
+  LAT_N=300
+  for _ in $(seq 1 50); do curl -s -o /dev/null http://127.0.0.1:18080/; done
+  for _ in $(seq 1 $LAT_N); do curl -s -o /dev/null -w '%{time_total}\n' http://127.0.0.1:18080/; done >"$HW/direct.txt"
+  LATCMD="for i in \$(seq 1 50); do curl -s -o /dev/null http://127.0.0.1:18080/; done; for i in \$(seq 1 $LAT_N); do curl -s -o /dev/null -w '%{time_total} ' http://127.0.0.1:18080/; done"
+  python3 - "$LATCMD" >"$HW/lat.prov.toml" <<'PYLAT'
+import json, sys
+print('[provider]\nprovider = "mock"')
+print(f'[[provider.script]]\ntool = "bash"\nargs = {{ command = {json.dumps(sys.argv[1])} }}')
+print('[[provider.script]]\ntext = "done"')
+PYLAT
+  sed 's/turn_limit = 16/turn_limit = 4/; s/timeout_secs = 120/timeout_secs = 300/' "$HW/scn.toml" >"$HW/lat.scn.toml"
+  ( cd "$HW" && "$BEE" run --scenario "$HW/lat.scn.toml" --provider "$HW/lat.prov.toml" \
+      --out "$HW/lat.json" ) >"$HW/lat.log" 2>&1
+  while IFS='|' read -r c st note; do emit "$c" "$st" "$note"; done < <(python3 - "$HW/direct.txt" "$HW/lat.json" <<'PYLATCHECK'
+import json, sys
+def q(v, p):
+    v = sorted(v)
+    return v[int((len(v) - 1) * p)]
+try:
+    direct = [float(x) for x in open(sys.argv[1]).read().split()]
+    t = json.load(open(sys.argv[2]))
+    proxied = [float(x) for x in t["turns"][0]["calls"][0]["result"]["content"].split()]
+    med = (q(proxied, 0.5) - q(direct, 0.5)) * 1000
+    p95 = (q(proxied, 0.95) - q(direct, 0.95)) * 1000
+    ok = len(proxied) >= 100 and med <= 50 and p95 <= 200
+    print(f"http-latency|{'PASS' if ok else 'FAIL'}|added median {med:.1f} ms, p95 {p95:.1f} ms over {len(proxied)} requests (limits 50 / 200)")
+except Exception as e:
+    print(f"http-latency|FAIL|could not measure: {e}")
+PYLATCHECK
+)
   kill "$T1" "$T2" "$T3" 2>/dev/null
   if [ ! -f "$HW/t.json" ]; then
     for c in $HTTP_CASES; do
+      [ "$c" = http-latency ] && continue  # measured separately above
       emit "$c" FAIL "no transcript: $(tail -3 "$HW/run.log" | tr '\n' ' ')"
     done
   else

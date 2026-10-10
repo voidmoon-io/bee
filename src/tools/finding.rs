@@ -411,6 +411,42 @@ impl From<LedgerError> for ToolOutcome<FindingId> {
     }
 }
 
+/// Check `evidence_refs` (019 US8, FR-027): at most [`crate::findings::MAX_EVIDENCE_REFS`], each
+/// `http:<exchange-id>`, each present in this project's exchange store **now**. An id that does not
+/// resolve is refused: evidence is cited, never invented.
+#[cfg_attr(not(feature = "intercept"), allow(unused_variables))]
+fn validate_refs(ledger: &Ledger, refs: Vec<String>) -> Result<Vec<String>, String> {
+    if refs.len() > crate::findings::MAX_EVIDENCE_REFS {
+        return Err(format!(
+            "evidence_refs holds at most {} references",
+            crate::findings::MAX_EVIDENCE_REFS
+        ));
+    }
+    for r in &refs {
+        let Some(id) = r.strip_prefix("http:") else {
+            return Err(format!("evidence ref `{r}` must be `http:<exchange id>`"));
+        };
+        #[cfg(feature = "intercept")]
+        {
+            if crate::intercept::store::resolve_ref(&ledger.project_root(), id)
+                == crate::intercept::store::RefState::Missing
+            {
+                return Err(format!("no recorded exchange `{id}` to cite"));
+            }
+        }
+        #[cfg(not(feature = "intercept"))]
+        {
+            let _ = id;
+            return Err(
+                "HTTP evidence refs need the exchange store, which this build lacks \
+                 (rebuild with --features intercept)"
+                    .into(),
+            );
+        }
+    }
+    Ok(refs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -598,40 +634,4 @@ mod tests {
         let view = fold(&ledger).unwrap();
         assert!(view.findings[0].severity.is_none(), "no guessed score");
     }
-}
-
-/// Check `evidence_refs` (019 US8, FR-027): at most [`crate::findings::MAX_EVIDENCE_REFS`], each
-/// `http:<exchange-id>`, each present in this project's exchange store **now**. An id that does not
-/// resolve is refused: evidence is cited, never invented.
-#[cfg_attr(not(feature = "intercept"), allow(unused_variables))]
-fn validate_refs(ledger: &Ledger, refs: Vec<String>) -> Result<Vec<String>, String> {
-    if refs.len() > crate::findings::MAX_EVIDENCE_REFS {
-        return Err(format!(
-            "evidence_refs holds at most {} references",
-            crate::findings::MAX_EVIDENCE_REFS
-        ));
-    }
-    for r in &refs {
-        let Some(id) = r.strip_prefix("http:") else {
-            return Err(format!("evidence ref `{r}` must be `http:<exchange id>`"));
-        };
-        #[cfg(feature = "intercept")]
-        {
-            if crate::intercept::store::resolve_ref(&ledger.project_root(), id)
-                == crate::intercept::store::RefState::Missing
-            {
-                return Err(format!("no recorded exchange `{id}` to cite"));
-            }
-        }
-        #[cfg(not(feature = "intercept"))]
-        {
-            let _ = id;
-            return Err(
-                "HTTP evidence refs need the exchange store, which this build lacks \
-                 (rebuild with --features intercept)"
-                    .into(),
-            );
-        }
-    }
-    Ok(refs)
 }

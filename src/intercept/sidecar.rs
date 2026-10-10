@@ -34,6 +34,9 @@ const ACK_TIMEOUT: Duration = Duration::from_secs(5);
 /// Restarts allowed per session (contract §Process).
 const MAX_RESTARTS: u32 = 1;
 
+/// Called with every proxy event as it arrives.
+pub type EventSink = Box<dyn Fn(&ProxyEvent) + Send + Sync>;
+
 /// Whether the session's scope rules are enforced by the kernel or only by the proxy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Enforcement {
@@ -129,7 +132,7 @@ struct Inner {
     /// Announcements for the operator (restart, death, eviction).
     notices: Mutex<Vec<String>>,
     ca_cert_pem: Mutex<Option<String>>,
-    on_event: Mutex<Option<Box<dyn Fn(&ProxyEvent) + Send + Sync>>>,
+    on_event: Mutex<Option<EventSink>>,
     /// The scope the worker currently enforces: the configured one, replaced on each acknowledged
     /// `scope.update` (US3). A restarted worker is initialised with this, not the original.
     scope: Mutex<HttpScope>,
@@ -253,7 +256,7 @@ impl Interceptor {
     }
 
     /// Called for every proxy event as it arrives (front-ends render refusals live).
-    pub fn set_event_sink(&self, f: Box<dyn Fn(&ProxyEvent) + Send + Sync>) {
+    pub fn set_event_sink(&self, f: EventSink) {
         *self.inner.on_event.lock().expect("sink lock") = Some(f);
     }
 
@@ -342,6 +345,7 @@ impl Interceptor {
     }
 
     /// Send `bytes` byte-exact to `raw` through the worker, and record the exchange.
+    #[allow(clippy::too_many_arguments)]
     pub async fn send(
         &self,
         raw: RawTarget,
@@ -382,6 +386,7 @@ impl Interceptor {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     /// Run a fuzz run (US6): stream `variants` to the worker in batches of ≤ 256, and wait for its
     /// `fuzz.done`. The worker paces every variant at `min(rps, policy)` and the session's own limit,
     /// re-checks scope on each, and records each as an exchange tagged `fuzz` and `v<index>`.
@@ -406,7 +411,8 @@ impl Interceptor {
         let total = variants.len();
         let mut offset = 0usize;
         let mut chunks = variants.chunks(256).peekable();
-        if chunks.peek().is_none() {
+        let empty = chunks.peek().is_none();
+        if empty {
             // Nothing to send still completes the run.
             self.write(
                 &ToWorker::FuzzStart {
@@ -424,7 +430,7 @@ impl Interceptor {
             )
             .await?;
         }
-        while let Some(chunk) = chunks.next() {
+        for chunk in chunks {
             let segs: Vec<&[u8]> = chunk.iter().map(Vec::as_slice).collect();
             self.write(
                 &ToWorker::FuzzStart {
@@ -828,11 +834,9 @@ impl Interceptor {
     }
 
     async fn read_loop(self, mut reader: FrameReader<tokio::process::ChildStdout>) {
-        loop {
-            match reader.read::<FromWorker>().await {
-                Ok(Some((frame, segs))) => self.on_frame(frame, segs).await,
-                Ok(None) | Err(_) => break,
-            }
+        // A clean end or a malformed frame both end the channel (fail closed).
+        while let Ok(Some((frame, segs))) = reader.read::<FromWorker>().await {
+            self.on_frame(frame, segs).await;
         }
         self.on_death().await;
     }

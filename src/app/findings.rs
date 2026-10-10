@@ -259,6 +259,26 @@ fn adjudicate(
     ExitCode::SUCCESS
 }
 
+/// How a cited exchange resolves now: `present` or `missing` (019 US8, FR-027).
+#[cfg_attr(not(feature = "intercept"), allow(unused_variables))]
+fn ref_state(project: &std::path::Path, r: &str) -> &'static str {
+    #[cfg(feature = "intercept")]
+    {
+        match r
+            .strip_prefix("http:")
+            .map(|id| bee::intercept::store::resolve_ref(project, id))
+        {
+            Some(bee::intercept::store::RefState::Present) => "present",
+            _ => "missing",
+        }
+    }
+    #[cfg(not(feature = "intercept"))]
+    {
+        let _ = r;
+        "missing (this build has no exchange store)"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,25 +349,5 @@ mod tests {
                 .contains("no findings match")
         );
         assert!(render(&view, None, Some("none"), std::path::Path::new(".")).contains("src/a.rs"));
-    }
-}
-
-/// How a cited exchange resolves now: `present` or `missing` (019 US8, FR-027).
-#[cfg_attr(not(feature = "intercept"), allow(unused_variables))]
-fn ref_state(project: &std::path::Path, r: &str) -> &'static str {
-    #[cfg(feature = "intercept")]
-    {
-        match r
-            .strip_prefix("http:")
-            .map(|id| bee::intercept::store::resolve_ref(project, id))
-        {
-            Some(bee::intercept::store::RefState::Present) => "present",
-            _ => "missing",
-        }
-    }
-    #[cfg(not(feature = "intercept"))]
-    {
-        let _ = r;
-        "missing (this build has no exchange store)"
     }
 }

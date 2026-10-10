@@ -31,6 +31,8 @@ pub mod cvss;
 pub mod finding;
 #[cfg(feature = "gitlog")]
 pub mod gitlog;
+#[cfg(feature = "intercept")]
+pub mod http;
 #[cfg(feature = "scanners")]
 pub mod scanner;
 

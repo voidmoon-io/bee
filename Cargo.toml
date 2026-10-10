@@ -159,6 +159,34 @@ scanners = ["findings"]
 # Convenience umbrella for a security-tooling build. Grammars are still chosen explicitly.
 sec = ["findings", "astgrep", "gitlog", "cvss", "scanners"]
 
+# ── HTTP(S) interception (019-http-intercept) ──────────────────────────────────────────────────
+# The interception proxy and the `http_*` tools. Default-off, so a build without it has the
+# dependency graph it had before 019 (SC-009; `cargo tree` for the default build is unchanged).
+# Everything network-, TLS-, SQLite- and async-I/O-shaped lives behind this flag in the application
+# package; bee-core gains only types and pure functions (Constitution V, guarded by
+# tests/core_deps_guard.rs). NB: `rcgen` 0.14 declares MSRV 1.88, which equals this package's own
+# floor — see the `rust-version` note on `[package]` (research R20).
+intercept = [
+    "dep:hyper",
+    "dep:hyper-util",
+    "dep:http-body-util",
+    "dep:tokio-rustls",
+    "dep:rustls",
+    "dep:webpki-roots",
+    "dep:httparse",
+    "dep:flate2",
+    "dep:similar",
+    "dep:regex",
+    "dep:rcgen",
+    "dep:rusqlite",
+    "dep:brotli-decompressor",
+    "dep:ruzstd",
+    "dep:json-patch",
+    "tokio/net",
+    "tokio/sync",
+    "tokio/io-util",
+]
+
 [dependencies]
 bee-core = { workspace = true }
 bee-userspace = { workspace = true }
@@ -273,6 +301,38 @@ cvss = { version = "2.2", optional = true }
 # truncated to 16 bytes for a legible id, does promise it.
 sha2 = { version = "0.10", optional = true }
 
+# HTTP(S) interception (019-http-intercept, application package only — MUST NOT propagate to
+# bee-core/bee-common, SC-009; guarded by tests/core_deps_guard.rs). All optional, all behind the
+# default-off `intercept` feature (research R20).
+#
+# Already in Cargo.lock through rig-core's reqwest stack; declared here directly because the proxy
+# worker uses them itself. hyper 1.x is the forwarded-traffic proxy (it preserves header case, R1);
+# the crypto provider is `aws-lc-rs`, matching what the lockfile already resolved.
+hyper = { version = "1", features = ["http1", "server", "client"], optional = true }
+hyper-util = { version = "0.1", features = ["tokio"], optional = true }
+http-body-util = { version = "0.1", optional = true }
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs", "tls12"], optional = true }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"], optional = true }
+webpki-roots = { version = "1", optional = true }
+# The raw HTTP/1.1 writer frames responses with httparse (byte-exact requests, FR-018, R1).
+httparse = { version = "1.10", optional = true }
+# Body decoding for `http_get` slices (gzip/deflate), the replay diff, and grep over bodies.
+flate2 = { version = "1.1", optional = true }
+similar = { version = "2.7", optional = true }
+regex = { version = "1", optional = true }
+#
+# New with 019. `rcgen` mints the per-session CA and leaf certificates in worker memory (`zeroize`
+# wipes the key on drop, R9). `rusqlite` `bundled` is the exchange index — multi-column filtered
+# history over ~100k rows, two writers (R8). `brotli-decompressor`/`ruzstd` are decode-only, pure
+# Rust. `json-patch` gives the JSON body diff as pointer paths (R10).
+# The lockfile holds rcgen at 0.14.9: 0.14.10 requires aws-lc-rs ^1.18, which would move the
+# aws-lc-rs every default build already links (SC-009 — the default tree must not change).
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem", "zeroize"], optional = true }
+rusqlite = { version = "0.40", features = ["bundled"], optional = true }
+brotli-decompressor = { version = "6", optional = true }
+ruzstd = { version = "0.9", optional = true }
+json-patch = { version = "4.2", optional = true }
+
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
@@ -288,3 +348,8 @@ tempfile = "3"
 proptest = { workspace = true }
 # Pinned frame snapshots for the TUI (008-grid-tui, research D12).
 insta = "1"
+
+# 019-http-intercept: the fixture target needs the `intercept` dependency set (hyper/rustls/rcgen).
+[[example]]
+name = "vuln_target"
+required-features = ["intercept"]

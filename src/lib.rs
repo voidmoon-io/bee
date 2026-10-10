@@ -39,6 +39,10 @@ pub mod findings;
 pub mod gitlog;
 pub mod grants;
 pub mod hooks;
+// HTTP(S) interception (019-http-intercept). Gated: the proxy worker, its TLS stack and the exchange
+// store exist only in a build that asked for them (SC-009).
+#[cfg(feature = "intercept")]
+pub mod intercept;
 pub mod mcp;
 pub mod metrics;
 pub mod provider;

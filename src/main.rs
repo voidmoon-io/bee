@@ -109,6 +109,17 @@ enum Cmd {
     #[cfg(feature = "scanners")]
     #[command(hide = true)]
     SarifWorker(bee::sarif::SarifArgs),
+    /// Internal: the session's HTTP(S) interception proxy (019-http-intercept).
+    ///
+    /// Spawned once per session by the harness into its own kernel scope — the *proxy scope* —
+    /// with the harness-bound listening socket as fd 3 and the control channel on stdio. Hidden for
+    /// the same reason as the other workers: it is a seam, not an operator command.
+    #[cfg(feature = "intercept")]
+    #[command(hide = true)]
+    ProxyWorker {
+        #[arg(long)]
+        session: String,
+    },
 }
 
 fn main() -> ExitCode {
@@ -140,6 +151,8 @@ fn main() -> ExitCode {
         Cmd::GitlogWorker(args) => cmd_gitlog_worker(&args),
         #[cfg(feature = "scanners")]
         Cmd::SarifWorker(args) => cmd_sarif_worker(&args),
+        #[cfg(feature = "intercept")]
+        Cmd::ProxyWorker { session } => bee::intercept::worker::run(&session),
     }
 }
 

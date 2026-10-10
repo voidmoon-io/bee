@@ -453,11 +453,11 @@ turn start.
 
 **Independent Test**: spec US9.
 
-- [ ] T089 [P] [US9] Write tests (fail first):
+- [X] T089 [P] [US9] Write tests (fail first):
   - an `insta` snapshot in `tests/grid.rs` of the history pane with three exchanges, one containing ANSI and bidi characters in a header, which must render escaped through `safe_text`;
   - `tests/intercept_har.rs`: the export of selected exchanges is valid HAR 1.2 JSON, contains no `PRIVATE KEY`, no proxy token and no `Proxy-Authorization` header, and flags `Authorization`/`Cookie` headers in a `_bee.sensitive` field.
-- [ ] T090 [US9] Add `SessionEvent::HttpExchange(summary)` in `src/session/event.rs`, emitted from the sidecar reader. Add the history pane in `src/tui/panels.rs` (PanelRegistry upsert, TTL), `src/tui/app.rs` (update) and `src/tui/view.rs` (draw), with all target-derived text through `safe_text::safe_line`.
-- [ ] T091 [US9] Implement HAR export in `src/intercept/har.rs` (own serde structs) and a `bee http export --har <file> [--filter <json>]` command in `src/app/`. Exclude CA material and bee credentials, and flag sensitive headers.
+- [X] T090 [US9] *(Implemented pull-based instead: `ReplConfig.http_pane` returns a fresh table when exchanges have arrived, and the TUI refreshes the `http` panel before each draw. That avoids a second event stream through the turn pump; the escaping requirement is unchanged.)* Add `SessionEvent::HttpExchange(summary)` in `src/session/event.rs`, emitted from the sidecar reader. Add the history pane in `src/tui/panels.rs` (PanelRegistry upsert, TTL), `src/tui/app.rs` (update) and `src/tui/view.rs` (draw), with all target-derived text through `safe_text::safe_line`.
+- [X] T091 [US9] Implement HAR export in `src/intercept/har.rs` (own serde structs) and a `bee http export --har <file> [--filter <json>]` command in `src/app/`. Exclude CA material and bee credentials, and flag sensitive headers.
 - [ ] T092 [US9] **BLOCKED on 018**: migrate the sidecar scope to a Supervisor `ScopeRecord`; delete `EnforcedSandbox.sidecar` and the T018 refusal. Give subagents declaring `[policy.http]` their own proxy scope plus worker credential namespace, attenuation-checked by T026, with refusals attributed to the subagent scope. Add the validation to 018's quickstart.
 
 ---

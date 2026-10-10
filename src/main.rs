@@ -54,6 +54,10 @@ enum Cmd {
     /// tool surface: a verdict is only worth anything because a person formed it (016 FR-020).
     #[cfg(feature = "findings")]
     Findings(app::findings::FindingsArgs),
+    /// Work with recorded HTTP traffic: export it as HAR (019-http-intercept).
+    #[cfg(feature = "intercept")]
+    #[command(subcommand_required = true)]
+    Http(app::http::HttpArgs),
     /// Print kernel support diagnostics and exit (never attaches).
     Check,
     /// Compile-check a policy, or check attenuation of a child against a parent.
@@ -129,6 +133,8 @@ fn main() -> ExitCode {
         Cmd::Metrics(args) => app::metrics::main(args),
         #[cfg(feature = "findings")]
         Cmd::Findings(args) => app::findings::main(args),
+        #[cfg(feature = "intercept")]
+        Cmd::Http(args) => app::http::main(args),
         Cmd::Check => cmd_check(),
         Cmd::Validate { policy, parent } => cmd_validate(&policy, parent.as_deref()),
         Cmd::Exec {

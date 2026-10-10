@@ -236,6 +236,31 @@ impl Store {
         Ok(store)
     }
 
+    /// Open an existing store **read-only**: creates nothing and writes nothing (`bee http export`,
+    /// review). `Err` when there is no store.
+    pub fn open_read(project_root: &Path) -> Result<Store, StoreError> {
+        let dir = project_root.join(".bee").join("http");
+        let db = dir.join("index.sqlite");
+        if !db.exists() {
+            return Err(StoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("no exchange store at {}", db.display()),
+            )));
+        }
+        let conn = Connection::open_with_flags(&db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        Ok(Store {
+            conn,
+            dir,
+            session_id: String::new(),
+            short: String::new(),
+            next_seq: 0,
+            read_only: Some(SCHEMA_VERSION),
+            limits: HttpLimits::default(),
+            eviction: None,
+        })
+    }
+
     pub fn schema_version(&self) -> Result<u32, StoreError> {
         let v: String = self.conn.query_row(
             "SELECT value FROM meta WHERE key = 'schema_version'",

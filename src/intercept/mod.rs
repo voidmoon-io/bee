@@ -18,6 +18,7 @@ pub mod creds;
 pub mod diff;
 pub mod fuzz;
 pub mod har;
+pub mod pane;
 pub mod passive;
 pub mod query;
 pub mod session;

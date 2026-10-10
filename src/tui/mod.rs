@@ -110,6 +110,7 @@ pub async fn run(
         // Publish the drawable regions so the render tool can reject widgets this screen can't show.
         crate::viz::viewport::set(view::viewport_for(&app));
         app.tick_clock(now);
+        refresh_http_pane(&mut app, config);
         terminal.draw(|f| view::view(&mut app, f))?;
 
         // A submitted line starts a model turn; drive it to completion while still pumping the UI.
@@ -250,6 +251,7 @@ async fn run_turn(
         app.advance_overlay(now);
         crate::viz::viewport::set(view::viewport_for(app));
         app.tick_clock(now);
+        refresh_http_pane(app, config);
         terminal.draw(|f| view::view(app, f))?;
         let period = tick_interval(app).unwrap_or(SPINNER_TICK).min(SPINNER_TICK);
         // A mid-turn quit (Ctrl-C / q from chat focus) drops `exchange`, cancelling the call.
@@ -284,6 +286,7 @@ async fn run_turn(
 
         // Once the turn has ended and its trailing events are drained, one final redraw + return.
         if turn_done {
+            refresh_http_pane(app, config);
             terminal.draw(|f| view::view(app, f))?;
             return Ok(());
         }
@@ -421,5 +424,15 @@ mod scheduler_tests {
             tick_interval(&app).is_none(),
             "the poll retires with the panel"
         );
+    }
+}
+
+/// Upsert the live HTTP history pane when new exchanges have arrived (019 US9). A no-op in a session
+/// without `[policy.http]`, and between arrivals.
+fn refresh_http_pane(app: &mut App, config: &ReplConfig) {
+    if let Some(source) = &config.http_pane {
+        if let Some(spec) = source() {
+            app.panels.upsert("http", spec);
+        }
     }
 }

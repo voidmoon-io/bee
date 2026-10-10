@@ -84,6 +84,11 @@ pub struct ReplConfig {
     /// episode, the operator is present, so consent can be a prompt rather than a pre-authorizing
     /// ceiling file.
     pub escalation: Option<ReplEscalation>,
+    /// The live HTTP history pane (019 US9): returns a fresh table when exchanges have arrived since
+    /// the last call, `None` otherwise. Set only in a session with `[policy.http]`.
+    #[allow(clippy::type_complexity)]
+    pub http_pane:
+        Option<std::sync::Arc<dyn Fn() -> Option<crate::render_spec::RenderSpec> + Send + Sync>>,
 }
 
 /// Session-lifetime escalation state for the REPL.
@@ -136,6 +141,7 @@ impl Default for ReplConfig {
             skills: Arc::new(crate::skills::SkillRegistry::default()),
             visual: crate::config::VisualConfig::default(),
             escalation: None,
+            http_pane: None,
         }
     }
 }

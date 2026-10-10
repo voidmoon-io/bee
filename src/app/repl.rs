@@ -362,6 +362,10 @@ async fn repl(args: ReplArgs) -> ExitCode {
         skills: skills.clone(),
         visual: cfg.visual,
         escalation,
+        #[cfg(feature = "intercept")]
+        http_pane: http_session
+            .as_ref()
+            .map(|h| bee::intercept::pane::pane_source(h.interceptor.clone())),
         ..ReplConfig::default()
     };
 

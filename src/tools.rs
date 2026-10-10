@@ -38,7 +38,11 @@ pub mod http_get;
 #[cfg(feature = "intercept")]
 pub mod http_history;
 #[cfg(feature = "intercept")]
+pub mod http_replay;
+#[cfg(feature = "intercept")]
 pub mod http_send;
+#[cfg(feature = "intercept")]
+pub mod http_sitemap;
 #[cfg(feature = "scanners")]
 pub mod scanner;
 
@@ -93,7 +97,14 @@ pub const SCANNER_TOOLS: &[&str] = &["scan"];
 /// The HTTP(S) interception tools (019-http-intercept). Opt-in like the security tools; they answer
 /// only in a session whose policy declares `[policy.http]`, and refuse with `interceptor_unavailable`
 /// anywhere else. Compiled out (no `intercept` feature) they register as `NotCompiledIn` stubs.
-pub const HTTP_TOOLS: &[&str] = &["http_scope", "http_send", "http_get", "http_history"];
+pub const HTTP_TOOLS: &[&str] = &[
+    "http_scope",
+    "http_send",
+    "http_get",
+    "http_history",
+    "http_replay",
+    "http_sitemap",
+];
 
 /// Every tool name the harness knows how to build. A scenario may only list names from this set
 /// (scenario validation rejects the rest before a run).

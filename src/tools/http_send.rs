@@ -23,6 +23,8 @@ use crate::tools::http::{bounded_json, invalid, live, with_notices};
 use crate::tools::{Provenance, Tool, ToolOutcome, ToolResult, UnavailableReason};
 
 pub const BOUND: usize = 4 * 1024;
+/// With a `baseline` diff (contracts/http-tools.md#http_send).
+pub const BOUND_WITH_DIFF: usize = 16 * 1024;
 const MAX_REDIRECTS: u32 = 5;
 const DEFAULT_TIMEOUT_MS: u64 = 15_000;
 const MAX_TIMEOUT_MS: u64 = 120_000;
@@ -76,7 +78,7 @@ impl Tool for HttpSend {
                         },
                         "required": ["scheme", "host", "port"]
                     },
-                    "baseline": { "type": "string", "description": "exchange id to diff against (needs http_replay, M2)" },
+                    "baseline": { "type": "string", "description": "exchange id to diff the response against (same shape as http_replay's diff)" },
                     "follow_redirects": { "type": "integer", "minimum": 0, "maximum": 5 },
                     "timeout_ms": { "type": "integer", "minimum": 1 },
                     "tags": { "type": "array", "items": { "type": "string" } }
@@ -94,9 +96,14 @@ impl Tool for HttpSend {
             Ok(p) => p,
             Err(e) => return invalid("http_send", e),
         };
-        if parsed.baseline.is_some() {
-            return invalid("http_send", "baseline requires http_replay (M2)");
+        if let Some(b) = &parsed.baseline {
+            match icpt.with_store(|s| s.exchange_exists(b)) {
+                Ok(true) => {}
+                Ok(false) => return invalid("http_send", format!("no baseline exchange `{b}`")),
+                Err(e) => return invalid("http_send", e),
+            }
         }
+        let baseline = parsed.baseline.clone();
         let ctx = call_ctx(sandbox);
         let scope = ScopeChecker::new(icpt.http_scope());
 
@@ -137,10 +144,10 @@ impl Tool for HttpSend {
                 _ => None,
             };
             match next {
-                None => return render(icpt, &sent, redirects),
+                None => return render(icpt, &sent, redirects, baseline.as_deref()),
                 Some(Err(stop)) => {
                     redirects.push(json!({ "id": sent.exchange_id, "status": sent.record.status, "stopped": stop }));
-                    return render(icpt, &sent, redirects);
+                    return render(icpt, &sent, redirects, baseline.as_deref());
                 }
                 Some(Ok((t, b))) => {
                     redirects.push(json!({
@@ -155,7 +162,7 @@ impl Tool for HttpSend {
                                 t.host, t.port
                             ));
                         }
-                        return render(icpt, &sent, redirects);
+                        return render(icpt, &sent, redirects, baseline.as_deref());
                     }
                     target = t;
                     bytes = b;
@@ -438,7 +445,12 @@ fn refusal(
 }
 
 /// The bounded `http_send` result.
-fn render(icpt: &Interceptor, sent: &Sent, redirects: Vec<Value>) -> ToolResult {
+fn render(
+    icpt: &Interceptor,
+    sent: &Sent,
+    redirects: Vec<Value>,
+    baseline: Option<&str>,
+) -> ToolResult {
     let stored = icpt.with_store(|s| s.get_exchange(&sent.exchange_id).ok().flatten());
     let (content_type, headers_preview, body_preview) = match &stored {
         Some(e) => {
@@ -484,7 +496,20 @@ fn render(icpt: &Interceptor, sent: &Sent, redirects: Vec<Value>) -> ToolResult 
     if r.resp_truncated {
         v["stored_truncated"] = json!(true);
     }
-    let body = with_notices(bounded_json(&v, BOUND), icpt);
+    // `baseline`: the same diff shape `http_replay` gives, against a chosen earlier exchange (no
+    // noise probe — the model chose what to compare).
+    let mut bound = BOUND;
+    if let Some(b) = baseline {
+        if let (Ok(base), Ok(new)) = (
+            crate::tools::http_replay::side_of(icpt, b),
+            crate::tools::http_replay::side_of(icpt, &sent.exchange_id),
+        ) {
+            v["diff"] = crate::intercept::diff::diff(&base, &new, None);
+            v["baseline"] = json!(b);
+            bound = BOUND_WITH_DIFF;
+        }
+    }
+    let body = with_notices(bounded_json(&v, bound), icpt);
     let mut res = if matches!(r.outcome, crate::intercept::control::Outcome::Failed { .. }) {
         ToolResult::error(body)
     } else {

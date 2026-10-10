@@ -44,6 +44,8 @@ fn tool(name: &str, icpt: Option<Interceptor>) -> Option<Box<dyn Tool>> {
         "http_send" => Box::new(super::http_send::HttpSend { icpt }),
         "http_get" => Box::new(super::http_get::HttpGet { icpt }),
         "http_history" => Box::new(super::http_history::HttpHistory { icpt }),
+        "http_replay" => Box::new(super::http_replay::HttpReplay { icpt }),
+        "http_sitemap" => Box::new(super::http_sitemap::HttpSitemap { icpt }),
         #[cfg(feature = "vm-test")]
         "http_debug" => Box::new(HttpDebug { icpt }),
         _ => return None,

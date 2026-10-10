@@ -13,7 +13,8 @@
 //! - `/search?q=` reflects `q` unescaped (reflected-parameter lead, US8).
 //! - `/admin` → 200 only with `X-Forwarded-For: 127.0.0.1`, else 403 (replay diff, US5).
 //! - `/item?id=` → 500 when `id` contains `'` (fuzz outliers, US6).
-//! - `/json` → `{"user":{"role":"guest"},"meta":{"request_id":<random>}}` plus a `Date` header.
+//! - `/json` → `{"user":{"role":<role>},"meta":{"request_id":<random>}}` plus a `Date` header; the
+//!   role is `user.role` from a JSON request body, `guest` without one.
 //! - `/gzip` → a gzip-encoded body.
 //! - `/big` → streams 100 MB.
 //! - `/redirect?to=` → 302 to `to`.
@@ -218,15 +219,17 @@ async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
         .and_then(|v| v.trim().parse().ok())
         .unwrap_or(0);
     let xff = hdr("x-forwarded-for");
-    // Drain the body so the client sees a clean close.
-    let mut have = buf.len() - head_end;
-    while have < content_len {
+    // Read the body (kept up to 1 MiB), so routes can use it and the client sees a clean close.
+    let mut req_body: Vec<u8> = buf[head_end..].to_vec();
+    while req_body.len() < content_len {
         let mut chunk = [0u8; 8192];
         let n = s.read(&mut chunk).await?;
         if n == 0 {
             break;
         }
-        have += n;
+        if req_body.len() < 1 << 20 {
+            req_body.extend_from_slice(&chunk[..n]);
+        }
     }
 
     let (path, query) = match target.split_once('?') {
@@ -281,7 +284,16 @@ async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
                     .as_nanos(),
                 SEQ.fetch_add(1, Ordering::SeqCst)
             );
-            let body = format!(r#"{{"user":{{"role":"guest"}},"meta":{{"request_id":"{rid}"}}}}"#);
+            // The role echoes `user.role` from a JSON request body, when one is sent.
+            let role = serde_json::from_slice::<serde_json::Value>(&req_body)
+                .ok()
+                .and_then(|v| {
+                    v.pointer("/user/role")
+                        .and_then(|r| r.as_str())
+                        .map(str::to_string)
+                })
+                .unwrap_or_else(|| "guest".into());
+            let body = format!(r#"{{"user":{{"role":"{role}"}},"meta":{{"request_id":"{rid}"}}}}"#);
             let date = httpdate_now();
             let head = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nDate: {date}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",

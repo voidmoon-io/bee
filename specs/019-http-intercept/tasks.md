@@ -365,7 +365,7 @@ memory. All other hosts are tunnelled.
 
 **Independent Test**: spec US5, in `tests/intercept_replay.rs`.
 
-- [ ] T070 [P] [US5] Write `tests/intercept_replay.rs` (fails first):
+- [X] T070 [P] [US5] Write `tests/intercept_replay.rs` (fails first):
   - replay `/json` with `JsonSet /user/role "admin"` yields a new exchange linked by `parent` and a `probe` exchange;
   - the `Date` header and `/meta/request_id` are reported under `volatile_suppressed`, not as changes;
   - replay `/admin` with `SetHeader X-Forwarded-For 127.0.0.1` yields a status diff of `[403, 200]`;
@@ -373,14 +373,14 @@ memory. All other hosts are tunnelled.
   - `http_send` with `baseline` returns the same diff shape;
   - sitemap after 10 requests lists every path and query parameter name;
   - bounds: replay ≤ 16 KiB, sitemap ≤ 24 KiB.
-- [ ] T071 [US5] Implement `Edit` application in `src/intercept/diff.rs` (or `edits.rs` beside it) over a stored raw request head and body. Every `Edit` variant from data-model.md is required; `JsonSet` and `JsonRemove` re-serialise the body and fix `Content-Length`.
-- [ ] T072 [US5] Implement the diff in `src/intercept/diff.rs`:
+- [X] T071 [US5] Implement `Edit` application in `src/intercept/diff.rs` (or `edits.rs` beside it) over a stored raw request head and body. Every `Edit` variant from data-model.md is required; `JsonSet` and `JsonRemove` re-serialise the body and fix `Content-Length`.
+- [X] T072 [US5] Implement the diff in `src/intercept/diff.rs`:
   - status, length, elapsed and header diffs;
   - a text body diff with `similar` as bounded unified hunks;
   - a JSON diff with `json_patch::diff` reported as pointer paths;
   - volatility = paths and headers differing between original and probe, plus the fixed header list from research R10.
-- [ ] T073 [US5] Implement the `http_replay` tool and enable `baseline` in `http_send` in `src/tools/http.rs` (depends: T071, T072).
-- [ ] T074 [US5] Implement the `http_sitemap` tool in `src/tools/http.rs`: an aggregate SQL query over `exchanges` (host, path segments, methods, statuses, counts). Query parameter names come from `target`; body parameter names come from form and JSON request bodies, decoded and capped at 256 KiB each.
+- [X] T073 [US5] Implement the `http_replay` tool and enable `baseline` in `http_send` in `src/tools/http.rs` (depends: T071, T072).
+- [X] T074 [US5] Implement the `http_sitemap` tool in `src/tools/http.rs`: an aggregate SQL query over `exchanges` (host, path segments, methods, statuses, counts). Query parameter names come from `target`; body parameter names come from form and JSON request bodies, decoded and capped at 256 KiB each.
 
 ---
 

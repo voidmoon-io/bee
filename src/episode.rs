@@ -305,11 +305,13 @@ pub async fn run_loop(
 
             // Attribute whatever this call spawns — the call and, after a widening, its one retry —
             // to this tool call (019 P3): the interception proxy issues a per-call credential from it.
-            sandbox.set_call_context(Some(crate::sandbox::CallContext {
-                call_id: tc.id.clone(),
-                turn: index as u32,
-                origin: crate::sandbox::CallOrigin::Tool,
-            }));
+            sandbox
+                .begin_call(crate::sandbox::CallContext {
+                    call_id: tc.id.clone(),
+                    turn: index as u32,
+                    origin: crate::sandbox::CallOrigin::Tool,
+                })
+                .await;
             let (mut result, timed_out) =
                 match tokio::time::timeout(remaining, registry.execute(tc, sandbox)).await {
                     Ok(r) => (r, false),
@@ -361,7 +363,15 @@ pub async fn run_loop(
                 }
             }
 
-            sandbox.set_call_context(None);
+            let proxy_events = sandbox.end_call().await;
+            // The proxy scope's kernel events join the call's audit only now, after escalation —
+            // which they must never drive — tagged `scope_id = "proxy"` (019 T047).
+            let sidecar_audit = sandbox.drain_sidecar_audit();
+            audit_trail.extend(sidecar_audit.iter().cloned());
+            audit.extend(sidecar_audit);
+            for ev in &proxy_events {
+                emit(opts, format!("  {}", crate::repl::render_proxy_event(ev)));
+            }
 
             let denied = audit.iter().any(|e| e.decision == "denied");
             let tag = if denied {
@@ -403,6 +413,7 @@ pub async fn run_loop(
                     EpisodeStatus::NotCaptured
                 };
                 recorded.push(RecordedCall {
+                    proxy_events,
                     call: tc.clone(),
                     result,
                     audit,
@@ -417,6 +428,7 @@ pub async fn run_loop(
             }
 
             recorded.push(RecordedCall {
+                proxy_events,
                 call: tc.clone(),
                 result,
                 audit,
@@ -454,6 +466,7 @@ pub async fn run_loop(
 
     let ended_at = OffsetDateTime::now_utc();
     EpisodeTranscript {
+        http_scope: None,
         scenario_id: scenario.id.clone(),
         model_id: model.id().to_string(),
         status,
@@ -473,6 +486,7 @@ pub async fn run_loop(
 fn infra_error(scenario: &Scenario, model: &dyn Model, detail: String) -> EpisodeTranscript {
     let now = rfc3339(OffsetDateTime::now_utc());
     EpisodeTranscript {
+        http_scope: None,
         scenario_id: scenario.id.clone(),
         model_id: model.id().to_string(),
         status: EpisodeStatus::InfraError { detail },
@@ -584,6 +598,14 @@ fn write_with_parents(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<(
     std::fs::write(path, bytes)
 }
 
+/// Operator choices for one episode that are never read from a scenario or configuration file.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EpisodeOptions {
+    /// `--http-scope-advisory`: run `[policy.http]` interception even though the kernel will not
+    /// block (host mode, a build without `enforce`, or an observe-mode policy) — research R17.
+    pub http_scope_advisory: bool,
+}
+
 /// Run a full episode: build the sandbox (a real bee scope under `--features enforce`), materialize
 /// the workdir, run the loop, tear down. `provider_key_env` names the provider key var so it (plus
 /// the default key vars) is stripped from every tool child (FR-018).
@@ -592,6 +614,25 @@ pub async fn run_episode(
     scenario: &Scenario,
     provider_key_env: Option<&str>,
     progress: Option<ProgressSink>,
+) -> EpisodeTranscript {
+    run_episode_with(
+        model,
+        scenario,
+        provider_key_env,
+        progress,
+        EpisodeOptions::default(),
+    )
+    .await
+}
+
+/// [`run_episode`] with operator options.
+#[cfg_attr(not(feature = "intercept"), allow(unused_variables))]
+pub async fn run_episode_with(
+    model: &dyn Model,
+    scenario: &Scenario,
+    provider_key_env: Option<&str>,
+    progress: Option<ProgressSink>,
+    eopts: EpisodeOptions,
 ) -> EpisodeTranscript {
     // Fail closed (Constitution I): a scenario that asks for MCP but a binary built without the
     // `mcp` feature cannot provide it — refuse with a clear diagnostic rather than silently ignore.
@@ -665,13 +706,97 @@ pub async fn run_episode(
     // Keep the resolved policy as the escalation floor before it is moved into the scope (007).
     let escalation_base = grants.policy.clone();
 
+    // HTTP interception (019). Decided before the scope compiles: the proxy port is the tool scope's
+    // only network rule, so the listener is bound first.
+    let wants_http = grants.policy.http.as_ref().is_some_and(|h| h.is_active());
+    #[cfg(not(feature = "intercept"))]
+    if wants_http {
+        return infra_error(
+            scenario,
+            model,
+            "the policy declares [policy.http] targets, but bee was built without \
+             --features intercept; refusing to run its tools with an unenforced scope"
+                .into(),
+        );
+    }
+    #[cfg(feature = "intercept")]
+    let http_advisory: Option<String> = if wants_http {
+        match crate::intercept::session::advisory_reason(&grants.policy, cfg!(feature = "enforce"))
+        {
+            Some(reason) if !eopts.http_scope_advisory => {
+                return infra_error(
+                    scenario,
+                    model,
+                    crate::intercept::session::advisory_refusal(&reason),
+                )
+            }
+            Some(reason) => {
+                emit(&opts, crate::intercept::session::advisory_banner(&reason));
+                Some(reason)
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+    #[cfg(feature = "intercept")]
+    let http_session_id = format!("{}-{}", sanitize_id(&scenario.id), std::process::id());
+
     #[cfg(feature = "enforce")]
-    let mut sandbox = match build_enforced_sandbox(scenario, grants.policy, strip_env) {
-        Ok(s) => s,
-        Err(detail) => return infra_error(scenario, model, detail),
+    #[cfg_attr(not(feature = "intercept"), allow(unused_mut))]
+    let (mut sandbox, http_prepared) =
+        match build_enforced_sandbox(scenario, grants.policy, strip_env) {
+            Ok(s) => s,
+            Err(detail) => return infra_error(scenario, model, detail),
+        };
+    #[cfg(all(not(feature = "enforce"), feature = "intercept"))]
+    let http_prepared = if wants_http {
+        match crate::intercept::session::prepare(
+            &grants.policy,
+            &bee_userspace::SystemResolver::current(),
+        ) {
+            Ok(p) => p,
+            Err(detail) => return infra_error(scenario, model, detail),
+        }
+    } else {
+        None
     };
     #[cfg(not(feature = "enforce"))]
+    #[cfg_attr(not(feature = "intercept"), allow(unused_mut))]
     let mut sandbox = Sandbox::host(strip_env);
+
+    // Start the proxy worker — in its sidecar scope, or advisory — and give the HTTP tools its handle.
+    #[cfg(feature = "intercept")]
+    let http_session = match http_prepared {
+        Some(prepared) => {
+            let enforcement = match &http_advisory {
+                Some(reason) => crate::intercept::sidecar::Enforcement::Advisory {
+                    reason: reason.clone(),
+                },
+                None => crate::intercept::sidecar::Enforcement::Kernel,
+            };
+            let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            match crate::intercept::session::start(
+                prepared,
+                &mut sandbox,
+                &http_session_id,
+                &root,
+                enforcement,
+            )
+            .await
+            {
+                Ok(h) => {
+                    crate::tools::http::configure_http_tools(&mut registry, &h.interceptor);
+                    Some(h)
+                }
+                Err(detail) => {
+                    let _ = sandbox.teardown();
+                    return infra_error(scenario, model, format!("HTTP interception: {detail}"));
+                }
+            }
+        }
+        None => None,
+    };
 
     // Register the model-facing `skill` tool alongside the built-ins.
     if skills.model_facing().next().is_some() {
@@ -738,6 +863,17 @@ pub async fn run_episode(
     };
 
     let mut transcript = run_loop(model, scenario, &mut registry, &mut sandbox, &opts).await;
+
+    // The proxy worker goes before the scopes: its sidecar scope is torn down first (019 P4).
+    #[cfg(feature = "intercept")]
+    if let Some(h) = &http_session {
+        h.shutdown().await;
+        transcript.http_scope = Some(crate::transcript::HttpSessionHeader {
+            enforcement: h.interceptor.enforcement().label().into(),
+            advisory_reason: http_advisory.clone(),
+            advisory_acknowledged: http_advisory.is_some(),
+        });
+    }
 
     // Drop the refresh hook (its bridge clone) then the bridge, killing the MCP children (they live in
     // the scope cgroup) before the scope itself is torn down.
@@ -856,18 +992,35 @@ fn widen_for_scanner_reports(policy: &mut bee_core::Policy, scenario: &Scenario)
 
 /// Bring up a real bee scope from the resolved policy and wrap it as an [`Sandbox::Enforced`]. The
 /// policy is already widened by any approved skill grants and skill-dir reads (006-skills).
+/// The interception setup an enforced sandbox was built with: `Some` when `[policy.http]` is active.
+#[cfg(all(feature = "enforce", feature = "intercept"))]
+type HttpPrepared = Option<crate::intercept::session::Prepared>;
+#[cfg(all(feature = "enforce", not(feature = "intercept")))]
+type HttpPrepared = Option<std::convert::Infallible>;
+
 #[cfg(feature = "enforce")]
 fn build_enforced_sandbox(
     scenario: &Scenario,
     policy: bee_core::Policy,
     strip_env: Vec<String>,
-) -> Result<Sandbox, String> {
+) -> Result<(Sandbox, HttpPrepared), String> {
     use bee_userspace::{EnforcementPlan, Engine, ScopeMode, SystemResolver};
 
     let resolver = SystemResolver::current();
-    let compiled = policy
+    // 019: bind the proxy listener and compile the proxy scope *before* the tool policy, whose only
+    // network rule becomes the proxy port.
+    #[cfg(feature = "intercept")]
+    let prepared = crate::intercept::session::prepare(&policy, &resolver)?;
+    #[cfg(not(feature = "intercept"))]
+    let prepared: HttpPrepared = None;
+    #[cfg_attr(not(feature = "intercept"), allow(unused_mut))]
+    let mut compiled = policy
         .compile(&resolver)
         .map_err(|e| format!("policy compile: {e}"))?;
+    #[cfg(feature = "intercept")]
+    if let Some(p) = &prepared {
+        compiled = bee_core::compiler::with_proxy_loopback(compiled, p.port);
+    }
     let plan = EnforcementPlan::prepare(&compiled, ScopeMode::Enforce)
         .map_err(|e| format!("enforcement plan: {e}"))?;
     let mut engine = Engine::init().map_err(|e| format!("engine init: {e}"))?;
@@ -883,8 +1036,38 @@ fn build_enforced_sandbox(
     let reader = engine
         .take_audit_reader(&scope_id)
         .map_err(|e| format!("audit reader: {e}"))?;
+    // The proxy scope comes from the same engine, before it moves into the sandbox (019 P4).
+    #[cfg(feature = "intercept")]
+    let sidecar = match &prepared {
+        Some(p) => Some(
+            crate::intercept::session::attach_sidecar(&mut engine, &scope_id, &p.compiled)
+                .map_err(|e| {
+                    let _ = scope.teardown();
+                    e
+                })?,
+        ),
+        None => None,
+    };
     // `engine` moves into the sandbox so its eBPF programs stay attached for the whole episode.
-    Ok(Sandbox::enforced(engine, scope, reader, strip_env))
+    #[cfg_attr(not(feature = "intercept"), allow(unused_mut))]
+    let mut sandbox = Sandbox::enforced(engine, scope, reader, strip_env);
+    #[cfg(feature = "intercept")]
+    if let Some(sc) = sidecar {
+        sandbox = sandbox.with_sidecar(sc).map_err(|(sb, sc, e)| {
+            let _ = sc.scope.teardown();
+            let _ = sb.teardown();
+            e.to_string()
+        })?;
+    }
+    Ok((sandbox, prepared))
+}
+
+/// A scenario id reduced to `[A-Za-z0-9-]`, for session and scope names.
+#[cfg_attr(not(feature = "intercept"), allow(dead_code))]
+fn sanitize_id(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
 }
 
 #[cfg(feature = "enforce")]

@@ -187,6 +187,8 @@ intercept = [
     "tokio/net",
     "tokio/sync",
     "tokio/io-util",
+    # The worker's control channel is its stdio.
+    "tokio/io-std",
 ]
 # Test-only (019 T048): compiles the proxy worker's `debug.connect`/`debug.read` control frames, which
 # the `http-proxy-scope` and `http-proxy-fs-deny` VM cases use to probe the proxy scope from inside.
@@ -352,7 +354,7 @@ libc = { workspace = true }
 [dev-dependencies]
 # 019: tests assert against the kernel rule budget and access bits the core compiles to.
 bee-common = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "process", "time"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "process", "time", "test-util"] }
 tempfile = "3"
 proptest = { workspace = true }
 # Pinned frame snapshots for the TUI (008-grid-tui, research D12).

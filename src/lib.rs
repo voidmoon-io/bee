@@ -46,6 +46,8 @@ pub mod intercept;
 pub mod mcp;
 pub mod metrics;
 pub mod provider;
+// Proxy-layer events (019). Ungated: transcripts carry them in every build.
+pub mod proxy_event;
 pub mod render_api;
 pub mod render_spec;
 pub mod repl;
@@ -82,7 +84,9 @@ pub use batch::{run_batch, BatchConfig, BatchError, BatchResult};
 #[cfg(feature = "concurrent")]
 pub use concurrent::run_concurrent;
 pub use config::{ProviderConfig, ProviderType};
-pub use episode::{run_episode, run_loop, LoopOptions, ProgressSink};
+pub use episode::{
+    run_episode, run_episode_with, run_loop, EpisodeOptions, LoopOptions, ProgressSink,
+};
 pub use mcp::{McpPolicy, McpServerConfig, McpTransport};
 pub use metrics::{CallRecord, Recorder};
 pub use provider::{

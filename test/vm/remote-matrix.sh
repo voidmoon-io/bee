@@ -878,6 +878,115 @@ else
   echo "RESULT|concurrent-audit-isolation|SKIP|no bee at $BEE"
 fi
 
+# ---------------------------------------------------------------- 019: HTTP interception (US1)
+# One scripted episode under `[policy.http]`, one tool call per probe. Each call is its own credential
+# (its own call id), so every probe is attributed separately in the transcript. The in-VM targets are
+# python http.servers on loopback; 18081 is deliberately NOT in scope and logs every request it gets,
+# so "no upstream connection" is checked at the destination, not inferred.
+HTTP_CASES="http-in-scope http-out-of-scope http-direct-target http-direct-other http-proxy-scope http-sni-mismatch http-store-protected http-proxy-fs-deny"
+if [ -x "$BEE" ] && "$BEE" run --help 2>/dev/null | grep -q -- '--http-scope-advisory' \
+   && "$BEE" proxy-worker --help >/dev/null 2>&1; then
+  HW=/home/ubuntu/httpwork
+  rm -rf "$HW"; mkdir -p "$HW/www" "$HW/other" "$HW/src"
+  echo "in-scope-ok" >"$HW/www/index.html"
+  echo "project-secret" >"$HW/src/secret.txt"
+  ( cd "$HW/www" && exec python3 -m http.server 18080 --bind 127.0.0.1 ) >/dev/null 2>&1 &
+  T1=$!
+  ( cd "$HW/other" && exec python3 -m http.server 18081 --bind 127.0.0.1 ) >"$HW/other.log" 2>&1 &
+  T2=$!
+  openssl req -x509 -newkey rsa:2048 -nodes -subj "/CN=app.test" -days 1 \
+    -keyout "$HW/key.pem" -out "$HW/cert.pem" >/dev/null 2>&1
+  openssl s_server -accept 127.0.0.1:18443 -cert "$HW/cert.pem" -key "$HW/key.pem" -www -quiet \
+    >/dev/null 2>&1 &
+  T3=$!
+  sleep 1
+  printf '%s\n' '[policy]' 'name = "http-vm"' 'mode = "enforce"' \
+    '[policy.exec]' 'allow = ["bash", "curl", "cat", "openssl", "head", "timeout"]' \
+    '[policy.filesystem]' '"/home/ubuntu/httpwork" = "write"' \
+    '[policy.http]' 'targets = ["127.0.0.1:18080", "127.0.0.1:18443"]' >"$HW/policy.toml"
+  printf '%s\n' '[scenario]' 'id = "http-vm"' "policy_path = \"$HW/policy.toml\"" \
+    'system_prompt = "test"' 'task = "probe"' 'turn_limit = 16' 'timeout_secs = 120' \
+    'tools = ["bash", "http_history", "http_debug"]' >"$HW/scn.toml"
+  # The SNI probe reads the call's own proxy credential out of HTTP_PROXY, as any client would.
+  python3 - "$HW" >"$HW/prov.toml" <<'PYPROV'
+import json, sys
+hw = sys.argv[1]
+sni = ("P=${HTTP_PROXY#http://}; U=${P%@*}; HP=${P#*@}; echo | timeout 10 openssl s_client "
+       "-proxy $HP -proxy_user ${U%%:*} -proxy_pass pass:${U#*:} -connect 127.0.0.1:18443 "
+       "-servername other.test 2>&1 | head -5; echo done")
+steps = [
+    ("bash", {"command": "curl -sS -o /dev/null -w 'code=%{http_code}' http://127.0.0.1:18080/"}),
+    ("bash", {"command": "curl -sS -o /dev/null -w 'code=%{http_code}' http://127.0.0.1:18081/"}),
+    ("bash", {"command": "curl -sS --max-time 5 --noproxy '*' -o /dev/null -w 'code=%{http_code}' http://127.0.0.1:18080/; echo"}),
+    ("bash", {"command": "curl -sS --max-time 5 --noproxy '*' -o /dev/null -w 'code=%{http_code}' http://1.1.1.1/; echo"}),
+    ("http_debug", {"connect": "1.1.1.1:443"}),
+    ("bash", {"command": sni}),
+    ("bash", {"command": "cat .bee/http/index.sqlite >/dev/null && echo READ-OK; echo x > .bee/http/blobs/x && echo WRITE-OK; true"}),
+    ("http_debug", {"read": hw + "/src/secret.txt"}),
+    ("http_history", {}),
+]
+print("[provider]\nprovider = \"mock\"")
+for tool, args in steps:
+    # TOML basic strings are JSON-compatible for these values.
+    inline = ", ".join(f"{k} = {json.dumps(v)}" for k, v in args.items())
+    print(f"[[provider.script]]\ntool = \"{tool}\"\nargs = {{ {inline} }}")
+print("[[provider.script]]\ntext = \"done\"")
+PYPROV
+  ( cd "$HW" && "$BEE" run --scenario "$HW/scn.toml" --provider "$HW/prov.toml" \
+      --out "$HW/t.json" ) >"$HW/run.log" 2>&1
+  kill "$T1" "$T2" "$T3" 2>/dev/null
+  if [ ! -f "$HW/t.json" ]; then
+    for c in $HTTP_CASES; do
+      emit "$c" FAIL "no transcript: $(tail -3 "$HW/run.log" | tr '\n' ' ')"
+    done
+  else
+    # One python pass over the transcript; prints `case|PASS|note` lines.
+    while IFS='|' read -r c st note; do emit "$c" "$st" "$note"; done < <(python3 - "$HW/t.json" "$HW/other.log" <<'PYCHECK'
+import json, sys
+t = json.load(open(sys.argv[1]))
+other_log = open(sys.argv[2]).read()
+calls = [c for turn in t["turns"] for c in turn["calls"]]
+def res(i): return calls[i]["result"]["content"] if i < len(calls) else ""
+def audit(i): return calls[i].get("audit", []) if i < len(calls) else []
+def pev(i): return calls[i].get("proxy_events", []) if i < len(calls) else []
+def out(case, ok, note): print(f"{case}|{'PASS' if ok else 'FAIL'}|{note}")
+ids = [c["call"]["id"] for c in calls]
+hist = res(8)
+out("http-in-scope", "code=200" in res(0) and bool(ids) and ids[0] in hist,
+    f"curl via proxy: {res(0)[:60]!r}; in history: {bool(ids) and ids[0] in hist}")
+oos = [e for e in pev(1) if e["kind"] == "refused_out_of_scope"]
+out("http-out-of-scope", "code=403" in res(1) and bool(oos) and "GET /" not in other_log,
+    f"{res(1)[:40]!r}, proxy_event={bool(oos)}, upstream_hits={other_log.count('GET /')}")
+def kdeny(i, target):
+    return [a for a in audit(i) if a["op"] == "connect" and a["decision"] == "denied"
+            and a.get("scope_id") != "proxy" and (target is None or a["target"] == target)]
+out("http-direct-target", "code=000" in res(2) and bool(kdeny(2, "127.0.0.1:18080")),
+    f"{res(2).strip()[:60]!r}, kernel denials={[a['target'] for a in kdeny(2, None)]}")
+out("http-direct-other", "code=000" in res(3) and bool(kdeny(3, "1.1.1.1:80")),
+    f"{res(3).strip()[:60]!r}, kernel denials={[a['target'] for a in kdeny(3, None)]}")
+px = [a for a in audit(4) if a.get("scope_id") == "proxy" and a["op"] == "connect"
+      and a["target"] == "1.1.1.1:443"]
+out("http-proxy-scope", "errno=1" in res(4) and bool(px),
+    f"{res(4)!r}, proxy-scope audit={[(a['op'], a['target']) for a in audit(4)]}")
+sni = [e for e in pev(5) if e["kind"] == "refused_sni_mismatch"]
+out("http-sni-mismatch", bool(sni) and "BEGIN CERTIFICATE" not in res(5), f"proxy_event={bool(sni)}")
+fs = [a for a in audit(6) if a["op"] == "file_open" and a["decision"] == "denied"
+      and ".bee/http" in a["target"]]
+out("http-store-protected", "READ-OK" not in res(6) and "WRITE-OK" not in res(6) and len(fs) >= 2,
+    f"denials={[a['target'] for a in fs]}")
+pf = [a for a in audit(7) if a.get("scope_id") == "proxy" and a["op"] == "file_open"
+      and "secret.txt" in a["target"]]
+out("http-proxy-fs-deny", "errno=13" in res(7) and bool(pf), f"{res(7)!r}, proxy-scope audit={bool(pf)}")
+PYCHECK
+)
+  fi
+  rm -rf "$HW"
+else
+  for c in $HTTP_CASES; do
+    emit "$c" FAIL "bee was not built with --features vm-test (see test/vm/README.md)"
+  done
+fi
+
 rm -rf "$WORK"
 echo "SUMMARY|pass=$pass|fail=$fail"
 [ "$fail" -eq 0 ]

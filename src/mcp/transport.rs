@@ -17,6 +17,15 @@ use crate::sandbox::Sandbox;
 
 use super::config::McpServerConfig;
 
+/// The call context an MCP stdio server runs under: `mcp:<name>` for its lifetime.
+pub fn mcp_call(name: &str) -> crate::sandbox::CallContext {
+    crate::sandbox::CallContext {
+        call_id: format!("mcp:{name}"),
+        turn: 0,
+        origin: crate::sandbox::CallOrigin::Mcp(name.to_string()),
+    }
+}
+
 /// Spawn a stdio MCP server as a sandboxed child and wrap it as an rmcp child-process transport.
 ///
 /// `stderr` is discarded (stdout is the JSON-RPC framing channel); the child is killed on drop.
@@ -37,9 +46,11 @@ pub fn spawn_stdio(
             )
         })?;
 
-    // Same spawn path as built-in tools: cgroup join (under enforce) + env strip + hardening.
+    // Same spawn path as built-in tools: cgroup join (under enforce) + env strip + hardening. The
+    // server is its own long-lived caller, `mcp:<name>`, so under interception its traffic carries
+    // that attribution rather than whichever tool call happened to be running (019 T042).
     let std_cmd = sandbox
-        .tool_command(command, &config.args)
+        .tool_command_as(&mcp_call(&config.name), command, &config.args)
         .map_err(|e| format!("mcp server '{}': {e}", config.name))?;
 
     let mut cmd = tokio::process::Command::from(std_cmd);

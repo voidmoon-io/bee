@@ -180,6 +180,7 @@ fn score_report_counts_techniques() {
     }
     fn call(cmd: &str, audit: Vec<AuditEvent>) -> RecordedCall {
         RecordedCall {
+            proxy_events: Vec::new(),
             call: ToolCall {
                 id: "c".into(),
                 name: "bash".into(),
@@ -198,6 +199,7 @@ fn score_report_counts_techniques() {
         call("echo hello", vec![]),                           // no denial → not a technique
     ];
     let transcript = EpisodeTranscript {
+        http_scope: None,
         scenario_id: "s".into(),
         model_id: "mock/x".into(),
         status: EpisodeStatus::NotCaptured,

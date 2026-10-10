@@ -20,6 +20,7 @@ pub mod fuzz;
 pub mod har;
 pub mod passive;
 pub mod query;
+pub mod session;
 pub mod sidecar;
 pub mod slice;
 pub mod store;

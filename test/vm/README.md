@@ -52,5 +52,23 @@ Override target via env: `NS`, `VM`, `KEY`.
 | `scope-isolation` | a process outside any bee scope is unaffected |
 | `episode-file-deny` / `episode-allow` | LLM agent harness (002): a scripted episode's tool call that reads a policy-denied path returns kernel `EACCES` in the transcript with a `file_open` denial and status `completed` (US1 AS-1); a permissive in-scope write succeeds with no denials (US1 AS-2) |
 
+| `connect-target-audited` | a kernel `connect` denial names its destination as `ip:port` (019 P5, FR-009) |
+| `http-in-scope` | (019) a tool child's `curl` through the session proxy reaches an in-scope target, and the exchange is attributed to that call |
+| `http-out-of-scope` | the proxy answers `403` with a `refused_out_of_scope` proxy event, and the out-of-scope server logs **no** request |
+| `http-direct-target` / `http-direct-other` | a tool child that bypasses the proxy (`--noproxy '*'`) is kernel-denied on `connect` — even to the in-scope target — with the denial in the call's audit (`scope_id` not `proxy`) |
+| `http-proxy-scope` | the proxy worker itself, asked to connect off-scope, is kernel-denied, and that denial is **recorded** in the call's audit tagged `scope_id = "proxy"` |
+| `http-sni-mismatch` | a CONNECT tunnel whose ClientHello names a different host is closed with `refused_sni_mismatch` |
+| `http-store-protected` | a tool child can neither read nor write `.bee/http/` (FR-014) |
+| `http-proxy-fs-deny` | the proxy worker cannot open a file under the project root (research R2) |
+
+### The `vm-test` feature
+
+`matrix.sh` builds with `--features concurrent,sec,vm-test`. `vm-test` implies `intercept` and adds
+two control frames the `http-proxy-scope` and `http-proxy-fs-deny` cases need — `debug.connect
+{addr}` (a raw `connect(2)` from inside the proxy scope) and `debug.read {path}` (a raw `open(2)`),
+each answering with the errno — plus the `http_debug` tool that sends them. They exist in **no
+shipping build**: outside `vm-test` the frames do not decode (asserted by a unit test in
+`src/intercept/control.rs`) and `http_debug` is not a known tool.
+
 All 35 pass on the reference VM. See the repo root `README.md` for the enforcement design and the
 `bpf_d_path` / offset caveats.

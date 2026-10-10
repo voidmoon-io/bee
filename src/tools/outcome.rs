@@ -88,6 +88,20 @@ pub enum UnavailableReason {
         lang: String,
         supported: Vec<String>,
     },
+    /// The interception proxy is not running (019): the session has no `[policy.http]`, or its worker
+    /// died. An HTTP tool never falls back to direct egress.
+    InterceptorUnavailable { detail: String },
+    /// The destination is outside the target scope (019). `layer` names who refused: `proxy` (a
+    /// user-space check) or `kernel`.
+    OutOfScope {
+        host: String,
+        port: u16,
+        layer: String,
+    },
+    /// The host is reachable only as a tunnel; no model-originated request may test it (019).
+    EgressOnly { host: String },
+    /// A `[policy.http.limits]` bound would be exceeded (019, FR-021).
+    LimitExceeded { limit: String, value: u64 },
 }
 
 impl std::fmt::Display for UnavailableReason {
@@ -151,6 +165,21 @@ impl std::fmt::Display for UnavailableReason {
             UnavailableReason::NotARepository { path } => {
                 write!(f, "{} is not inside a repository", path.display())
             }
+            UnavailableReason::InterceptorUnavailable { detail } => {
+                write!(f, "the HTTP interception proxy is unavailable: {detail}")
+            }
+            UnavailableReason::OutOfScope { host, port, layer } => write!(
+                f,
+                "{host}:{port} is outside the target scope (refused by the {layer} layer); \
+                 widening the scope requires operator approval"
+            ),
+            UnavailableReason::EgressOnly { host } => write!(
+                f,
+                "{host} is an egress host: reachable as a tunnel for other tools, never testable"
+            ),
+            UnavailableReason::LimitExceeded { limit, value } => {
+                write!(f, "would exceed [policy.http.limits] {limit} ({value})")
+            }
             UnavailableReason::LanguageRequiresBuild { lang, supported } => {
                 write!(
                     f,
@@ -181,6 +210,10 @@ impl UnavailableReason {
             UnavailableReason::LanguageUnsupported { .. } => "language_unsupported",
             UnavailableReason::NotARepository { .. } => "not_a_repository",
             UnavailableReason::LanguageRequiresBuild { .. } => "language_requires_build",
+            UnavailableReason::InterceptorUnavailable { .. } => "interceptor_unavailable",
+            UnavailableReason::OutOfScope { .. } => "out_of_scope",
+            UnavailableReason::EgressOnly { .. } => "egress_only",
+            UnavailableReason::LimitExceeded { .. } => "limit_exceeded",
         }
     }
 

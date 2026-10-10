@@ -111,6 +111,19 @@ fn refused_overlay_key(key: &str, strip_env: &[String]) -> Result<(), String> {
 /// Computes the [`EnvOverlay`] for a call. Installed by the harness only (019 interception).
 pub type EnvProvider = Box<dyn Fn(&CallContext) -> EnvOverlay + Send + Sync>;
 
+/// Work the harness does at the edges of every tool call, awaited before the call's children can
+/// spawn and after they are done (019 P3). The interception proxy issues the call's credential in
+/// `begin` and revokes it in `end`; `begin` must finish first, or a child could reach the proxy
+/// before its credential exists.
+pub trait CallHooks: Send + Sync {
+    fn begin<'a>(&'a self, call: &'a CallContext) -> futures_util::future::BoxFuture<'a, ()>;
+    fn end<'a>(&'a self, call: &'a CallContext) -> futures_util::future::BoxFuture<'a, ()>;
+    /// Proxy-layer events the call produced, collected once [`CallHooks::end`] has returned.
+    fn take_events(&self, _call: &CallContext) -> Vec<crate::proxy_event::ProxyEvent> {
+        Vec::new()
+    }
+}
+
 /// Everything that decides a tool child's environment: what is stripped, and what — for the current
 /// call — is added back.
 #[derive(Default)]
@@ -118,6 +131,7 @@ struct ChildEnv {
     strip_env: Vec<String>,
     call: Option<CallContext>,
     provider: Option<EnvProvider>,
+    hooks: Option<std::sync::Arc<dyn CallHooks>>,
 }
 
 impl ChildEnv {
@@ -128,10 +142,11 @@ impl ChildEnv {
         }
     }
 
-    /// Clear `cmd`'s environment to the inherited allowlist, then apply this call's overlay.
-    fn apply(&self, cmd: &mut Command) -> Result<(), SpawnError> {
+    /// Clear `cmd`'s environment to the inherited allowlist, then apply the overlay for `call` (the
+    /// current tool call unless one is named).
+    fn apply(&self, cmd: &mut Command, call: Option<&CallContext>) -> Result<(), SpawnError> {
         restrict_env(cmd, &self.strip_env);
-        if let (Some(provider), Some(call)) = (&self.provider, &self.call) {
+        if let (Some(provider), Some(call)) = (&self.provider, call.or(self.call.as_ref())) {
             for (k, v) in provider(call).vars() {
                 refused_overlay_key(k, &self.strip_env)
                     .map_err(|e| SpawnError::Io(io::Error::other(e)))?;
@@ -388,6 +403,36 @@ impl Sandbox {
         self.child_env().call.as_ref()
     }
 
+    /// Start a tool call: set its context, then run the harness's [`CallHooks::begin`] (019). The loop
+    /// calls this before `ToolRegistry::execute` and [`end_call`](Self::end_call) after the call and
+    /// its one possible retry.
+    pub async fn begin_call(&mut self, call: CallContext) {
+        let hooks = self.child_env().hooks.clone();
+        if let Some(h) = &hooks {
+            h.begin(&call).await;
+        }
+        self.child_env_mut().call = Some(call);
+    }
+
+    /// End the current tool call: run [`CallHooks::end`], clear the context, and return the proxy
+    /// events the call produced (019 T045) — kept apart from kernel audit by type.
+    pub async fn end_call(&mut self) -> Vec<crate::proxy_event::ProxyEvent> {
+        let hooks = self.child_env().hooks.clone();
+        let call = self.child_env_mut().call.take();
+        match (&hooks, &call) {
+            (Some(h), Some(c)) => {
+                h.end(c).await;
+                h.take_events(c)
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Install the harness's per-call hooks (019 interception).
+    pub fn set_call_hooks(&mut self, hooks: std::sync::Arc<dyn CallHooks>) {
+        self.child_env_mut().hooks = Some(hooks);
+    }
+
     /// Install the per-call environment overlay (harness only — e.g. the interception proxy's
     /// `HTTP_PROXY` credential). Applied to every child spawned while a call context is set.
     pub fn set_env_provider(&mut self, provider: EnvProvider) {
@@ -567,11 +612,40 @@ impl Sandbox {
     /// Build a hardened, credential-stripped [`Command`] for a tool child. Under `enforce` the child
     /// also joins the scope cgroup before exec. The caller runs/waits on it (async, via tokio).
     pub fn tool_command(&self, program: &str, args: &[String]) -> Result<Command, SpawnError> {
+        self.tool_command_for(None, program, args)
+    }
+
+    /// [`tool_command`](Self::tool_command) for a child that belongs to `call` rather than to the
+    /// current tool call — a long-lived MCP stdio server, attributed `mcp:<server>` (019 T042). Same
+    /// scope, same hardening, same environment rules.
+    pub fn tool_command_as(
+        &self,
+        call: &CallContext,
+        program: &str,
+        args: &[String],
+    ) -> Result<Command, SpawnError> {
+        self.tool_command_for(Some(call), program, args)
+    }
+
+    /// Run [`CallHooks::begin`] for a side call (not the loop's current one) — e.g. issue an MCP
+    /// server's proxy credential before it spawns.
+    pub async fn begin_side_call(&self, call: &CallContext) {
+        if let Some(h) = self.child_env().hooks.clone() {
+            h.begin(call).await;
+        }
+    }
+
+    fn tool_command_for(
+        &self,
+        call: Option<&CallContext>,
+        program: &str,
+        args: &[String],
+    ) -> Result<Command, SpawnError> {
         match self {
             Sandbox::Host(h) => {
                 // No cgroup join; hardening + env strip only.
                 let mut cmd = hardened_command::<fn() -> io::Result<()>>(program, args, None)?;
-                h.env.apply(&mut cmd)?;
+                h.env.apply(&mut cmd, call)?;
                 Ok(cmd)
             }
             #[cfg(feature = "enforce")]
@@ -581,7 +655,7 @@ impl Sandbox {
                     .join_closure()
                     .map_err(|err| SpawnError::Io(io::Error::other(err.to_string())))?;
                 let mut cmd = hardened_command(program, args, Some(join))?;
-                e.env.apply(&mut cmd)?;
+                e.env.apply(&mut cmd, call)?;
                 Ok(cmd)
             }
             #[cfg(feature = "concurrent")]
@@ -591,7 +665,7 @@ impl Sandbox {
                     .join_closure()
                     .map_err(|err| SpawnError::Io(io::Error::other(err.to_string())))?;
                 let mut cmd = hardened_command(program, args, Some(join))?;
-                c.env.apply(&mut cmd)?;
+                c.env.apply(&mut cmd, call)?;
                 Ok(cmd)
             }
         }

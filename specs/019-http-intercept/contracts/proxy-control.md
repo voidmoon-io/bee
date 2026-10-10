@@ -27,8 +27,8 @@ channel (fail closed).
 | Frame | Fields | Reply |
 |---|---|---|
 | `init` | `http_scope`, `limits`, `session_id` | `hello` |
-| `creds.issue` | `token`, `ctx {call_id, turn, origin}` | `ack` |
-| `creds.revoke` | `token` | `ack` |
+| `creds.issue` | `req_id`, `token`, `ctx {call_id, turn, origin}` | `ack {req_id}` — the harness awaits it before the call's children spawn, so no child can reach the proxy ahead of its credential |
+| `creds.revoke` | `req_id`, `token` | `ack {req_id}` |
 | `scope.update` | new `http_scope` (after kernel reload) | `ack` / `error` |
 | `send` | `req_id`, `raw {scheme, host, port, bytes}`, `timeout_ms`, `ctx` | `exchange` |
 | `fuzz.start` | `run_id`, `variants` (streamed in batches of ≤256), effective limits, `ctx` | `exchange`… then `fuzz.done` |

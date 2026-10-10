@@ -68,3 +68,18 @@ fn exec_help_describes_a_diagnostic() {
         "`bee exec --help` should mark it as secondary to `run`/`repl`:\n{stdout}"
     );
 }
+
+#[test]
+fn http_scope_advisory_is_an_operator_flag_on_both_sessions() {
+    // 019 T044: accepting proxy-only enforcement of `[policy.http]` is an act at the command line,
+    // made per session. It is a flag on `run` and `repl` — and nothing in configuration can set it
+    // (`config::Flags` has no such field, so no layer can carry it into a session).
+    for cmd in ["run", "repl"] {
+        let out = bee(&[cmd, "--help"]);
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            text.contains("--http-scope-advisory"),
+            "`bee {cmd}`:\n{text}"
+        );
+    }
+}

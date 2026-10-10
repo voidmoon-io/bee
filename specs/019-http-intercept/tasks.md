@@ -171,7 +171,7 @@ without acknowledgement.
 
 ### Tests for User Story 1 ⚠️ write first, observe failing
 
-- [ ] T031 [P] [US1] Write `tests/intercept_proxy.rs` against `vuln_target`, running the worker in advisory mode. It checks that:
+- [X] T031 [P] [US1] Write `tests/intercept_proxy.rs` against `vuln_target`, running the worker in advisory mode. It checks that:
   - an in-scope `GET` through the proxy with valid credentials yields 200 and an `exchange` frame with the `call_id`;
   - an out-of-scope absolute-form request yields `403` and `ProxyEvent refused_out_of_scope`, with no connection made to the destination (assert the fixture's second listener saw zero accepts);
   - a CONNECT to an out-of-scope host is refused;
@@ -179,9 +179,9 @@ without acknowledgement.
   - an `egress` host via CONNECT tunnels and is recorded as `TunnelRecord`;
   - `Upgrade: websocket` yields 501.
   - DNS drift: the scope compiles `drift.test` → 127.0.0.2 via a stub resolver, and the worker's resolver then returns 127.0.0.3. The request is refused with `refused_address_drift` naming both addresses, and no connect is attempted.
-- [ ] T032 [P] [US1] Add an SNI test to `tests/intercept_proxy.rs`: a rustls client CONNECTs to the in-scope TLS port but sends SNI `other.test`. Expect the tunnel closed and `refused_sni_mismatch`. A matching SNI splices, and the client completes the handshake against the fixture's real cert.
-- [ ] T033 [P] [US1] Add a fail-closed test to `tests/intercept_proxy.rs`: kill the worker mid-session. Then `bash` running `curl` through the proxy fails, and an `http_*` tool returns `Unavailable { interceptor_unavailable }`. Exactly one restart is attempted and announced; a second death leaves the tools unavailable.
-- [ ] T034 [P] [US1] Write session-construction tests in `tests/intercept_session.rs`:
+- [X] T032 [P] [US1] Add an SNI test to `tests/intercept_proxy.rs`: a rustls client CONNECTs to the in-scope TLS port but sends SNI `other.test`. Expect the tunnel closed and `refused_sni_mismatch`. A matching SNI splices, and the client completes the handshake against the fixture's real cert.
+- [X] T033 [P] [US1] Add a fail-closed test to `tests/intercept_proxy.rs`: kill the worker mid-session. Then `bash` running `curl` through the proxy fails, and an `http_*` tool returns `Unavailable { interceptor_unavailable }`. Exactly one restart is attempted and announced; a second death leaves the tools unavailable.
+- [X] T034 [P] [US1] Write session-construction tests in `tests/intercept_session.rs`:
   - `[policy.http]` in host mode without `--http-scope-advisory` refuses with a message naming the flag;
   - with the flag, the banner is printed and the transcript header records the acknowledgement;
   - with the concurrent runner, it refuses;
@@ -190,25 +190,25 @@ without acknowledgement.
 
 ### Implementation for User Story 1
 
-- [ ] T035 [US1] Implement the worker entry in `src/intercept/worker/mod.rs::run`:
+- [X] T035 [US1] Implement the worker entry in `src/intercept/worker/mod.rs::run`:
   - verify fd 3 is a listening IPv4-loopback TCP socket (`getsockname`, `SO_ACCEPTCONN`) or exit 2;
   - call `rustls::crypto::aws_lc_rs::default_provider().install_default()`;
   - read the `init` frame from stdin and reply `hello`;
   - run the accept loop and the control loop on a current-thread tokio runtime with a `LocalSet`.
-- [ ] T036 [US1] Implement `src/intercept/worker/scope.rs`:
+- [X] T036 [US1] Implement `src/intercept/worker/scope.rs`:
   - `resolve_checked(host, port) -> Result<SocketAddr, Refusal>`: resolve at connect time and keep only addresses in the entry's compiled `resolved` set. If none remain, refuse with `ProxyEvent refused_address_drift { host, now_resolves_to, compiled }` **before** attempting a connect, instead of letting the kernel deny an anonymous connect. Every upstream connect, in `connect.rs`, `forward.rs` and `raw.rs`, goes through it. Add the new `kind` to data-model.md's `ProxyEvent` and research R14.
   - `HttpScope` checks: `check_target(host, port) -> Result<Role, Refusal>` and `check_sni(connect_host, sni) -> Result<(), Refusal>`, with case-insensitive, trailing-dot-insensitive matching;
   - IP-literal targets match only themselves, and a `Host` header that disagrees with the authority is refused;
   - `update(HttpScope)` for `scope.update`.
-- [ ] T037 [US1] Implement credential state in `src/intercept/worker/listen.rs`: a map from token to `CallContext` fed by `creds.issue`/`creds.revoke`. Parse `Proxy-Authorization: Basic` (curl and most clients send userinfo this way) and also userinfo in absolute-form URIs. Respond `407` with `Proxy-Authenticate: Basic realm="bee"` on failure and emit `ProxyEvent refused_bad_credential` (depends: T035).
-- [ ] T038 [US1] Implement the hyper http1 server in `src/intercept/worker/listen.rs`: `.with_upgrades()` and `preserve_header_case(true)`. Route `CONNECT` to `connect.rs` and absolute-form requests to `forward.rs`. Return `501` for `Upgrade: websocket`. Scope-check before any upstream connect (depends: T036, T037).
-- [ ] T039 [US1] Implement `src/intercept/worker/connect.rs` (depends: T036):
+- [X] T037 [US1] Implement credential state in `src/intercept/worker/listen.rs`: a map from token to `CallContext` fed by `creds.issue`/`creds.revoke`. Parse `Proxy-Authorization: Basic` (curl and most clients send userinfo this way) and also userinfo in absolute-form URIs. Respond `407` with `Proxy-Authenticate: Basic realm="bee"` on failure and emit `ProxyEvent refused_bad_credential` (depends: T035).
+- [X] T038 [US1] Implement the hyper http1 server in `src/intercept/worker/listen.rs`: `.with_upgrades()` and `preserve_header_case(true)`. Route `CONNECT` to `connect.rs` and absolute-form requests to `forward.rs`. Return `501` for `Upgrade: websocket`. Scope-check before any upstream connect (depends: T036, T037).
+- [X] T039 [US1] Implement `src/intercept/worker/connect.rs` (depends: T036):
   - after the role check, reply 200 and `hyper::upgrade::on`;
   - for non-inspected hosts, buffer the client's ClientHello (up to 16 KiB), parse SNI with `rustls::server::Acceptor`, apply `check_sni`, connect upstream, write the buffered bytes, then `copy_bidirectional`;
   - emit a `tunnel` frame with byte counts on close.
   - A ClientHello without SNI is allowed only when the CONNECT authority is an IP-literal target.
-- [ ] T040 [US1] Implement `src/intercept/worker/forward.rs` for plain-HTTP absolute-form requests: connect upstream with a hyper client conn (no pool), strip `Proxy-Authorization`, forward, collect bodies up to `max_body_bytes`, and emit an `exchange` frame with `origin.path = "forwarded"` and segments (depends: T038).
-- [ ] T041 [US1] Implement `src/intercept/sidecar.rs` (depends: T028, T035):
+- [X] T040 [US1] Implement `src/intercept/worker/forward.rs` for plain-HTTP absolute-form requests: connect upstream with a hyper client conn (no pool), strip `Proxy-Authorization`, forward, collect bodies up to `max_body_bytes`, and emit an `exchange` frame with `origin.path = "forwarded"` and segments (depends: T038).
+- [X] T041 [US1] Implement `src/intercept/sidecar.rs` (depends: T028, T035):
   - bind `TcpListener` on `127.0.0.1:0` in the harness;
   - spawn `current_exe() proxy-worker --session <id>` through a new `Sandbox::sidecar_command` that uses the sidecar join closure plus the hardening from `hardened_command`;
   - `dup2` the listener to fd 3 in `pre_exec`, clearing `CLOEXEC` on fd 3 only;
@@ -217,8 +217,8 @@ without acknowledgement.
   - run a reader task that writes `exchange`/`tunnel`/`proxy_event` frames into `Store` and forwards `ProxyEvent`s to the session;
   - apply the restart-once policy.
   - In host mode / non-`enforce` builds (advisory, research R17), spawn the worker with `hardened_command` and **no** cgroup join, keeping the same fd-3 handoff and control channel. In observe mode, use the sidecar path as normal.
-- [ ] T042 [US1] Implement `src/intercept/creds.rs`: mint 16 random bytes from `/dev/urandom`, encode the token hex, send `creds.issue` and `creds.revoke`. Register the `EnvOverlay` provider from T014 that produces the proxy variables for the current `CallContext`. For MCP stdio servers, issue an `mcp:<server>` credential at spawn and revoke it at drop, with the hook in `src/mcp/transport.rs:24-56` (depends: T014, T041). Extend `tests/mcp_stdio.rs`: with `[policy.http]` present, an MCP stdio server child receives the proxy variables and an `mcp:<server>` credential, and its traffic is attributed to `mcp:<server>` in the store.
-- [ ] T043 [US1] Wire session construction in `src/app/session.rs:296-330` `build_sandbox` (depends: T017, T025, T041, T042):
+- [X] T042 [US1] Implement `src/intercept/creds.rs`: mint 16 random bytes from `/dev/urandom`, encode the token hex, send `creds.issue` and `creds.revoke`. Register the `EnvOverlay` provider from T014 that produces the proxy variables for the current `CallContext`. For MCP stdio servers, issue an `mcp:<server>` credential at spawn and revoke it at drop, with the hook in `src/mcp/transport.rs:24-56` (depends: T014, T041). Extend `tests/mcp_stdio.rs`: with `[policy.http]` present, an MCP stdio server child receives the proxy variables and an `mcp:<server>` credential, and its traffic is attributed to `mcp:<server>` in the store.
+- [X] T043 [US1] Wire session construction in `src/app/session.rs:296-330` `build_sandbox` (depends: T017, T025, T041, T042):
   - when `policy.http` is present, run `compile_http`;
   - bind the listener and apply `with_proxy_loopback(tool_policy, port)`;
   - create the sidecar scope from `proxy_scope` before the engine moves;
@@ -227,10 +227,10 @@ without acknowledgement.
   - Require `--http-scope-advisory` whenever enforcement does not block: host mode, a non-`enforce` build, or `policy.mode == Observe`. Record the reason in the transcript header.
   - Refuse the concurrent runner (T018).
   - Mirror this on the episode path at `src/episode.rs:870-876`.
-- [ ] T044 [US1] Add the `--http-scope-advisory` flag to the `run` and `repl` commands in `src/app/` (clap). It is not readable from any config file; assert that in a test in `tests/command_surface.rs`. Print the banner and record the acknowledgement in the transcript header (`src/transcript.rs`).
-- [ ] T045 [US1] Add `ProxyEvent` (data-model.md) to `src/transcript.rs` as `RecordedCall.proxy_events: Vec<ProxyEvent>`, kept separate from `audit`. Add `SessionEvent::Proxy(ProxyEvent)` in `src/session/event.rs`. Render refusals in the REPL and TUI as `refused by proxy: <host>:<port> (<kind>)`, distinct from kernel denial rendering.
-- [ ] T046 [US1] Implement the `http_scope` tool in `src/tools/http.rs` per contracts/http-tools.md#http_scope: read-only, every entry with `enforced_by` layers, plus `enforcement: kernel|advisory`. `advisory` whenever the session started under `--http-scope-advisory`, which includes observe mode. Register it in `HTTP_TOOLS` and `register_named` in `src/tools.rs`, with a `NotCompiledIn` arm (`src/tools.rs:367-408`) and a `sec_tool_family`-style mapping to `intercept` (depends: T043).
-- [ ] T047 [US1] Make the drained sidecar-scope kernel events from T017 flow into the call's `RecordedCall.audit` tagged `scope = "proxy"` in `src/episode.rs` and `src/repl.rs`.
+- [X] T044 [US1] Add the `--http-scope-advisory` flag to the `run` and `repl` commands in `src/app/` (clap). It is not readable from any config file; assert that in a test in `tests/command_surface.rs`. Print the banner and record the acknowledgement in the transcript header (`src/transcript.rs`).
+- [X] T045 [US1] Add `ProxyEvent` (data-model.md) to `src/transcript.rs` as `RecordedCall.proxy_events: Vec<ProxyEvent>`, kept separate from `audit`. Add `SessionEvent::Proxy(ProxyEvent)` in `src/session/event.rs`. Render refusals in the REPL and TUI as `refused by proxy: <host>:<port> (<kind>)`, distinct from kernel denial rendering.
+- [X] T046 [US1] Implement the `http_scope` tool in `src/tools/http.rs` per contracts/http-tools.md#http_scope: read-only, every entry with `enforced_by` layers, plus `enforcement: kernel|advisory`. `advisory` whenever the session started under `--http-scope-advisory`, which includes observe mode. Register it in `HTTP_TOOLS` and `register_named` in `src/tools.rs`, with a `NotCompiledIn` arm (`src/tools.rs:367-408`) and a `sec_tool_family`-style mapping to `intercept` (depends: T043).
+- [X] T047 [US1] Make the drained sidecar-scope kernel events from T017 flow into the call's `RecordedCall.audit` tagged `scope = "proxy"` in `src/episode.rs` and `src/repl.rs`.
 - [ ] T048 [US1] Add VM cases to `test/vm/remote-matrix.sh`, exactly as in the quickstart.md M1 VM table, each emitting a `RESULT|…` line:
   - `http-in-scope`, `http-out-of-scope`, `http-direct-target`, `http-direct-other`, `http-proxy-scope` and `http-sni-mismatch`;
   - `http-store-protected` (FR-014): a tool child's read and write of `.bee/http/` are kernel-denied;
@@ -251,13 +251,13 @@ rows), and `http_get` (bounded slices), all wrapped as untrusted data.
 
 ### Tests for User Story 2 ⚠️ write first
 
-- [ ] T049 [P] [US2] Write `tests/intercept_tools.rs` (send):
+- [X] T049 [P] [US2] Write `tests/intercept_tools.rs` (send):
   - structured `POST` to `/echo` returns id, status, size, elapsed and a 1 KiB preview;
   - raw bytes with duplicate headers, odd casing and a bare `\n` appear byte-identical in `/echo`'s body;
   - `follow_redirects: 2` to an out-of-scope `to` stops and reports the hop;
   - an `egress` host is refused with `egress_only`;
   - the result bound is ≤ 4 KiB.
-- [ ] T050 [P] [US2] Add `http_history` tests to `tests/intercept_tools.rs`:
+- [X] T050 [P] [US2] Add `http_history` tests to `tests/intercept_tools.rs`:
   - seed 20 mixed exchanges;
   - filter by method, status list, status range, path prefix, `since: "-10m"`, call id and origin;
   - `total_matched` is correct when it exceeds `limit`;
@@ -265,7 +265,7 @@ rows), and `http_get` (bounded slices), all wrapped as untrusted data.
   - rows include `call_id`;
   - a forwarded `curl` exchange and a tool exchange carry different call ids;
   - the bound is ≤ 24 KiB.
-- [ ] T051 [P] [US2] Add `http_get` tests to `tests/intercept_tools.rs`:
+- [X] T051 [P] [US2] Add `http_get` tests to `tests/intercept_tools.rs`:
   - headers only;
   - a byte range on the decoded `/gzip` body;
   - `grep` with context;
@@ -277,21 +277,21 @@ rows), and `http_get` (bounded slices), all wrapped as untrusted data.
 
 ### Implementation for User Story 2
 
-- [ ] T052 [US2] Implement the raw HTTP/1.1 writer in `src/intercept/worker/raw.rs`: connect over TCP or TLS (rustls client, webpki roots, `insecure_upstream` honoured), `write_all` the exact bytes, then parse the response with `httparse` in a loop over `BytesMut`. Body framing: Content-Length, chunked via `parse_chunk_size`, or close-delimited. Handle 1xx skip, HEAD and 204/304. Enforce the `max_body_bytes` cap, `timeout_ms`, and timing (connect/ttfb/total). Emit an `exchange` with `origin.path = "raw"`.
-- [ ] T053 [US2] Handle the `send` control frame in the worker (`src/intercept/worker/mod.rs`): re-check scope and role (proxy-control invariant 2, defence in depth), then go through `pace.rs` (T054) and `raw.rs` (depends: T052, T036).
-- [ ] T054 [P] [US2] Implement `src/intercept/worker/pace.rs`: a token bucket at `limits.rps` and a semaphore at `limits.concurrency`. Unit-test pacing with tokio's paused clock.
-- [ ] T055 [US2] Implement request serialisation in `src/tools/http.rs`: the structured `request` becomes raw bytes, preserving header order and case, adding `Host` and `Content-Length` only when absent, and handling `body_base64`. Raw input passes through untouched. Follow redirects with a per-hop scope check (FR-023).
-- [ ] T056 [US2] Implement the `http_send` tool in `src/tools/http.rs` per contracts/http-tools.md#http_send. It sends via the sidecar control client, awaits the `exchange`, and stores it. The result has `Harness` provenance for bee's fields and `Remote` for the preview. The `baseline` diff is deferred to US5 and returns `invalid_args: "baseline requires http_replay (M2)"` until then (depends: T055, T053, T030).
-- [ ] T057 [US2] Implement `src/intercept/query.rs`: map the filter struct (`deny_unknown_fields`) to parameterised SQL over the schema indexes. `since`/`until` accept RFC 3339 or a relative `-Nm/-Nh`. Return compact rows plus `total_matched` (depends: T030).
-- [ ] T058 [US2] Implement the `http_history` tool in `src/tools/http.rs` (depends: T057).
-- [ ] T059 [US2] Implement `src/intercept/slice.rs`:
+- [X] T052 [US2] Implement the raw HTTP/1.1 writer in `src/intercept/worker/raw.rs`: connect over TCP or TLS (rustls client, webpki roots, `insecure_upstream` honoured), `write_all` the exact bytes, then parse the response with `httparse` in a loop over `BytesMut`. Body framing: Content-Length, chunked via `parse_chunk_size`, or close-delimited. Handle 1xx skip, HEAD and 204/304. Enforce the `max_body_bytes` cap, `timeout_ms`, and timing (connect/ttfb/total). Emit an `exchange` with `origin.path = "raw"`.
+- [X] T053 [US2] Handle the `send` control frame in the worker (`src/intercept/worker/mod.rs`): re-check scope and role (proxy-control invariant 2, defence in depth), then go through `pace.rs` (T054) and `raw.rs` (depends: T052, T036).
+- [X] T054 [P] [US2] Implement `src/intercept/worker/pace.rs`: a token bucket at `limits.rps` and a semaphore at `limits.concurrency`. Unit-test pacing with tokio's paused clock.
+- [X] T055 [US2] Implement request serialisation in `src/tools/http.rs`: the structured `request` becomes raw bytes, preserving header order and case, adding `Host` and `Content-Length` only when absent, and handling `body_base64`. Raw input passes through untouched. Follow redirects with a per-hop scope check (FR-023).
+- [X] T056 [US2] Implement the `http_send` tool in `src/tools/http.rs` per contracts/http-tools.md#http_send. It sends via the sidecar control client, awaits the `exchange`, and stores it. The result has `Harness` provenance for bee's fields and `Remote` for the preview. The `baseline` diff is deferred to US5 and returns `invalid_args: "baseline requires http_replay (M2)"` until then (depends: T055, T053, T030).
+- [X] T057 [US2] Implement `src/intercept/query.rs`: map the filter struct (`deny_unknown_fields`) to parameterised SQL over the schema indexes. `since`/`until` accept RFC 3339 or a relative `-Nm/-Nh`. Return compact rows plus `total_matched` (depends: T030).
+- [X] T058 [US2] Implement the `http_history` tool in `src/tools/http.rs` (depends: T057).
+- [X] T059 [US2] Implement `src/intercept/slice.rs`:
   - decode identity, gzip and deflate (`flate2`), `br` (`brotli-decompressor`) and `zstd` (`ruzstd`), with a 64 MiB decoded cap;
   - byte range;
   - grep with `regex` (`RegexBuilder::size_limit(1 << 20)`), context lines and a match cap;
   - JSON pointer through `serde_json`;
   - raw head.
-- [ ] T060 [US2] Implement the `http_get` tool in `src/tools/http.rs` with `Remote` provenance for content (depends: T059).
-- [ ] T061 [US2] Register `http_send`, `http_get` and `http_history` in `HTTP_TOOLS` and `register_named` with `NotCompiledIn` arms in `src/tools.rs`. Add them to `is_known_tool` so scenarios can name them. Add a `NotCompiledIn` test to `tests/fail_closed_tools.rs`.
+- [X] T060 [US2] Implement the `http_get` tool in `src/tools/http.rs` with `Remote` provenance for content (depends: T059).
+- [X] T061 [US2] Register `http_send`, `http_get` and `http_history` in `HTTP_TOOLS` and `register_named` with `NotCompiledIn` arms in `src/tools.rs`. Add them to `is_known_tool` so scenarios can name them. Add a `NotCompiledIn` test to `tests/fail_closed_tools.rs`.
 
 **Checkpoint**: M1 complete. Quickstart M1 host and VM steps pass; MVP is demonstrable.
 

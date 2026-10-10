@@ -10,7 +10,7 @@
 use bee::tools::outcome::{
     clean_scan, ToolOutcome, UnavailableReason, CLEAN_PREFIX, FAILED_PREFIX, UNAVAILABLE_PREFIX,
 };
-use bee::tools::{is_known_tool, sec_tool_family, SCANNER_TOOLS, SEC_TOOLS};
+use bee::tools::{is_known_tool, sec_tool_family, HTTP_TOOLS, SCANNER_TOOLS, SEC_TOOLS};
 
 /// Every `UnavailableReason` variant, so a new one cannot be added without deciding how it renders.
 fn every_reason() -> Vec<UnavailableReason> {
@@ -41,6 +41,21 @@ fn every_reason() -> Vec<UnavailableReason> {
         UnavailableReason::LanguageRequiresBuild {
             lang: "cpp".into(),
             supported: vec!["python".into(), "ruby".into()],
+        },
+        UnavailableReason::InterceptorUnavailable {
+            detail: "the proxy worker is not running".into(),
+        },
+        UnavailableReason::OutOfScope {
+            host: "evil.test".into(),
+            port: 443,
+            layer: "proxy".into(),
+        },
+        UnavailableReason::EgressOnly {
+            host: "crates.io".into(),
+        },
+        UnavailableReason::LimitExceeded {
+            limit: "max_requests_per_run".into(),
+            value: 5000,
         },
     ]
 }
@@ -234,5 +249,47 @@ fn a_compiled_out_family_refuses_rather_than_returning_nothing() {
             "{name} did not name the missing feature: {}",
             rendered.content
         );
+    }
+}
+
+// ── 019-http-intercept T061 ──────────────────────────────────────────────────────────────────────
+
+#[test]
+fn http_tool_names_are_known_and_name_their_feature() {
+    for name in HTTP_TOOLS {
+        assert!(is_known_tool(name), "{name} is not a known tool name");
+        assert_eq!(sec_tool_family(name), Some("intercept"), "{name}");
+    }
+}
+
+/// An HTTP tool never answers without a proxy: compiled out it says which feature is missing, and
+/// compiled in but with no `[policy.http]` it says there is no proxy. Neither path can send directly.
+#[tokio::test]
+async fn an_http_tool_without_a_proxy_refuses() {
+    let sandbox = bee::sandbox::Sandbox::host(Vec::new());
+    for name in HTTP_TOOLS {
+        let registry = bee::tools::registry_for(&[name.to_string()], None);
+        assert!(registry.contains(name), "{name} registered nothing");
+        let call = bee::provider::ToolCall {
+            id: "c".into(),
+            name: name.to_string(),
+            arguments: serde_json::json!({}),
+        };
+        let r = registry.execute(&call, &sandbox).await;
+        assert!(r.is_error, "{name} did not refuse: {}", r.content);
+        assert!(
+            r.content.starts_with(UNAVAILABLE_PREFIX),
+            "{name}: {}",
+            r.content
+        );
+        if cfg!(feature = "intercept") {
+            assert!(
+                r.content.contains("interception proxy is unavailable"),
+                "{}",
+                r.content
+            );
+        } else {
+            assert!(r.content.contains("intercept"), "{}", r.content);
+        }
     }
 }

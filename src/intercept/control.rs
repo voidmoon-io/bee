@@ -50,10 +50,16 @@ pub enum ToWorker {
         session_id: String,
         http_scope: HttpScope,
     },
+    /// Acked with `req_id`, and the harness waits for the ack before the call's children spawn:
+    /// otherwise a child could reach the proxy before its credential exists, and get a 407.
     #[serde(rename = "creds.issue")]
-    CredsIssue { token: String, ctx: WireCtx },
+    CredsIssue {
+        req_id: u64,
+        token: String,
+        ctx: WireCtx,
+    },
     #[serde(rename = "creds.revoke")]
-    CredsRevoke { token: String },
+    CredsRevoke { req_id: u64, token: String },
     /// After the kernel has been reloaded with the widened proxy scope (US3).
     #[serde(rename = "scope.update")]
     ScopeUpdate { req_id: u64, http_scope: HttpScope },
@@ -285,56 +291,7 @@ pub struct TunnelRecord {
     pub outcome: String,
 }
 
-/// Kinds of proxy-layer event (research R14). Never merged with kernel `AuditEvent`s.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProxyEventKind {
-    RefusedOutOfScope,
-    RefusedSniMismatch,
-    RefusedBadCredential,
-    RefusedEgressOnly,
-    RefusedLimit,
-    RefusedAddressDrift,
-    RuleFired,
-    Held,
-    AutoForwarded,
-}
-
-impl ProxyEventKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ProxyEventKind::RefusedOutOfScope => "refused_out_of_scope",
-            ProxyEventKind::RefusedSniMismatch => "refused_sni_mismatch",
-            ProxyEventKind::RefusedBadCredential => "refused_bad_credential",
-            ProxyEventKind::RefusedEgressOnly => "refused_egress_only",
-            ProxyEventKind::RefusedLimit => "refused_limit",
-            ProxyEventKind::RefusedAddressDrift => "refused_address_drift",
-            ProxyEventKind::RuleFired => "rule_fired",
-            ProxyEventKind::Held => "held",
-            ProxyEventKind::AutoForwarded => "auto_forwarded",
-        }
-    }
-
-    /// A refusal, as opposed to a rule or hold notice.
-    pub fn is_refusal(self) -> bool {
-        self.as_str().starts_with("refused_")
-    }
-}
-
-/// A proxy-layer event (data-model.md §ProxyEvent). `layer` is always `"proxy"`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProxyEvent {
-    pub ts: String,
-    pub session_id: String,
-    #[serde(default)]
-    pub call_id: Option<String>,
-    pub layer: String,
-    pub kind: ProxyEventKind,
-    pub host: String,
-    pub port: u16,
-    #[serde(default)]
-    pub detail: serde_json::Value,
-}
+pub use crate::proxy_event::{ProxyEvent, ProxyEventKind};
 
 /// Worker → harness.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -502,9 +459,24 @@ impl<R: AsyncRead + Unpin> FrameReader<R> {
 
 /// Current wall-clock time, RFC 3339 — the timestamp format of every frame.
 pub fn now_rfc3339() -> String {
-    time::OffsetDateTime::now_utc()
-        .format(&time::format_description::well_known::Rfc3339)
-        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
+    format_ts(time::OffsetDateTime::now_utc())
+}
+
+/// RFC 3339 in UTC with exactly six fractional digits. Fixed width on purpose: the store compares
+/// timestamps as text (`since`/`until` filters), and RFC 3339's optional, variable-length fraction
+/// would make `…:00Z` sort after `…:00.5Z`.
+pub fn format_ts(t: time::OffsetDateTime) -> String {
+    let t = t.to_offset(time::UtcOffset::UTC);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:06}Z",
+        t.year(),
+        u8::from(t.month()),
+        t.day(),
+        t.hour(),
+        t.minute(),
+        t.second(),
+        t.microsecond()
+    )
 }
 
 #[cfg(test)]
@@ -593,10 +565,14 @@ mod tests {
                 http_scope: scope(),
             },
             ToWorker::CredsIssue {
+                req_id: 1,
                 token: "ab".into(),
                 ctx: ctx(),
             },
-            ToWorker::CredsRevoke { token: "ab".into() },
+            ToWorker::CredsRevoke {
+                req_id: 2,
+                token: "ab".into(),
+            },
             ToWorker::ScopeUpdate {
                 req_id: 1,
                 http_scope: scope(),
@@ -719,6 +695,7 @@ mod tests {
     #[tokio::test]
     async fn an_oversize_json_frame_is_refused_both_ways() {
         let big = ToWorker::CredsRevoke {
+            req_id: 1,
             token: "x".repeat(MAX_JSON + 1),
         };
         let (a, _b) = tokio::io::duplex(64);

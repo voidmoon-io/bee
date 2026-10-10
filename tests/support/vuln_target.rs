@@ -18,6 +18,7 @@
 //! - `/big` → streams 100 MB.
 //! - `/redirect?to=` → 302 to `to`.
 //! - `/echo` → the raw request head bytes as the body.
+//! - `/bomb` → a gzip decompression bomb (256 MiB of zeros).
 //!
 //! Included by tests with `#[path = "support/vuln_target.rs"] mod vuln_target;` and by
 //! `examples/vuln_target.rs` for the quickstart's manual smoke.
@@ -327,6 +328,27 @@ async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
             s.shutdown().await
         }
         "/echo" => write_simple(&mut s, 200, "application/octet-stream", &raw_head).await,
+        "/bomb" => {
+            // 256 MiB of zeros, gzipped (~250 KiB on the wire): a decompression bomb for the
+            // bounded decoder. Built once per process.
+            static BOMB: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+            let gz = BOMB.get_or_init(|| {
+                let mut enc =
+                    flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+                let zeros = vec![0u8; 1 << 20];
+                for _ in 0..256 {
+                    enc.write_all(&zeros).unwrap();
+                }
+                enc.finish().unwrap()
+            });
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                gz.len()
+            );
+            s.write_all(head.as_bytes()).await?;
+            s.write_all(gz).await?;
+            s.shutdown().await
+        }
         _ => write_simple(&mut s, 404, "text/plain", b"not found").await,
     }
 }

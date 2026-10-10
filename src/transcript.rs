@@ -55,8 +55,27 @@ pub enum EpisodeStatus {
 pub struct RecordedCall {
     pub call: ToolCall,
     pub result: ToolResult,
+    /// Kernel audit events this call produced — the tool scope's, plus the proxy scope's tagged
+    /// `scope_id = "proxy"` (019).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub audit: Vec<AuditEvent>,
+    /// Proxy-layer events this call produced (019, research R14). Kept apart from `audit`: a
+    /// user-space refusal is never a kernel one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub proxy_events: Vec<crate::proxy_event::ProxyEvent>,
+}
+
+/// The interception session a transcript was recorded under (019 T044): how `[policy.http]` was
+/// enforced, and — when only by the proxy — the reason and the operator's acknowledgement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HttpSessionHeader {
+    /// `kernel` or `advisory`.
+    pub enforcement: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advisory_reason: Option<String>,
+    /// The operator passed `--http-scope-advisory`.
+    #[serde(default)]
+    pub advisory_acknowledged: bool,
 }
 
 /// A panel-targeted render recorded in / replayed from a transcript (008-grid-tui, FR-010/SC-009): a
@@ -104,6 +123,9 @@ pub struct EpisodeTranscript {
     /// CTF scoring (US3). `None` for non-CTF episodes; `Some` when `scenario.mode == Ctf`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub score: Option<ScoreReport>,
+    /// HTTP interception, when the session ran it (019).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_scope: Option<HttpSessionHeader>,
 }
 
 impl EpisodeTranscript {
@@ -187,6 +209,7 @@ impl EpisodeTranscript {
             .format(&time::format_description::well_known::Rfc3339)
             .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
         EpisodeTranscript {
+            http_scope: None,
             scenario_id,
             model_id,
             status,

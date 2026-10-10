@@ -49,6 +49,8 @@ pub enum SessionEvent {
     Error(String),
     /// An informational line — banners, meta-command output (`info`).
     Info(String),
+    /// A proxy-layer event (`proxy_event`, 019) — rendered apart from kernel denials.
+    Proxy(crate::proxy_event::ProxyEvent),
     /// A dim per-exchange summary footer (`footer`).
     Footer(String),
     /// A steering acknowledgement (`steering`).

@@ -33,6 +33,12 @@ pub mod finding;
 pub mod gitlog;
 #[cfg(feature = "intercept")]
 pub mod http;
+#[cfg(feature = "intercept")]
+pub mod http_get;
+#[cfg(feature = "intercept")]
+pub mod http_history;
+#[cfg(feature = "intercept")]
+pub mod http_send;
 #[cfg(feature = "scanners")]
 pub mod scanner;
 
@@ -84,6 +90,11 @@ pub const SEC_TOOLS: &[&str] = &[
 /// for the specific binary, or the tool refuses with `NotGranted` (FR-008).
 pub const SCANNER_TOOLS: &[&str] = &["scan"];
 
+/// The HTTP(S) interception tools (019-http-intercept). Opt-in like the security tools; they answer
+/// only in a session whose policy declares `[policy.http]`, and refuse with `interceptor_unavailable`
+/// anywhere else. Compiled out (no `intercept` feature) they register as `NotCompiledIn` stubs.
+pub const HTTP_TOOLS: &[&str] = &["http_scope", "http_send", "http_get", "http_history"];
+
 /// Every tool name the harness knows how to build. A scenario may only list names from this set
 /// (scenario validation rejects the rest before a run).
 ///
@@ -98,6 +109,8 @@ pub fn is_known_tool(name: &str) -> bool {
         || SKILL_TOOLS.contains(&name)
         || SEC_TOOLS.contains(&name)
         || SCANNER_TOOLS.contains(&name)
+        || HTTP_TOOLS.contains(&name)
+        || (cfg!(feature = "vm-test") && name == "http_debug")
 }
 
 /// The Cargo feature each 016 tool needs, for the `NotCompiledIn` message. Covers only the tools
@@ -110,6 +123,7 @@ pub fn sec_tool_family(name: &str) -> Option<&'static str> {
         "cvss" => Some("cvss"),
         "record_finding" | "list_findings" => Some("findings"),
         "scan" => Some("scanners"),
+        n if HTTP_TOOLS.contains(&n) => Some("intercept"),
         _ => None,
     }
 }
@@ -362,6 +376,20 @@ pub fn register_named(r: &mut ToolRegistry, name: &str, flag: Option<&str>) {
         // tool that runs a third-party binary: forgetting to wire it up fails closed.
         #[cfg(feature = "scanners")]
         "scan" => r.insert(Box::<scanner::ScanTool>::default()),
+        // 019: unconfigured until `http::configure_http_tools` hands them the session's proxy; until
+        // then — and in a session without `[policy.http]` — they refuse `interceptor_unavailable`.
+        #[cfg(feature = "vm-test")]
+        "http_debug" => {
+            if let Some(t) = http::unconfigured("http_debug") {
+                r.insert(t);
+            }
+        }
+        #[cfg(feature = "intercept")]
+        name if HTTP_TOOLS.contains(&name) => {
+            if let Some(t) = http::unconfigured(name) {
+                r.insert(t);
+            }
+        }
 
         other => {
             if let Some(family) = sec_tool_family(other) {

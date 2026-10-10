@@ -59,9 +59,88 @@ pub async fn handle(
             return refusal_response(&r);
         }
     };
+    let host_header = auth.as_str().rsplit('@').next().unwrap_or("").to_string();
+    relay(
+        worker,
+        ctx,
+        Upstream::Plain(addr),
+        host,
+        port,
+        host_header,
+        req,
+    )
+    .await
+}
 
+/// A request decrypted on an inspected CONNECT tunnel (US4): origin-form, already scope-checked
+/// at CONNECT time; re-checked here because the tunnel outlives a scope change.
+pub async fn handle_inspected(
+    worker: Arc<Worker>,
+    ctx: WireCtx,
+    host: String,
+    port: u16,
+    sni: String,
+    req: Request<Incoming>,
+) -> Response<ProxyBody> {
+    let scope = worker.scope();
+    if let Err(r) = scope.check_testable(&host, port) {
+        worker.refuse(&r, Some(&ctx.call_id));
+        return refusal_response(&r);
+    }
+    let addr = match scope.resolve_checked(&host, port, worker.as_ref()).await {
+        Ok(a) => a,
+        Err(r) => {
+            worker.refuse(&r, Some(&ctx.call_id));
+            return refusal_response(&r);
+        }
+    };
+    let insecure = scope.is_insecure_upstream(&host);
+    let host_header = if port == 443 {
+        host.clone()
+    } else {
+        format!("{host}:{port}")
+    };
+    relay(
+        worker,
+        ctx,
+        Upstream::Tls {
+            addr,
+            sni,
+            insecure,
+        },
+        host,
+        port,
+        host_header,
+        req,
+    )
+    .await
+}
+
+enum Upstream {
+    Plain(std::net::SocketAddr),
+    Tls {
+        addr: std::net::SocketAddr,
+        sni: String,
+        insecure: bool,
+    },
+}
+
+trait Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static {}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static> Io for T {}
+
+/// Forward `req` upstream over a fresh connection and stream the response back, teeing the record.
+async fn relay(
+    worker: Arc<Worker>,
+    ctx: WireCtx,
+    upstream: Upstream,
+    host: String,
+    port: u16,
+    host_header: String,
+    req: Request<Incoming>,
+) -> Response<ProxyBody> {
     let started = now_rfc3339();
     let t0 = Instant::now();
+    let uri = req.uri().clone();
     let (mut parts, body) = req.into_parts();
     let body = match Limited::new(body, MAX_FORWARD_REQUEST).collect().await {
         Ok(c) => c.to_bytes(),
@@ -82,12 +161,22 @@ pub async fn handle(
     parts.headers.remove(hyper::header::PROXY_AUTHORIZATION);
     parts.headers.remove("proxy-connection");
     if !parts.headers.contains_key(hyper::header::HOST) {
-        if let Ok(v) = auth.as_str().rsplit('@').next().unwrap_or("").parse() {
+        if let Ok(v) = host_header.parse() {
             parts.headers.insert(hyper::header::HOST, v);
         }
     }
     let req_head = head_of_request(&parts);
     let method = parts.method.to_string();
+    let (scheme, tls) = match &upstream {
+        Upstream::Plain(_) => ("http", TlsInfo::None),
+        Upstream::Tls { sni, insecure, .. } => (
+            "https",
+            TlsInfo::Inspected {
+                sni: sni.clone(),
+                upstream_verified: !insecure,
+            },
+        ),
+    };
 
     let mut rec = ExchangeRecord {
         req_id: None,
@@ -100,13 +189,13 @@ pub async fn handle(
             fuzz_run: None,
             rule_ids: vec![],
         },
-        scheme: "http".into(),
+        scheme: scheme.into(),
         host,
         port,
         method: Some(method),
         target: Some(target),
         status: None,
-        tls: TlsInfo::None,
+        tls,
         timing: Timing {
             started,
             ..Timing::default()
@@ -143,15 +232,53 @@ pub async fn handle(
         )
     };
 
-    let stream = match tokio::net::TcpStream::connect(addr).await {
-        Ok(s) => s,
-        Err(e) => return fail(&mut rec, format!("connect failed: {e}")),
+    let io: Box<dyn Io> = match &upstream {
+        Upstream::Plain(addr) => match tokio::net::TcpStream::connect(addr).await {
+            Ok(s) => {
+                let _ = s.set_nodelay(true);
+                Box::new(s)
+            }
+            Err(e) => return fail(&mut rec, format!("connect failed: {e}")),
+        },
+        Upstream::Tls {
+            addr,
+            sni,
+            insecure,
+        } => {
+            let tcp = match tokio::net::TcpStream::connect(addr).await {
+                Ok(s) => s,
+                Err(e) => return fail(&mut rec, format!("connect failed: {e}")),
+            };
+            let _ = tcp.set_nodelay(true);
+            match super::raw::tls_connect(
+                tcp,
+                &super::raw::TlsUpstream {
+                    server_name: sni.clone(),
+                    insecure: *insecure,
+                },
+            )
+            .await
+            {
+                Ok(t) => Box::new(t),
+                // The client was offered HTTP/1.1 only; an upstream that will speak nothing else
+                // is reported as such, never silently downgraded or passed through (research R18).
+                Err(e)
+                    if e.contains("NoApplicationProtocol")
+                        || e.contains("no_application_protocol") =>
+                {
+                    return fail(
+                        &mut rec,
+                        "upstream_protocol_unsupported (HTTP/1.1 only)".into(),
+                    )
+                }
+                Err(e) => return fail(&mut rec, e),
+            }
+        }
     };
-    let _ = stream.set_nodelay(true);
     rec.timing.connect_ms = Some(t0.elapsed().as_millis() as u64);
     let (mut sender, conn) = match hyper::client::conn::http1::Builder::new()
         .preserve_header_case(true)
-        .handshake::<_, Full<Bytes>>(TokioIo::new(stream))
+        .handshake::<_, Full<Bytes>>(TokioIo::new(io))
         .await
     {
         Ok(v) => v,

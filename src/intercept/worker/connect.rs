@@ -89,6 +89,42 @@ pub async fn handle(
             return;
         }
 
+        // Hosts in `inspect` are decrypted (US4): finish the client's handshake against a leaf from
+        // the session CA — replaying the ClientHello already read — and serve HTTP/1.1 inside it,
+        // forwarding each request upstream over a TLS connection of the worker's own.
+        if scope.is_inspected(&host) {
+            let Some(ca) = worker.ca() else {
+                // `inspect` named a host but no CA exists: refuse rather than quietly tunnel.
+                return refuse_hello(&worker, &ctx, &host, port, "no session CA");
+            };
+            let name = sni.clone().unwrap_or_else(|| host.clone());
+            let Ok(cfg) = ca.server_config(&name) else {
+                return refuse_hello(&worker, &ctx, &host, port, "could not mint a leaf");
+            };
+            let io = Prefixed {
+                prefix: hello,
+                pos: 0,
+                inner: client,
+            };
+            let Ok(tls) = tokio_rustls::TlsAcceptor::from(cfg).accept(io).await else {
+                return;
+            };
+            let (w, c) = (worker.clone(), ctx.clone());
+            let svc = hyper::service::service_fn(move |req| {
+                let (w, c, h, n) = (w.clone(), c.clone(), host.clone(), name.clone());
+                async move {
+                    Ok::<_, std::convert::Infallible>(
+                        super::forward::handle_inspected(w, c, h, port, n, req).await,
+                    )
+                }
+            });
+            let _ = hyper::server::conn::http1::Builder::new()
+                .preserve_header_case(true)
+                .serve_connection(TokioIo::new(tls), svc)
+                .await;
+            return;
+        }
+
         let outcome;
         let (mut up_n, mut down_n) = (0u64, 0u64);
         match tokio::net::TcpStream::connect(addr).await {
@@ -171,5 +207,54 @@ async fn read_client_hello<S: tokio::io::AsyncRead + Unpin>(
         if buf.len() > MAX_CLIENT_HELLO {
             return Err("ClientHello exceeds 16 KiB".into());
         }
+    }
+}
+
+/// A stream that first replays `prefix` (the ClientHello already read for the SNI check), then reads
+/// from `inner`. Writes go straight to `inner`.
+struct Prefixed<S> {
+    prefix: Vec<u8>,
+    pos: usize,
+    inner: S,
+}
+
+impl<S: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for Prefixed<S> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        if self.pos < self.prefix.len() {
+            let n = (self.prefix.len() - self.pos).min(buf.remaining());
+            let start = self.pos;
+            buf.put_slice(&self.prefix[start..start + n]);
+            self.pos += n;
+            return std::task::Poll::Ready(Ok(()));
+        }
+        std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl<S: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for Prefixed<S> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
     }
 }

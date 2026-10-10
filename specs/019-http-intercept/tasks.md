@@ -331,7 +331,7 @@ memory. All other hosts are tunnelled.
 
 **Independent Test**: spec US4, in `tests/intercept_tls.rs`.
 
-- [ ] T066 [P] [US4] Write `tests/intercept_tls.rs` (fails first). It checks that:
+- [X] T066 [P] [US4] Write `tests/intercept_tls.rs` (fails first). It checks that:
   - an inspected host gets a full exchange recorded, and a rustls client trusting the bundle verifies the minted leaf;
   - a non-inspected in-scope host is recorded as a tunnel only;
   - the CA private key is absent from every control frame (scan for the key DER and for `PRIVATE KEY`), from `.bee/http/`, from the transcript, and from the bundle file;
@@ -339,14 +339,14 @@ memory. All other hosts are tunnelled.
   - the bundle file is deleted at teardown;
   - an upstream offering only h2 fails with `upstream_protocol_unsupported` instead of being passed through;
   - `insecure_upstream` accepts the fixture's self-signed cert and records `upstream_verified = false`.
-- [ ] T067 [US4] Implement `src/intercept/worker/mitm.rs`:
+- [X] T067 [US4] Implement `src/intercept/worker/mitm.rs`:
   - a session CA at worker start (`rcgen` `KeyPair::generate`, `IsCa::Ca(Unconstrained)`, key usages `keyCertSign`/`cRLSign`, 1-day validity), held in memory and zeroized on drop;
   - a leaf cache `HashMap<String, Arc<CertifiedKey>>`;
   - `LazyConfigAcceptor` with ALPN `http/1.1` only;
   - an upstream rustls client honouring `insecure_upstream`;
   - inner HTTP/1.1 served with hyper and forwarded through `forward.rs`, with `tls = Inspected`.
-- [ ] T068 [US4] Route CONNECT to MITM when the host matches `inspect` in `src/intercept/worker/connect.rs`. Include `ca_cert_pem` in `hello` only when `inspect` is non-empty (depends: T067).
-- [ ] T069 [US4] Write the CA bundle in `src/intercept/sidecar.rs`:
+- [X] T068 [US4] Route CONNECT to MITM when the host matches `inspect` in `src/intercept/worker/connect.rs`. Include `ca_cert_pem` in `hello` only when `inspect` is non-empty (depends: T067).
+- [X] T069 [US4] Write the CA bundle in `src/intercept/sidecar.rs`:
   - start from the first existing system bundle (`/etc/ssl/certs/ca-certificates.crt`, `/etc/pki/tls/certs/ca-bundle.crt`, `/etc/ssl/cert.pem`) and append the session CA certificate;
   - write it to `$XDG_RUNTIME_DIR/bee/<session>/ca-bundle.pem`, falling back to `TMPDIR` with directory mode `0700`;
   - add a read rule for that file to the tool policy before compile;

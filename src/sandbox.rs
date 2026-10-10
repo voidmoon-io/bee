@@ -261,6 +261,8 @@ pub struct EnforcedSandbox {
     /// the tool scope — a grant's reload included — re-applies it as the scope's only network rule;
     /// without it the plan refuses to install (`ProxyLoopbackMissing`).
     proxy_port: Option<u16>,
+    /// The session CA bundle the tool scope must be able to read (019 US4), re-granted on reload.
+    ca_bundle: Option<std::path::PathBuf>,
 }
 
 /// A tool child confined to a live bee scope whose audit events arrive via a demux subscription
@@ -358,6 +360,9 @@ impl EnforcedSandbox {
             .map_err(|e| format!("reload compile: {e}"))?;
         if let Some(port) = self.proxy_port {
             compiled = bee_core::compiler::with_proxy_loopback(compiled, port);
+        }
+        if let Some(b) = &self.ca_bundle {
+            compiled.fs.push(bee_core::FsPrimitive::read_grant(b));
         }
         let plan = EnforcementPlan::prepare(&compiled, ScopeMode::Enforce)
             .map_err(|e| format!("reload plan: {e}"))?;
@@ -511,6 +516,7 @@ impl Sandbox {
             sidecar: None,
             sidecar_audit: Vec::new(),
             proxy_port: None,
+            ca_bundle: None,
         }))
     }
 
@@ -575,11 +581,14 @@ impl Sandbox {
     /// Record the session proxy's loopback port so a reload of the tool scope keeps it as the only
     /// network rule (019). A no-op on a sandbox with no kernel scope.
     #[cfg_attr(not(feature = "enforce"), allow(unused_variables))]
-    pub fn set_proxy_loopback(&mut self, port: u16) {
+    pub fn set_proxy_loopback(&mut self, port: u16, ca_bundle: Option<std::path::PathBuf>) {
         #[cfg(feature = "enforce")]
         if let Sandbox::Enforced(e) = self {
             e.proxy_port = Some(port);
+            e.ca_bundle = ca_bundle;
         }
+        #[cfg(not(feature = "enforce"))]
+        let _ = ca_bundle;
     }
 
     /// The sidecar's cgroup id, when one is attached.

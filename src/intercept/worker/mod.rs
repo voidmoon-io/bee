@@ -61,6 +61,8 @@ pub struct Worker {
     next_req: AtomicU64,
     pub pacer: pace::Pacer,
     pub limits: HttpLimits,
+    /// The session CA, when `inspect` is non-empty (US4). Its key never leaves this process.
+    ca: Option<mitm::SessionCa>,
 }
 
 impl Worker {
@@ -68,9 +70,11 @@ impl Worker {
         session_id: String,
         scope: bee_core::compiler::HttpScope,
         out: mpsc::UnboundedSender<Outgoing>,
+        ca: Option<mitm::SessionCa>,
     ) -> Self {
         let limits = scope.limits;
         Worker {
+            ca,
             session_id,
             scope: RwLock::new(ScopeChecker::new(scope)),
             creds: Mutex::new(HashMap::new()),
@@ -112,6 +116,11 @@ impl Worker {
             }),
             Vec::new(),
         );
+    }
+
+    /// The session CA, if this session inspects anything.
+    pub fn ca(&self) -> Option<&mitm::SessionCa> {
+        self.ca.as_ref()
     }
 
     /// Largest stored body.
@@ -224,11 +233,19 @@ where
         }
     });
 
-    let worker = Arc::new(Worker::new(session_id, scope, tx));
+    // The CA exists only when something is to be inspected; `hello` carries its certificate and
+    // nothing else (proxy-control invariant 1).
+    let ca = if scope.inspect.is_empty() {
+        None
+    } else {
+        Some(mitm::SessionCa::generate()?)
+    };
+    let ca_cert_pem = ca.as_ref().map(|c| c.cert_pem().to_string());
+    let worker = Arc::new(Worker::new(session_id, scope, tx, ca));
     worker.emit(
         FromWorker::Hello {
             version: PROTOCOL_VERSION,
-            ca_cert_pem: None,
+            ca_cert_pem,
         },
         Vec::new(),
     );

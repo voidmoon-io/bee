@@ -360,6 +360,18 @@ fn proxy_scope_fs(r: &dyn Resolver, worker_exe: &std::path::Path) -> Vec<FsPrimi
     fs
 }
 
+impl FsPrimitive {
+    /// A read grant for exactly `path` (and anything beneath it). Used for the one file a scope must
+    /// be able to read even when the policy denies its parent — the session CA bundle (019 US4).
+    pub fn read_grant(path: &std::path::Path) -> FsPrimitive {
+        FsPrimitive::Prefix {
+            path: path.as_os_str().as_encoded_bytes().to_vec(),
+            subtree: false,
+            mode: AccessMode::READ,
+        }
+    }
+}
+
 /// Replace a tool policy's network with exactly `127.0.0.1:<port>` — the session proxy (019,
 /// research R4). With `[policy.http]` present this is the tool scope's **only** network rule, so
 /// `FLAG_NET_ENFORCED` is always set and a child that ignores `HTTP_PROXY` reaches nothing.

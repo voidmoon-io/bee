@@ -71,6 +71,21 @@ pub struct Prepared {
     pub listener: std::net::TcpListener,
     pub port: u16,
     pub worker_exe: PathBuf,
+    /// Where the session CA bundle will be written, when anything is inspected (US4). Chosen now so
+    /// the tool policy can grant its read before it compiles; written once the worker says hello.
+    pub ca_bundle: Option<PathBuf>,
+}
+
+impl Prepared {
+    /// The tool scope as a session installs it: the proxy port as its only network rule, plus a
+    /// read of the CA bundle when there is one (research R4, R7).
+    pub fn tool_policy(&self, compiled: bee_core::CompiledPolicy) -> bee_core::CompiledPolicy {
+        let mut c = bee_core::compiler::with_proxy_loopback(compiled, self.port);
+        if let Some(b) = &self.ca_bundle {
+            c.fs.push(bee_core::FsPrimitive::read_grant(b));
+        }
+        c
+    }
 }
 
 /// Compile `[policy.http]` and bind the proxy listener. `Ok(None)` when interception is off.
@@ -90,11 +105,17 @@ pub fn prepare(policy: &Policy, resolver: &dyn Resolver) -> Result<Option<Prepar
         .local_addr()
         .map_err(|e| format!("proxy listener: {e}"))?
         .port();
+    let ca_bundle = if compiled.http_scope.inspect.is_empty() {
+        None
+    } else {
+        Some(ca_bundle_dir()?.join("ca-bundle.pem"))
+    };
     Ok(Some(Prepared {
         compiled,
         listener,
         port,
         worker_exe,
+        ca_bundle,
     }))
 }
 
@@ -103,13 +124,79 @@ pub fn prepare(policy: &Policy, resolver: &dyn Resolver) -> Result<Option<Prepar
 pub struct HttpSession {
     pub interceptor: Interceptor,
     pub credentials: Arc<ProxyCredentials>,
+    /// The session CA bundle on disk, removed at shutdown.
+    pub ca_bundle: Option<PathBuf>,
 }
 
 impl HttpSession {
-    /// Stop the worker. Call before the sandbox is torn down (the sidecar scope goes first).
+    /// Stop the worker and delete the CA bundle. Call before the sandbox is torn down (the sidecar
+    /// scope goes first).
     pub async fn shutdown(&self) {
         self.interceptor.shutdown().await;
+        if let Some(b) = &self.ca_bundle {
+            let _ = std::fs::remove_file(b);
+            if let Some(dir) = b.parent() {
+                let _ = std::fs::remove_dir(dir);
+            }
+        }
     }
+}
+
+/// A fresh private directory for this session's CA bundle: `$XDG_RUNTIME_DIR/bee/<id>/`, or under
+/// the temp directory when there is no runtime dir. Outside `.bee/` on purpose — the bundle must be
+/// readable by tool children, and `.bee/` is denied to them (research R7).
+fn ca_bundle_dir() -> Result<PathBuf, String> {
+    use std::os::unix::fs::DirBuilderExt;
+    let base = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|p| p.is_dir())
+        .map(|p| p.join("bee"))
+        .unwrap_or_else(|| {
+            // SAFETY: getuid has no preconditions and cannot fail.
+            std::env::temp_dir().join(format!("bee-{}", unsafe { libc::getuid() }))
+        });
+    let mut rand = [0u8; 8];
+    // SAFETY: `rand` is a valid writable 8-byte buffer.
+    unsafe { libc::getrandom(rand.as_mut_ptr().cast(), rand.len(), 0) };
+    let id: String = rand.iter().map(|b| format!("{b:02x}")).collect();
+    let dir = base.join(format!("session-{}-{id}", std::process::id()));
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&dir)
+        .map_err(|e| format!("CA bundle directory {}: {e}", dir.display()))?;
+    Ok(dir)
+}
+
+/// System roots plus the session CA. The roots matter: tunnelled hosts present their real
+/// certificates, and a bundle of the session CA alone would break every one of them (research R7).
+pub fn write_ca_bundle(path: &Path, ca_pem: &str) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let system = [
+        "/etc/ssl/certs/ca-certificates.crt",
+        "/etc/pki/tls/certs/ca-bundle.crt",
+        "/etc/ssl/cert.pem",
+    ]
+    .iter()
+    .find_map(|p| std::fs::read_to_string(p).ok())
+    .unwrap_or_default();
+    let tmp = path.with_extension("pem.tmp");
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o644)
+        .open(&tmp)
+        .map_err(|e| format!("CA bundle {}: {e}", tmp.display()))?;
+    f.write_all(system.as_bytes())
+        .and_then(|_| {
+            if !system.is_empty() && !system.ends_with('\n') {
+                f.write_all(b"\n")?;
+            }
+            f.write_all(ca_pem.as_bytes())
+        })
+        .map_err(|e| format!("CA bundle: {e}"))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("CA bundle: {e}"))
 }
 
 /// Spawn the worker and wire it into `sandbox`. Under enforcement the sandbox must already carry the
@@ -123,7 +210,8 @@ pub async fn start(
 ) -> Result<HttpSession, String> {
     let spawn = spawn_fn(sandbox, &prepared.worker_exe, session_id, &enforcement)?;
     let prepared_exe = prepared.worker_exe.clone();
-    sandbox.set_proxy_loopback(prepared.port);
+    let prepared_bundle = prepared.ca_bundle.clone();
+    sandbox.set_proxy_loopback(prepared.port, prepared.ca_bundle.clone());
     let interceptor = Interceptor::start(
         InterceptorConfig {
             session_id: session_id.to_string(),
@@ -136,12 +224,30 @@ pub async fn start(
         spawn,
     )
     .await?;
-    let credentials = ProxyCredentials::new(interceptor.clone(), None);
+    // The CA bundle, when something is inspected: system roots + the session CA certificate.
+    let ca_bundle = match (&prepared_bundle, interceptor.ca_cert_pem()) {
+        (Some(path), Some(pem)) => {
+            if let Err(e) = write_ca_bundle(path, &pem) {
+                interceptor.shutdown().await;
+                return Err(e);
+            }
+            Some(path.clone())
+        }
+        (Some(_), None) => {
+            interceptor.shutdown().await;
+            return Err(
+                "the proxy worker sent no CA certificate, but [policy.http] inspects".into(),
+            );
+        }
+        _ => None,
+    };
+    let credentials = ProxyCredentials::new(interceptor.clone(), ca_bundle.clone());
     credentials.install(sandbox);
     sandbox.set_http_scope_hook(scope_hook(interceptor.clone(), prepared_exe));
     Ok(HttpSession {
         interceptor,
         credentials,
+        ca_bundle,
     })
 }
 

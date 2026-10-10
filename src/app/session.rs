@@ -327,7 +327,7 @@ pub fn build_sandbox(
         .map_err(|e| format!("policy compile: {e}"))?;
     #[cfg(feature = "intercept")]
     if let Some(p) = &prepared {
-        compiled = bee_core::compiler::with_proxy_loopback(compiled, p.port);
+        compiled = p.tool_policy(compiled);
     }
     let plan = EnforcementPlan::prepare(&compiled, ScopeMode::Enforce)
         .map_err(|e| format!("enforcement plan: {e}"))?;

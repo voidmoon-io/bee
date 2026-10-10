@@ -443,3 +443,53 @@ fn httpdate_now() -> String {
     ][(mo - 1) as usize];
     format!("{wd}, {d:02} {mn} {y} {h:02}:{m:02}:{s:02} GMT")
 }
+
+/// A TLS listener that speaks **only h2** (ALPN) and nothing else — to prove the proxy reports an
+/// upstream it cannot speak to instead of passing it through (019 US4). Answers no requests.
+pub fn start_h2_only() -> (SocketAddr, ShutdownHandle) {
+    let (addr_tx, addr_rx) = std::sync::mpsc::channel();
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+    let thread = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async move {
+            use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+            let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let ck = rcgen::generate_simple_self_signed(vec!["h2.test".into()]).unwrap();
+            let key =
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(ck.signing_key.serialize_der()));
+            let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+            let mut cfg = rustls::ServerConfig::builder_with_provider(provider)
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(vec![CertificateDer::from(ck.cert.der().to_vec())], key)
+                .unwrap();
+            cfg.alpn_protocols = vec![b"h2".to_vec()];
+            let acc = tokio_rustls::TlsAcceptor::from(Arc::new(cfg));
+            addr_tx.send(l.local_addr().unwrap()).unwrap();
+            tokio::spawn(async move {
+                loop {
+                    let Ok((s, _)) = l.accept().await else { break };
+                    let acc = acc.clone();
+                    tokio::spawn(async move {
+                        let _ = acc.accept(s).await;
+                    });
+                }
+            });
+            let _ = tokio::task::spawn_blocking(move || stop_rx.recv()).await;
+        });
+    });
+    let addr = addr_rx.recv().unwrap();
+    (
+        addr,
+        ShutdownHandle {
+            counters: Arc::new(Counters::default()),
+            cert_der: None,
+            stop: Some(stop_tx),
+            thread: Some(thread),
+        },
+    )
+}

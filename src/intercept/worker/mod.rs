@@ -65,6 +65,8 @@ pub struct Worker {
     ca: Option<mitm::SessionCa>,
     /// Fuzz runs in flight (US6).
     fuzz: Mutex<HashMap<String, Arc<FuzzRun>>>,
+    /// Intercept rules and held requests (US7). Session-only: worker memory, nothing else.
+    pub rules: rules::Rules,
 }
 
 impl Worker {
@@ -78,6 +80,7 @@ impl Worker {
         Worker {
             ca,
             fuzz: Mutex::new(HashMap::new()),
+            rules: rules::Rules::default(),
             session_id,
             scope: RwLock::new(ScopeChecker::new(scope)),
             creds: Mutex::new(HashMap::new()),
@@ -124,6 +127,30 @@ impl Worker {
     /// The session CA, if this session inspects anything.
     pub fn ca(&self) -> Option<&mitm::SessionCa> {
         self.ca.as_ref()
+    }
+
+    /// A rule or hold notice as a proxy event (research R14).
+    pub fn rule_event(
+        &self,
+        kind: crate::intercept::control::ProxyEventKind,
+        host: &str,
+        port: u16,
+        ctx: &WireCtx,
+        detail: serde_json::Value,
+    ) {
+        self.emit(
+            FromWorker::ProxyEvent(ProxyEvent {
+                ts: now_rfc3339(),
+                session_id: self.session_id.clone(),
+                call_id: Some(ctx.call_id.clone()),
+                layer: "proxy".into(),
+                kind,
+                host: host.to_string(),
+                port,
+                detail,
+            }),
+            Vec::new(),
+        );
     }
 
     /// Largest stored body.
@@ -380,17 +407,29 @@ async fn control_loop<R: AsyncRead + Unpin>(
                     worker.maybe_finish(&run_id, &run);
                 }
             }
-            ToWorker::RuleAdd { req_id, .. }
-            | ToWorker::RuleRemove { req_id, .. }
-            | ToWorker::HoldRelease { req_id, .. } => {
-                worker.emit(
-                    FromWorker::Error {
-                        req_id: Some(req_id),
-                        code: "unsupported".into(),
-                        message: "intercept rules are not available in this build".into(),
-                    },
-                    Vec::new(),
-                );
+            ToWorker::RuleAdd { req_id, rule } => {
+                let r = serde_json::from_value::<rules::RuleSpec>(rule)
+                    .map_err(|e| e.to_string())
+                    .and_then(|spec| worker.rules.add(spec));
+                worker.emit(ack_or_error(req_id, r), Vec::new());
+            }
+            ToWorker::RuleRemove { req_id, rule_id } => {
+                let r = if worker.rules.remove(&rule_id) {
+                    Ok(())
+                } else {
+                    Err(format!("no rule {rule_id}"))
+                };
+                worker.emit(ack_or_error(req_id, r), Vec::new());
+            }
+            ToWorker::HoldRelease {
+                req_id,
+                hold_id,
+                decision,
+            } => {
+                let r = serde_json::from_value::<rules::HoldDecision>(decision)
+                    .map_err(|e| e.to_string())
+                    .and_then(|d| worker.rules.release(&hold_id, d));
+                worker.emit(ack_or_error(req_id, r), Vec::new());
             }
             #[cfg(feature = "vm-test")]
             ToWorker::DebugConnect { req_id, addr } => {
@@ -720,5 +759,16 @@ fn error_frame(req_id: u64, code: &str, message: String) -> FromWorker {
         req_id: Some(req_id),
         code: code.into(),
         message,
+    }
+}
+
+fn ack_or_error(req_id: u64, r: Result<(), String>) -> FromWorker {
+    match r {
+        Ok(()) => FromWorker::Ack { req_id },
+        Err(message) => FromWorker::Error {
+            req_id: Some(req_id),
+            code: "invalid".into(),
+            message,
+        },
     }
 }

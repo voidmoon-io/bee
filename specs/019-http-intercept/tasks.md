@@ -415,7 +415,7 @@ back clustered with outliers flagged.
 
 **Independent Test**: spec US7, in `tests/intercept_rules.rs`.
 
-- [ ] T080 [P] [US7] Write `tests/intercept_rules.rs` (fails first):
+- [X] T080 [P] [US7] Write `tests/intercept_rules.rs` (fails first):
   - a modify rule adds a header, and the stored exchange has both `req_original_head` and the modified head;
   - a drop rule leaves the client receiving a 502 with a body naming the rule, recorded as `rule_fired`;
   - a hold rule followed by `release forward_edited` causes the edit to be applied;
@@ -423,9 +423,9 @@ back clustered with outliers flagged.
   - a rule rewriting toward an out-of-scope host has the result refused;
   - rules are gone in a new session;
   - a timeout above 300 s gives `invalid_args`.
-- [ ] T081 [US7] Implement `src/intercept/worker/rules.rs`: matcher evaluation, `Edit` application (shared with T071 via a common module), holds with deadline timers, and a scope re-check after rewrite. Hook it into `forward.rs` for plain HTTP. Hook it into the MITM inner path (T067) for HTTPS, which requires US4.
-- [ ] T082 [US7] Handle `rule.add`, `rule.remove` and `hold.release` frames, plus the `held` frame to the harness, in the worker (`src/intercept/worker/mod.rs`) and the harness (`src/intercept/sidecar.rs`).
-- [ ] T083 [US7] Implement the `http_intercept` tool in `src/tools/http.rs` (add_rule, remove_rule, list, release) and register it.
+- [X] T081 [US7] Implement `src/intercept/worker/rules.rs`: matcher evaluation, `Edit` application (shared with T071 via a common module), holds with deadline timers, and a scope re-check after rewrite. Hook it into `forward.rs` for plain HTTP. Hook it into the MITM inner path (T067) for HTTPS, which requires US4.
+- [X] T082 [US7] Handle `rule.add`, `rule.remove` and `hold.release` frames, plus the `held` frame to the harness, in the worker (`src/intercept/worker/mod.rs`) and the harness (`src/intercept/sidecar.rs`).
+- [X] T083 [US7] Implement the `http_intercept` tool in `src/tools/http.rs` (add_rule, remove_rule, list, release) and register it.
 
 ---
 

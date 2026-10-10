@@ -135,6 +135,27 @@ struct Inner {
     scope: Mutex<HttpScope>,
     /// Fuzz runs awaiting their `fuzz.done` (US6).
     fuzz_waiters: Mutex<HashMap<String, oneshot::Sender<FuzzCounts>>>,
+    /// Intercept rules installed this session, with hit counts from `rule_fired` events (US7).
+    rules: Mutex<Vec<RuleInfo>>,
+    /// Requests held right now (US7).
+    held: Mutex<Vec<HeldInfo>>,
+    next_rule: AtomicU64,
+}
+
+/// An installed intercept rule, as the harness tracks it.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RuleInfo {
+    pub id: String,
+    pub spec: serde_json::Value,
+    pub hits: u64,
+}
+
+/// A request a hold rule is keeping until the model decides (or its deadline passes).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct HeldInfo {
+    pub hold_id: String,
+    pub summary: String,
+    pub deadline: String,
 }
 
 /// What a fuzz run did, as the worker counted it.
@@ -194,6 +215,9 @@ impl Interceptor {
             on_event: Mutex::new(None),
             scope: Mutex::new(cfg_scope),
             fuzz_waiters: Mutex::new(HashMap::new()),
+            rules: Mutex::new(Vec::new()),
+            held: Mutex::new(Vec::new()),
+            next_rule: AtomicU64::new(1),
         });
         let me = Interceptor { inner };
         me.launch().await?;
@@ -441,6 +465,122 @@ impl Interceptor {
                     ),
                 })
             }
+        }
+    }
+
+    /// Install an intercept rule (US7); returns its id. `matcher`/`action` are validated by the worker.
+    pub async fn add_rule(
+        &self,
+        matcher: serde_json::Value,
+        action: serde_json::Value,
+    ) -> Result<String, InterceptError> {
+        let id = format!("R{}", self.inner.next_rule.fetch_add(1, Ordering::Relaxed));
+        let spec = serde_json::json!({ "id": id, "matcher": matcher, "action": action });
+        let req_id = self.next_req();
+        let rx = self.expect(req_id);
+        self.write(
+            &ToWorker::RuleAdd {
+                req_id,
+                rule: spec.clone(),
+            },
+            &[],
+        )
+        .await?;
+        self.await_reply(req_id, rx, ACK_TIMEOUT).await?;
+        self.inner.rules.lock().expect("rules lock").push(RuleInfo {
+            id: id.clone(),
+            spec,
+            hits: 0,
+        });
+        Ok(id)
+    }
+
+    pub async fn remove_rule(&self, rule_id: &str) -> Result<(), InterceptError> {
+        let req_id = self.next_req();
+        let rx = self.expect(req_id);
+        self.write(
+            &ToWorker::RuleRemove {
+                req_id,
+                rule_id: rule_id.into(),
+            },
+            &[],
+        )
+        .await?;
+        self.await_reply(req_id, rx, ACK_TIMEOUT).await?;
+        self.inner
+            .rules
+            .lock()
+            .expect("rules lock")
+            .retain(|r| r.id != rule_id);
+        Ok(())
+    }
+
+    /// Decide a held request: `"forward"`, `"drop"`, or `{"forward_edited": [Edit…]}`.
+    pub async fn release_hold(
+        &self,
+        hold_id: &str,
+        decision: serde_json::Value,
+    ) -> Result<(), InterceptError> {
+        let req_id = self.next_req();
+        let rx = self.expect(req_id);
+        self.write(
+            &ToWorker::HoldRelease {
+                req_id,
+                hold_id: hold_id.into(),
+                decision,
+            },
+            &[],
+        )
+        .await?;
+        self.await_reply(req_id, rx, ACK_TIMEOUT).await?;
+        self.inner
+            .held
+            .lock()
+            .expect("held lock")
+            .retain(|h| h.hold_id != hold_id);
+        Ok(())
+    }
+
+    /// Installed rules with hit counts, and the requests held now.
+    pub fn rules_and_holds(&self) -> (Vec<RuleInfo>, Vec<HeldInfo>) {
+        (
+            self.inner.rules.lock().expect("rules lock").clone(),
+            self.inner.held.lock().expect("held lock").clone(),
+        )
+    }
+
+    fn track_rule_event(&self, ev: &ProxyEvent) {
+        use crate::proxy_event::ProxyEventKind as K;
+        match ev.kind {
+            K::RuleFired | K::Held => {
+                let ids: Vec<String> = match (&ev.detail["rule_ids"], &ev.detail["rule_id"]) {
+                    (serde_json::Value::Array(a), _) => a
+                        .iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect(),
+                    (_, serde_json::Value::String(s)) => vec![s.clone()],
+                    _ => Vec::new(),
+                };
+                // Count each match once: a hold on `held`; a modify or a drop on `rule_fired`. A held
+                // request later dropped by the model reports `drop_held`, which is not a new match.
+                let counts = ev.kind == K::Held || ev.detail["action"] != "drop_held";
+                if counts {
+                    let mut rules = self.inner.rules.lock().expect("rules lock");
+                    for r in rules.iter_mut().filter(|r| ids.contains(&r.id)) {
+                        r.hits += 1;
+                    }
+                }
+            }
+            K::AutoForwarded => {
+                if let Some(h) = ev.detail["hold_id"].as_str() {
+                    self.inner
+                        .held
+                        .lock()
+                        .expect("held lock")
+                        .retain(|x| x.hold_id != h);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -751,6 +891,7 @@ impl Interceptor {
                 if ev.kind.is_refusal() {
                     let _ = self.with_store(|s| s.insert_refusal(&ev));
                 }
+                self.track_rule_event(&ev);
                 if let Some(sink) = self.inner.on_event.lock().expect("sink lock").as_ref() {
                     sink(&ev);
                 }
@@ -807,7 +948,17 @@ impl Interceptor {
                     });
                 }
             }
-            FromWorker::Held { .. } => {}
+            FromWorker::Held {
+                hold_id,
+                summary,
+                deadline,
+            } => {
+                self.inner.held.lock().expect("held lock").push(HeldInfo {
+                    hold_id,
+                    summary: crate::safe_text::safe_line(&summary).into_owned(),
+                    deadline,
+                });
+            }
         }
     }
 

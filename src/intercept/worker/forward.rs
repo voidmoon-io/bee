@@ -21,11 +21,14 @@ use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 
 use super::listen::{refusal_response, text, ProxyBody};
+use super::rules::{HoldDecision, Verdict};
 use super::Worker;
+use crate::intercept::control::ProxyEventKind;
 use crate::intercept::control::{
     now_rfc3339, ExchangeRecord, FromWorker, Origin, OriginKind, Outcome, SendPath, Timing,
     TlsInfo, WireCtx,
 };
+use crate::intercept::diff::Edit;
 
 /// Request bodies above this are refused rather than buffered without bound.
 const MAX_FORWARD_REQUEST: usize = 64 * 1024 * 1024;
@@ -160,7 +163,7 @@ async fn relay(
     let t0 = Instant::now();
     let uri = req.uri().clone();
     let (mut parts, body) = req.into_parts();
-    let body = match Limited::new(body, MAX_FORWARD_REQUEST).collect().await {
+    let mut body = match Limited::new(body, MAX_FORWARD_REQUEST).collect().await {
         Ok(c) => c.to_bytes(),
         Err(_) => {
             return text(
@@ -183,7 +186,7 @@ async fn relay(
             parts.headers.insert(hyper::header::HOST, v);
         }
     }
-    let req_head = head_of_request(&parts);
+    let mut req_head = head_of_request(&parts);
     let method = parts.method.to_string();
     let (scheme, tls) = match &upstream {
         Upstream::Plain(_) => ("http", TlsInfo::None),
@@ -226,6 +229,132 @@ async fn relay(
         outcome: Outcome::Completed,
         tags: vec![],
     };
+    // Intercept rules (US7): modify, drop or hold the request before it goes upstream.
+    let mut original: Option<(Vec<u8>, Vec<u8>)> = None;
+    let path = crate::intercept::store::path_of(rec.target.as_deref().unwrap_or("/"));
+    let verdict = worker.rules.evaluate(&super::rules::Seen {
+        host: &rec.host,
+        method: rec.method.as_deref().unwrap_or(""),
+        path: &path,
+        head: &req_head,
+        body: &body,
+    });
+    let mut to_apply: Option<(Vec<String>, Vec<Edit>)> = None;
+    match verdict {
+        Verdict::Pass => {}
+        Verdict::Modify { rule_ids, edits } => to_apply = Some((rule_ids, edits)),
+        Verdict::Drop { rule_id } => {
+            return dropped(
+                &worker,
+                &ctx,
+                rec,
+                req_head,
+                body.to_vec(),
+                &rule_id,
+                t0,
+                "drop",
+            )
+        }
+        Verdict::Hold { rule_id, timeout } => {
+            let (hold_id, rx) = worker.rules.hold();
+            let deadline = crate::intercept::control::format_ts(
+                time::OffsetDateTime::now_utc() + time::Duration::seconds(timeout.as_secs() as i64),
+            );
+            worker.emit(
+                FromWorker::Held {
+                    hold_id: hold_id.clone(),
+                    summary: format!(
+                        "{} {}:{}{}",
+                        rec.method.as_deref().unwrap_or(""),
+                        rec.host,
+                        rec.port,
+                        path
+                    ),
+                    deadline,
+                },
+                Vec::new(),
+            );
+            worker.rule_event(
+                ProxyEventKind::Held,
+                &rec.host,
+                rec.port,
+                &ctx,
+                serde_json::json!({ "rule_id": rule_id, "hold_id": hold_id }),
+            );
+            rec.origin.rule_ids.push(rule_id.clone());
+            match tokio::time::timeout(timeout, rx).await {
+                Ok(Ok(HoldDecision::Forward)) => {}
+                Ok(Ok(HoldDecision::Drop)) => {
+                    return dropped(
+                        &worker,
+                        &ctx,
+                        rec,
+                        req_head,
+                        body.to_vec(),
+                        &rule_id,
+                        t0,
+                        "drop_held",
+                    )
+                }
+                Ok(Ok(HoldDecision::ForwardEdited(e))) => to_apply = Some((Vec::new(), e)),
+                // The deadline passed (or the decision channel went away): forward unchanged, and
+                // say so — a held request is never left waiting (FR-022).
+                _ => {
+                    worker.rules.expire(&hold_id);
+                    worker.rule_event(
+                        ProxyEventKind::AutoForwarded,
+                        &rec.host,
+                        rec.port,
+                        &ctx,
+                        serde_json::json!({ "rule_id": rule_id, "hold_id": hold_id }),
+                    );
+                }
+            }
+        }
+    }
+    if let Some((rule_ids, edits)) = to_apply {
+        let (h, b) = match crate::intercept::diff::apply_edits(&req_head, &body, &edits) {
+            Ok(v) => v,
+            Err(e) => {
+                return text(
+                    StatusCode::BAD_GATEWAY,
+                    &format!("bee proxy: an intercept rule's edit failed: {e}\n"),
+                )
+            }
+        };
+        // A rewritten request is checked again: a rule cannot move traffic out of scope.
+        let mut whole = h.clone();
+        whole.extend_from_slice(&b);
+        if let Err(r) =
+            worker
+                .scope()
+                .check_host_header(&super::raw::host_headers(&whole), &rec.host, rec.port)
+        {
+            worker.refuse(&r, Some(&ctx.call_id));
+            return refusal_response(&r);
+        }
+        if let Err(e) = parts_from_head(&h, &mut parts) {
+            return text(
+                StatusCode::BAD_GATEWAY,
+                &format!("bee proxy: an intercept rule produced an invalid request: {e}\n"),
+            );
+        }
+        original = Some((std::mem::replace(&mut req_head, h), body.to_vec()));
+        body = Bytes::from(b);
+        rec.req_bytes = body.len() as u64;
+        rec.has_original = true;
+        if !rule_ids.is_empty() {
+            worker.rule_event(
+                ProxyEventKind::RuleFired,
+                &rec.host,
+                rec.port,
+                &ctx,
+                serde_json::json!({ "rule_ids": rule_ids, "action": "modify" }),
+            );
+        }
+        rec.origin.rule_ids.extend(rule_ids);
+    }
+
     let cap = worker.max_body() as usize;
     let req_body_rec = body[..body.len().min(cap)].to_vec();
     rec.req_truncated = body.len() > cap;
@@ -329,6 +458,7 @@ async fn relay(
             req_body: req_body_rec,
             resp_head,
             t0,
+            original,
         }),
     };
     Response::from_parts(rparts, tee.boxed())
@@ -341,6 +471,8 @@ struct Draft {
     req_body: Vec<u8>,
     resp_head: Vec<u8>,
     t0: Instant,
+    /// The request before an intercept rule rewrote it (US7).
+    original: Option<(Vec<u8>, Vec<u8>)>,
 }
 
 /// The upstream response body, passed through to the client frame by frame while the first `cap`
@@ -368,15 +500,17 @@ impl TeeBody {
             None if d.rec.resp_truncated => Outcome::Truncated,
             None => Outcome::Completed,
         };
-        d.worker.emit(
-            FromWorker::Exchange(d.rec),
-            vec![
-                d.req_head,
-                d.req_body,
-                d.resp_head,
-                std::mem::take(&mut self.captured),
-            ],
-        );
+        let mut segs = vec![
+            d.req_head,
+            d.req_body,
+            d.resp_head,
+            std::mem::take(&mut self.captured),
+        ];
+        if let Some((h, b)) = d.original {
+            segs.push(h);
+            segs.push(b);
+        }
+        d.worker.emit(FromWorker::Exchange(d.rec), segs);
     }
 }
 
@@ -457,4 +591,66 @@ fn head_of_response<B>(resp: &Response<B>) -> Vec<u8> {
     }
     s.push_str("\r\n");
     s.into_bytes()
+}
+
+/// A request an intercept rule dropped: the client gets a 502 naming the rule, the drop is a
+/// `rule_fired` event, and the exchange is recorded with no response.
+#[allow(clippy::too_many_arguments)]
+fn dropped(
+    worker: &Worker,
+    ctx: &WireCtx,
+    mut rec: ExchangeRecord,
+    req_head: Vec<u8>,
+    req_body: Vec<u8>,
+    rule_id: &str,
+    t0: Instant,
+    action: &str,
+) -> Response<ProxyBody> {
+    worker.rule_event(
+        ProxyEventKind::RuleFired,
+        &rec.host,
+        rec.port,
+        ctx,
+        serde_json::json!({ "rule_id": rule_id, "action": action }),
+    );
+    if !rec.origin.rule_ids.iter().any(|r| r == rule_id) {
+        rec.origin.rule_ids.push(rule_id.to_string());
+    }
+    rec.outcome = Outcome::Failed {
+        reason: format!("dropped by intercept rule {rule_id}"),
+    };
+    rec.timing.total_ms = Some(t0.elapsed().as_millis() as u64);
+    worker.emit(
+        FromWorker::Exchange(rec),
+        vec![req_head, req_body, Vec::new(), Vec::new()],
+    );
+    text(
+        StatusCode::BAD_GATEWAY,
+        &format!("bee proxy: request dropped by intercept rule {rule_id}\n"),
+    )
+}
+
+/// Replace `parts`' method, target and headers with those of a raw request head.
+fn parts_from_head(head: &[u8], parts: &mut hyper::http::request::Parts) -> Result<(), String> {
+    let mut hs = [httparse::EMPTY_HEADER; 128];
+    let mut req = httparse::Request::new(&mut hs);
+    match req.parse(head) {
+        Ok(httparse::Status::Complete(_)) => {}
+        _ => return Err("the rewritten request head does not parse".into()),
+    }
+    parts.method = hyper::Method::from_bytes(req.method.unwrap_or("GET").as_bytes())
+        .map_err(|e| e.to_string())?;
+    parts.uri = req
+        .path
+        .unwrap_or("/")
+        .parse()
+        .map_err(|e: hyper::http::uri::InvalidUri| e.to_string())?;
+    parts.headers.clear();
+    for h in req.headers.iter() {
+        let name =
+            hyper::header::HeaderName::from_bytes(h.name.as_bytes()).map_err(|e| e.to_string())?;
+        let value = hyper::header::HeaderValue::from_bytes(h.value).map_err(|e| e.to_string())?;
+        parts.headers.append(name, value);
+    }
+    Ok(())
 }

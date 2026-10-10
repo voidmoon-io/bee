@@ -90,12 +90,12 @@ shippable and SHOULD land as their own PRs (git-pr-workflow).
 
 ### P3 — call context and environment injection (research R6)
 
-- [ ] T013 [P] Write unit tests in `src/sandbox.rs` `#[cfg(test)]` (fail first):
+- [X] T013 [P] Write unit tests in `src/sandbox.rs` `#[cfg(test)]` (fail first):
   - `tool_command` with an `EnvOverlay` set emits those variables after `restrict_env`;
   - a stripped key such as `ANTHROPIC_API_KEY` placed in the overlay is rejected at overlay construction;
   - with no overlay, the environment is byte-identical to today.
-- [ ] T014 Add `pub struct CallContext { call_id: String, turn: u32, origin: CallOrigin }` and `pub struct EnvOverlay(Vec<(String, String)>)` in `src/sandbox.rs`. Add `Sandbox::set_call_context(&mut self, Option<CallContext>)` and a harness-only `Sandbox::set_env_provider(Box<dyn Fn(&CallContext) -> EnvOverlay + Send + Sync>)`. Apply the overlay after `restrict_env` in all `tool_command` variants (`src/sandbox.rs:196-230`). Refuse an overlay key that is in `strip_env` or matches `LD_*` (depends: T013).
-- [ ] T015 Call `sandbox.set_call_context(Some(..))` before and `set_call_context(None)` after each `ToolRegistry::execute` in `src/episode.rs:307,343` and `src/repl.rs:637,675`, with the provider `ToolCall.id` and the current turn (depends: T014).
+- [X] T014 Add `pub struct CallContext { call_id: String, turn: u32, origin: CallOrigin }` and `pub struct EnvOverlay(Vec<(String, String)>)` in `src/sandbox.rs`. Add `Sandbox::set_call_context(&mut self, Option<CallContext>)` and a harness-only `Sandbox::set_env_provider(Box<dyn Fn(&CallContext) -> EnvOverlay + Send + Sync>)`. Apply the overlay after `restrict_env` in all `tool_command` variants (`src/sandbox.rs:196-230`). Refuse an overlay key that is in `strip_env` or matches `LD_*` (depends: T013).
+- [X] T015 Call `sandbox.set_call_context(Some(..))` before and `set_call_context(None)` after each `ToolRegistry::execute` in `src/episode.rs:307,343` and `src/repl.rs:637,675`, with the provider `ToolCall.id` and the current turn (depends: T014).
 
 ### P4 — sidecar scope (research R2)
 

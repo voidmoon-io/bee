@@ -303,6 +303,13 @@ pub async fn run_loop(
                 }
             }
 
+            // Attribute whatever this call spawns — the call and, after a widening, its one retry —
+            // to this tool call (019 P3): the interception proxy issues a per-call credential from it.
+            sandbox.set_call_context(Some(crate::sandbox::CallContext {
+                call_id: tc.id.clone(),
+                turn: index as u32,
+                origin: crate::sandbox::CallOrigin::Tool,
+            }));
             let (mut result, timed_out) =
                 match tokio::time::timeout(remaining, registry.execute(tc, sandbox)).await {
                     Ok(r) => (r, false),
@@ -353,6 +360,8 @@ pub async fn run_loop(
                     }
                 }
             }
+
+            sandbox.set_call_context(None);
 
             let denied = audit.iter().any(|e| e.decision == "denied");
             let tag = if denied {

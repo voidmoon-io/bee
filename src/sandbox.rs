@@ -44,9 +44,107 @@ pub const INHERITED_ENV_VARS: &[&str] = &[
     "PATH", "HOME", "USER", "LOGNAME", "SHELL", "PWD", "TMPDIR", "TERM", "TZ", "LANG",
 ];
 
+/// Which tool call a child is running for (019-http-intercept P3, research R6).
+///
+/// Set by the loop around each `ToolRegistry::execute`, so whatever the call spawns can be attributed
+/// to it — today by the interception proxy, through a per-call credential the [`EnvOverlay`] provider
+/// puts in the child's `HTTP_PROXY`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallContext {
+    /// The provider's tool-call id (`ToolCall.id`).
+    pub call_id: String,
+    /// The turn the call belongs to.
+    pub turn: u32,
+    pub origin: CallOrigin,
+}
+
+/// What initiated the traffic a credential is issued for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CallOrigin {
+    /// A model tool call.
+    Tool,
+    /// A long-lived MCP stdio server, named.
+    Mcp(String),
+    /// An `http_fuzz` run.
+    Fuzz(String),
+}
+
+/// Extra environment variables for one tool child, applied **after** [`restrict_env`] (research R6).
+///
+/// Construction refuses any key that could re-expose a credential or subvert the loader: the
+/// provider key vars in [`DEFAULT_KEY_VARS`] and every `LD_*`. The sandbox re-checks against its own,
+/// configured strip list at spawn, which a bare constructor cannot know.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EnvOverlay(Vec<(String, String)>);
+
+impl EnvOverlay {
+    pub fn new(vars: Vec<(String, String)>) -> Result<Self, String> {
+        for (k, _) in &vars {
+            refused_overlay_key(k, &[])?;
+        }
+        Ok(EnvOverlay(vars))
+    }
+
+    pub fn vars(&self) -> &[(String, String)] {
+        &self.0
+    }
+}
+
+/// `Err` naming `key` when an overlay may not set it.
+fn refused_overlay_key(key: &str, strip_env: &[String]) -> Result<(), String> {
+    if key.is_empty() || key.contains('=') || key.contains('\0') {
+        return Err(format!("env overlay: invalid variable name {key:?}"));
+    }
+    if key.starts_with("LD_") {
+        return Err(format!(
+            "env overlay: {key} is a loader variable and is always stripped"
+        ));
+    }
+    if DEFAULT_KEY_VARS.contains(&key) || strip_env.iter().any(|k| k == key) {
+        return Err(format!(
+            "env overlay: {key} is a stripped credential variable"
+        ));
+    }
+    Ok(())
+}
+
+/// Computes the [`EnvOverlay`] for a call. Installed by the harness only (019 interception).
+pub type EnvProvider = Box<dyn Fn(&CallContext) -> EnvOverlay + Send + Sync>;
+
+/// Everything that decides a tool child's environment: what is stripped, and what — for the current
+/// call — is added back.
+#[derive(Default)]
+struct ChildEnv {
+    strip_env: Vec<String>,
+    call: Option<CallContext>,
+    provider: Option<EnvProvider>,
+}
+
+impl ChildEnv {
+    fn new(strip_env: Vec<String>) -> Self {
+        ChildEnv {
+            strip_env,
+            ..Default::default()
+        }
+    }
+
+    /// Clear `cmd`'s environment to the inherited allowlist, then apply this call's overlay.
+    fn apply(&self, cmd: &mut Command) -> Result<(), SpawnError> {
+        restrict_env(cmd, &self.strip_env);
+        if let (Some(provider), Some(call)) = (&self.provider, &self.call) {
+            for (k, v) in provider(call).vars() {
+                refused_overlay_key(k, &self.strip_env)
+                    .map_err(|e| SpawnError::Io(io::Error::other(e)))?;
+                cmd.env(k, v);
+            }
+        }
+        Ok(())
+    }
+}
+
 /// A hardened host process with no kernel scope.
 pub struct HostSandbox {
-    strip_env: Vec<String>,
+    env: ChildEnv,
 }
 
 /// A tool child confined to a live bee scope, with its audit ring.
@@ -58,7 +156,7 @@ pub struct EnforcedSandbox {
     engine: bee_userspace::Engine,
     pub scope: bee_userspace::Scope,
     pub reader: bee_userspace::events::AuditReader,
-    strip_env: Vec<String>,
+    env: ChildEnv,
 }
 
 /// A tool child confined to a live bee scope whose audit events arrive via a demux subscription
@@ -68,7 +166,7 @@ pub struct EnforcedSandbox {
 pub struct ConcurrentSandbox {
     pub scope: bee_userspace::Scope,
     pub subscription: bee_userspace::AuditSubscription,
-    strip_env: Vec<String>,
+    env: ChildEnv,
 }
 
 /// The execution environment handed to every [`crate::tools::Tool`].
@@ -134,7 +232,46 @@ pub fn key_vars(api_key_env: Option<&str>) -> Vec<String> {
 impl Sandbox {
     /// A no-scope sandbox that strips `strip_env` from every child.
     pub fn host(strip_env: Vec<String>) -> Self {
-        Sandbox::Host(HostSandbox { strip_env })
+        Sandbox::Host(HostSandbox {
+            env: ChildEnv::new(strip_env),
+        })
+    }
+
+    fn child_env(&self) -> &ChildEnv {
+        match self {
+            Sandbox::Host(h) => &h.env,
+            #[cfg(feature = "enforce")]
+            Sandbox::Enforced(e) => &e.env,
+            #[cfg(feature = "concurrent")]
+            Sandbox::Concurrent(c) => &c.env,
+        }
+    }
+
+    fn child_env_mut(&mut self) -> &mut ChildEnv {
+        match self {
+            Sandbox::Host(h) => &mut h.env,
+            #[cfg(feature = "enforce")]
+            Sandbox::Enforced(e) => &mut e.env,
+            #[cfg(feature = "concurrent")]
+            Sandbox::Concurrent(c) => &mut c.env,
+        }
+    }
+
+    /// Mark which tool call the next children are spawned for; `None` once it returns (019 P3). The
+    /// loop sets this around every `ToolRegistry::execute`.
+    pub fn set_call_context(&mut self, call: Option<CallContext>) {
+        self.child_env_mut().call = call;
+    }
+
+    /// The tool call currently executing, if any.
+    pub fn call_context(&self) -> Option<&CallContext> {
+        self.child_env().call.as_ref()
+    }
+
+    /// Install the per-call environment overlay (harness only — e.g. the interception proxy's
+    /// `HTTP_PROXY` credential). Applied to every child spawned while a call context is set.
+    pub fn set_env_provider(&mut self, provider: EnvProvider) {
+        self.child_env_mut().provider = Some(provider);
     }
 
     /// A scope-confined sandbox. Takes ownership of the `engine` so the loaded eBPF programs stay
@@ -150,7 +287,7 @@ impl Sandbox {
             engine,
             scope,
             reader,
-            strip_env,
+            env: ChildEnv::new(strip_env),
         }))
     }
 
@@ -165,7 +302,7 @@ impl Sandbox {
         Sandbox::Concurrent(Box::new(ConcurrentSandbox {
             scope,
             subscription,
-            strip_env,
+            env: ChildEnv::new(strip_env),
         }))
     }
 
@@ -187,7 +324,7 @@ impl Sandbox {
             Sandbox::Host(h) => {
                 // No cgroup join; hardening + env strip only.
                 let mut cmd = hardened_command::<fn() -> io::Result<()>>(program, args, None)?;
-                restrict_env(&mut cmd, &h.strip_env);
+                h.env.apply(&mut cmd)?;
                 Ok(cmd)
             }
             #[cfg(feature = "enforce")]
@@ -197,7 +334,7 @@ impl Sandbox {
                     .join_closure()
                     .map_err(|err| SpawnError::Io(io::Error::other(err.to_string())))?;
                 let mut cmd = hardened_command(program, args, Some(join))?;
-                restrict_env(&mut cmd, &e.strip_env);
+                e.env.apply(&mut cmd)?;
                 Ok(cmd)
             }
             #[cfg(feature = "concurrent")]
@@ -207,7 +344,7 @@ impl Sandbox {
                     .join_closure()
                     .map_err(|err| SpawnError::Io(io::Error::other(err.to_string())))?;
                 let mut cmd = hardened_command(program, args, Some(join))?;
-                restrict_env(&mut cmd, &c.strip_env);
+                c.env.apply(&mut cmd)?;
                 Ok(cmd)
             }
         }
@@ -298,5 +435,108 @@ fn restrict_env(cmd: &mut Command, keys: &[String]) {
     cmd.env_clear();
     for (k, v) in inherited {
         cmd.env(k, v);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn env_of(cmd: &Command) -> Vec<(String, Option<String>)> {
+        cmd.get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect()
+    }
+
+    fn ctx(id: &str) -> CallContext {
+        CallContext {
+            call_id: id.into(),
+            turn: 3,
+            origin: CallOrigin::Tool,
+        }
+    }
+
+    // 019 P3 (T013): with a call context and an overlay provider set, the overlay's variables reach
+    // the child, applied after `restrict_env` cleared everything else.
+    #[test]
+    fn an_overlay_reaches_the_child_after_restrict_env() {
+        let mut sb = Sandbox::host(key_vars(None));
+        sb.set_env_provider(Box::new(|c: &CallContext| {
+            EnvOverlay::new(vec![(
+                "HTTP_PROXY".into(),
+                format!("http://{}:tok@127.0.0.1:9", c.call_id),
+            )])
+            .expect("valid overlay")
+        }));
+        sb.set_call_context(Some(ctx("call-7")));
+        let cmd = sb.tool_command("true", &[]).expect("command");
+        let env = env_of(&cmd);
+        assert!(
+            env.contains(&(
+                "HTTP_PROXY".into(),
+                Some("http://call-7:tok@127.0.0.1:9".into())
+            )),
+            "{env:?}"
+        );
+
+        // Cleared context ⇒ no overlay, even with the provider still installed.
+        sb.set_call_context(None);
+        let cmd = sb.tool_command("true", &[]).expect("command");
+        assert!(!env_of(&cmd).iter().any(|(k, _)| k == "HTTP_PROXY"));
+    }
+
+    #[test]
+    fn a_stripped_key_is_refused_at_overlay_construction() {
+        for bad in [
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "LD_PRELOAD",
+            "LD_LIBRARY_PATH",
+        ] {
+            assert!(
+                EnvOverlay::new(vec![(bad.into(), "x".into())]).is_err(),
+                "{bad} accepted"
+            );
+        }
+        assert!(EnvOverlay::new(vec![("HTTPS_PROXY".into(), "x".into())]).is_ok());
+    }
+
+    /// The sandbox's own strip list includes the configured provider key var, which a bare
+    /// `EnvOverlay::new` cannot know. A provider that hands back such a key fails the spawn closed.
+    #[test]
+    fn an_overlay_naming_the_configured_key_var_fails_the_spawn() {
+        let mut sb = Sandbox::host(key_vars(Some("MY_PROVIDER_KEY")));
+        sb.set_env_provider(Box::new(|_: &CallContext| {
+            EnvOverlay::new(vec![("MY_PROVIDER_KEY".into(), "leak".into())]).unwrap()
+        }));
+        sb.set_call_context(Some(ctx("c")));
+        assert!(sb.tool_command("true", &[]).is_err());
+    }
+
+    #[test]
+    fn without_an_overlay_the_environment_is_unchanged() {
+        let strip = key_vars(None);
+        let mut expected = Command::new("true");
+        restrict_env(&mut expected, &strip);
+
+        let mut sb = Sandbox::host(strip.clone());
+        let plain = env_of(&sb.tool_command("true", &[]).unwrap());
+        // A context with no provider installed changes nothing either.
+        sb.set_call_context(Some(ctx("c")));
+        let with_ctx = env_of(&sb.tool_command("true", &[]).unwrap());
+
+        let mut want = env_of(&expected);
+        // `hardened_command` adds its `LD_*` removals on top of what `restrict_env` sets.
+        let mut plain_sorted = plain.clone();
+        plain_sorted.retain(|(k, _)| !k.starts_with("LD_"));
+        want.sort();
+        plain_sorted.sort();
+        assert_eq!(plain_sorted, want);
+        assert_eq!(plain, with_ctx);
     }
 }

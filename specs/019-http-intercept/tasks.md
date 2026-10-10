@@ -108,10 +108,10 @@ shippable and SHOULD land as their own PRs (git-pr-workflow).
 
 ### P5 — kernel connect target (FR-009; research R13)
 
-- [ ] T019 [P] Write tests (fail first):
+- [X] T019 [P] Write tests (fail first):
   - in `crates/core/src/audit.rs` `#[cfg(test)]`: an `AuditRecord` with `op = Connect`, `target_len = 20` and a v4 encoding (`family = AF_INET`, address in `addr[0..4]`, rest zero) formats as `"10.0.0.5:443"`; a v4 encoding with non-zero trailing bytes is rejected and formatted as `"<malformed>"`; a v6 encoding formats as `"[2001:db8::1]:443"`; a connect record with `target_len = 0` (old kernels/objects) formats as `""`; a file record is unchanged;
   - extend `tests/dynamic_grants.rs`: `delta_from_denial("connect", "10.0.0.5:443")` from a formatted event yields that net entry.
-- [ ] T020 Encode the connect destination in `crates/ebpf/src/main.rs`. In `socket_connect` (`:160-211`) pass the decoded `family`/`port`/`addr` to a new `emit_audit_connect(cgid, observe, errno, &key)`, which writes `family: u16 LE`, `port: u16 BE` and `addr: [u8;16]` into `AuditRecord.target` with `target_len = 20`. The address layout is identical to `NetKey.addr`: IPv4 in `addr[0..4]` with the remaining 12 bytes zero (`crates/ebpf/src/main.rs:184`), IPv6 in all 16. Leave `emit_audit`'s path variant unchanged; there is no map or `AuditRecord` layout change. Format the target in `AuditEvent::from_record` (`crates/core/src/audit.rs:48`) when `op == Connect`. Add a `connect-target-audited` case to `test/vm/remote-matrix.sh` (depends: T019).
+- [X] T020 Encode the connect destination in `crates/ebpf/src/main.rs`. In `socket_connect` (`:160-211`) pass the decoded `family`/`port`/`addr` to a new `emit_audit_connect(cgid, observe, errno, &key)`, which writes `family: u16 LE`, `port: u16 BE` and `addr: [u8;16]` into `AuditRecord.target` with `target_len = 20`. The address layout is identical to `NetKey.addr`: IPv4 in `addr[0..4]` with the remaining 12 bytes zero (`crates/ebpf/src/main.rs:184`), IPv6 in all 16. Leave `emit_audit`'s path variant unchanged; there is no map or `AuditRecord` layout change. Format the target in `AuditEvent::from_record` (`crates/core/src/audit.rs:48`) when `op == Connect`. Add a `connect-target-audited` case to `test/vm/remote-matrix.sh` (depends: T019).
 
 ### Core policy types (contracts/policy-http.md; data-model.md §bee-core)
 

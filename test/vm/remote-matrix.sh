@@ -43,6 +43,14 @@ out=$(run_bee "$WORK/net.toml" -- bash -c 'curl -sS --max-time 8 -o /dev/null -w
 if connected "$out"; then emit net-allow PASS "http=$out"; else emit net-allow FAIL "http=$out"; fi
 out=$(run_bee "$WORK/net.toml" -- bash -c 'curl -sS --max-time 8 -o /dev/null -w %{http_code} https://8.8.8.8')
 if [ "$out" = 000 ]; then emit net-deny PASS "connection blocked"; else emit net-deny FAIL "http=$out (expected block)"; fi
+# 019 P5 (FR-009): the denial just above must name where it was going. Before P5 a kernel connect
+# audit carried an empty target, so the operator saw "connect denied" with no destination and
+# reactive network escalation could not build a grant. Read from the same run's audit stream.
+if grep -q '"op":"connect","decision":"denied","errno":-1,"target":"8.8.8.8:443"' "$WORK/err"; then
+  emit connect-target-audited PASS "denial names 8.8.8.8:443"
+else
+  emit connect-target-audited FAIL "no connect audit naming 8.8.8.8:443: $(grep -o '"op":"connect"[^}]*' "$WORK/err" | head -2 | tr '\n' ' ')"
+fi
 
 # A non-IP destination is still egress. The policy language spells destinations `host:port`, so no
 # rule can ever allow an AF_UNIX socket — and "no rule matches" in an enforcing scope means deny.

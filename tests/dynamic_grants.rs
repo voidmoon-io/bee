@@ -545,3 +545,11 @@ fn an_exec_denial_asks_for_that_binary() {
 fn a_connect_denial_without_a_destination_asks_for_nothing() {
     assert!(delta_from_denial("connect", "").is_empty());
 }
+
+/// P5: a kernel connect denial now carries its destination, formatted by `AuditEvent::from_record`
+/// as `ip:port` (`crates/core/src/audit.rs`). That exact string is a grantable net entry.
+#[test]
+fn a_formatted_kernel_connect_target_is_a_grantable_destination() {
+    let d = delta_from_denial("connect", "10.0.0.5:443");
+    assert_eq!(d.net, vec!["10.0.0.5:443".to_string()]);
+}

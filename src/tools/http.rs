@@ -48,6 +48,7 @@ fn tool(name: &str, icpt: Option<Interceptor>) -> Option<Box<dyn Tool>> {
         "http_sitemap" => Box::new(super::http_sitemap::HttpSitemap { icpt }),
         "http_fuzz" => Box::new(super::http_fuzz::HttpFuzz { icpt }),
         "http_intercept" => Box::new(super::http_intercept::HttpIntercept { icpt }),
+        "http_leads" => Box::new(super::http_leads::HttpLeads { icpt }),
         #[cfg(feature = "vm-test")]
         "http_debug" => Box::new(HttpDebug { icpt }),
         _ => return None,

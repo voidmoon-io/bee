@@ -104,12 +104,17 @@ fn list(ledger: &Ledger, class: Option<&str>, verdict: Option<&str>, json: bool)
         return ExitCode::SUCCESS;
     }
 
-    print!("{}", render(&view, class, verdict));
+    print!("{}", render(&view, class, verdict, &ledger.project_root()));
     ExitCode::SUCCESS
 }
 
 /// Render the view for a terminal. Every untrusted field is escaped here — see the module note.
-fn render(view: &View, class: Option<&str>, verdict: Option<&str>) -> String {
+fn render(
+    view: &View,
+    class: Option<&str>,
+    verdict: Option<&str>,
+    project: &std::path::Path,
+) -> String {
     let mut out = String::new();
     let mut shown = 0usize;
 
@@ -175,6 +180,17 @@ fn render(view: &View, class: Option<&str>, verdict: Option<&str>) -> String {
             safe_line(&f.source.to_string())
         ));
         out.push_str(&format!("    {}\n", safe_line(&f.evidence)));
+        // Cited exchanges (019 US8), resolved now: one evicted or gone since reads as `missing`.
+        let mut refs: Vec<&String> = f.sightings.iter().flat_map(|s| &s.evidence_refs).collect();
+        refs.sort();
+        refs.dedup();
+        for r in refs {
+            out.push_str(&format!(
+                "    evidence {} — {}\n",
+                safe_line(r),
+                ref_state(project, r)
+            ));
+        }
     }
 
     if shown == 0 {
@@ -269,7 +285,7 @@ mod tests {
         f.reidentify();
         record(&led, f, Sighting::now("run-1")).unwrap();
 
-        let rendered = render(&fold(&led).unwrap(), None, None);
+        let rendered = render(&fold(&led).unwrap(), None, None, std::path::Path::new("."));
         assert!(
             !rendered.contains('\u{1b}'),
             "an escape survived into the operator's terminal: {rendered:?}"
@@ -287,7 +303,7 @@ mod tests {
     fn an_empty_ledger_says_so_rather_than_printing_nothing() {
         let tmp = tempfile::tempdir().unwrap();
         let view = fold(&ledger(tmp.path())).unwrap();
-        assert!(render(&view, None, None).contains("no findings match"));
+        assert!(render(&view, None, None, std::path::Path::new(".")).contains("no findings match"));
     }
 
     #[test]
@@ -305,10 +321,33 @@ mod tests {
             record(&led, f, Sighting::now("run-1")).unwrap();
         }
         let view = fold(&led).unwrap();
-        assert!(render(&view, Some("sqli"), None).contains("src/a.rs"));
-        assert!(!render(&view, Some("sqli"), None).contains("src/b.rs"));
+        assert!(render(&view, Some("sqli"), None, std::path::Path::new(".")).contains("src/a.rs"));
+        assert!(!render(&view, Some("sqli"), None, std::path::Path::new(".")).contains("src/b.rs"));
         // Nothing is adjudicated yet, so every entry is `none` and no entry is `confirmed`.
-        assert!(render(&view, None, Some("confirmed")).contains("no findings match"));
-        assert!(render(&view, None, Some("none")).contains("src/a.rs"));
+        assert!(
+            render(&view, None, Some("confirmed"), std::path::Path::new("."))
+                .contains("no findings match")
+        );
+        assert!(render(&view, None, Some("none"), std::path::Path::new(".")).contains("src/a.rs"));
+    }
+}
+
+/// How a cited exchange resolves now: `present` or `missing` (019 US8, FR-027).
+#[cfg_attr(not(feature = "intercept"), allow(unused_variables))]
+fn ref_state(project: &std::path::Path, r: &str) -> &'static str {
+    #[cfg(feature = "intercept")]
+    {
+        match r
+            .strip_prefix("http:")
+            .map(|id| bee::intercept::store::resolve_ref(project, id))
+        {
+            Some(bee::intercept::store::RefState::Present) => "present",
+            _ => "missing",
+        }
+    }
+    #[cfg(not(feature = "intercept"))]
+    {
+        let _ = r;
+        "missing (this build has no exchange store)"
     }
 }

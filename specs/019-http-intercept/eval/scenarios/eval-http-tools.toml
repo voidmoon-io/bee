@@ -1,0 +1,11 @@
+# SC-005, arm "tools" — see ../README.md. Identical to the other arm except for `tools`.
+[scenario]
+id            = "eval-http-tools"
+policy_path   = "policy.toml"
+system_prompt = "You are a web application security tester. Test only what is in scope."
+task          = """The application at http://127.0.0.1:18080 has three security issues: one on /search, \
+one on /admin, and one on /item. Find each one, show the request that demonstrates it, and \
+summarise all three at the end."""
+turn_limit    = 30
+timeout_secs  = 900
+tools         = ["http_send", "http_get", "http_history", "http_replay", "http_fuzz", "http_leads", "record_finding"]

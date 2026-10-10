@@ -195,6 +195,12 @@ pub async fn run_loop(
         }
         let schemas = registry.schemas();
 
+        // Harness notes for this turn (019 US8: "N new passive leads") — bee's own words.
+        for note in sandbox.turn_notes() {
+            emit(opts, format!("  {note}"));
+            convo.push(Message::User { text: note });
+        }
+
         let call_start = Instant::now();
         let turn =
             match complete_with_retry(model, &convo, &schemas, opts.max_retries, deadline).await {

@@ -50,7 +50,9 @@ CREATE TABLE IF NOT EXISTS refusals  (id INTEGER PRIMARY KEY, session_id TEXT, t
 CREATE TABLE IF NOT EXISTS fuzz_runs (id TEXT PRIMARY KEY, session_id TEXT, call_id TEXT, spec TEXT, state TEXT,
                                       planned INTEGER, sent INTEGER, refused INTEGER, failed INTEGER, summary TEXT);
 CREATE TABLE IF NOT EXISTS leads     (id TEXT PRIMARY KEY, session_id TEXT, kind TEXT, summary TEXT,
-                                      exchange_ids TEXT, created TEXT, announced INTEGER DEFAULT 0);
+                                      exchange_ids TEXT, created TEXT, announced INTEGER DEFAULT 0,
+                                      listed INTEGER DEFAULT 0, dedupe_key TEXT);
+CREATE INDEX IF NOT EXISTS lead_key ON leads(session_id, dedupe_key);
 "#;
 
 /// The bytes of one exchange, as the worker's segments carry them.
@@ -385,6 +387,99 @@ impl Store {
         Ok(id)
     }
 
+    /// Record a passive lead (US8), folding repeats of the same kind on the same host and path into
+    /// one lead (up to 10 exchange ids). Returns the lead id when a new lead was created.
+    pub fn record_lead(
+        &mut self,
+        kind: &str,
+        summary: &str,
+        dedupe_key: &str,
+        exchange_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        self.writable()?;
+        let existing: Option<(String, String)> = self
+            .conn
+            .query_row(
+                "SELECT id, exchange_ids FROM leads WHERE session_id = ?1 AND dedupe_key = ?2",
+                params![self.session_id, dedupe_key],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        if let Some((id, ids)) = existing {
+            let mut ids: Vec<String> = serde_json::from_str(&ids).unwrap_or_default();
+            if ids.len() < 10 && !ids.iter().any(|i| i == exchange_id) {
+                ids.push(exchange_id.to_string());
+                self.conn.execute(
+                    "UPDATE leads SET exchange_ids = ?1 WHERE id = ?2",
+                    params![serde_json::to_string(&ids).unwrap_or_default(), id],
+                )?;
+            }
+            return Ok(None);
+        }
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM leads WHERE session_id = ?1",
+            params![self.session_id],
+            |r| r.get(0),
+        )?;
+        let id = format!("L{}-{}", self.short, n + 1);
+        self.conn.execute(
+            "INSERT INTO leads (id, session_id, kind, summary, exchange_ids, created, announced, listed, dedupe_key)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, 0, ?7)",
+            params![
+                id,
+                self.session_id,
+                kind,
+                summary,
+                serde_json::to_string(&[exchange_id]).unwrap_or_default(),
+                super::control::now_rfc3339(),
+                dedupe_key
+            ],
+        )?;
+        Ok(Some(id))
+    }
+
+    /// How many leads have not been announced yet; marks them announced.
+    pub fn announce_leads(&mut self) -> Result<u64, StoreError> {
+        if self.read_only.is_some() {
+            return Ok(0);
+        }
+        let n = self.conn.execute(
+            "UPDATE leads SET announced = 1 WHERE session_id = ?1 AND announced = 0",
+            params![self.session_id],
+        )?;
+        Ok(n as u64)
+    }
+
+    /// This session's leads (all, or only those not listed before), oldest first; marks them listed.
+    pub fn leads(&mut self, only_new: bool, limit: u32) -> Result<Vec<LeadRow>, StoreError> {
+        let rows: Vec<LeadRow> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, kind, summary, exchange_ids FROM leads
+                 WHERE session_id = ?1 AND (?2 = 0 OR listed = 0) ORDER BY rowid LIMIT ?3",
+            )?;
+            let it = stmt.query_map(params![self.session_id, only_new as i64, limit], |r| {
+                Ok(LeadRow {
+                    id: r.get(0)?,
+                    kind: r.get(1)?,
+                    summary: r.get(2)?,
+                    exchange_ids: r
+                        .get::<_, String>(3)
+                        .ok()
+                        .and_then(|s| serde_json::from_str(&s).ok())
+                        .unwrap_or_default(),
+                })
+            })?;
+            it.collect::<Result<_, _>>()?
+        };
+        if self.read_only.is_none() {
+            for r in &rows {
+                self.conn
+                    .execute("UPDATE leads SET listed = 1 WHERE id = ?1", params![r.id])?;
+            }
+        }
+        Ok(rows)
+    }
+
     /// Persist a fuzz run's spec, counts and summary (US6).
     #[allow(clippy::too_many_arguments)]
     pub fn insert_fuzz_run(
@@ -664,6 +759,52 @@ impl Store {
         }
         self.eviction = Some(summary);
         Ok(())
+    }
+}
+
+/// A passive lead as listed (US8).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct LeadRow {
+    pub id: String,
+    pub kind: String,
+    pub summary: String,
+    pub exchange_ids: Vec<String>,
+}
+
+/// Whether a finding's evidence reference still resolves (US8, FR-027).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefState {
+    Present,
+    /// The exchange row exists but its response body was evicted.
+    Evicted,
+    Missing,
+}
+
+/// Resolve `exchange_id` against the project's store **read-only**, opening nothing for writing and
+/// creating nothing: the finding ledger uses this to validate and to review evidence refs.
+pub fn resolve_ref(project_root: &Path, exchange_id: &str) -> RefState {
+    let db = project_root.join(".bee").join("http").join("index.sqlite");
+    if !db.exists() {
+        return RefState::Missing;
+    }
+    let Ok(conn) = Connection::open_with_flags(&db, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
+        return RefState::Missing;
+    };
+    let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+    let row: Option<i64> = conn
+        .query_row(
+            "SELECT COALESCE(b.evicted, 0) FROM exchanges e
+             LEFT JOIN blobs b ON b.sha256 = e.resp_body WHERE e.id = ?1",
+            params![exchange_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .ok()
+        .flatten();
+    match row {
+        None => RefState::Missing,
+        Some(0) => RefState::Present,
+        Some(_) => RefState::Evicted,
     }
 }
 

@@ -138,6 +138,11 @@ pub trait CallHooks: Send + Sync {
     fn take_events(&self, _call: &CallContext) -> Vec<crate::proxy_event::ProxyEvent> {
         Vec::new()
     }
+    /// Lines bee itself adds to the conversation at the top of a turn — e.g. "3 new passive leads"
+    /// (019 US8). Bee's own words only: never text from a target.
+    fn turn_notes(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Everything that decides a tool child's environment: what is stripped, and what — for the current
@@ -486,6 +491,15 @@ impl Sandbox {
             return Err(e);
         }
         Ok(())
+    }
+
+    /// Harness notes for the top of the next turn (019 US8).
+    pub fn turn_notes(&self) -> Vec<String> {
+        self.child_env()
+            .hooks
+            .as_ref()
+            .map(|h| h.turn_notes())
+            .unwrap_or_default()
     }
 
     /// Install the harness's per-call hooks (019 interception).

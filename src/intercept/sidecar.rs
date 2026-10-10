@@ -858,6 +858,10 @@ impl Interceptor {
                 let bytes = ExchangeBytes::from_segments(segs, rec.has_original);
                 let stored = self.with_store(|s| {
                     let id = s.insert_exchange(&rec, &bytes);
+                    // Passive checks over what was just stored (US8): leads, never findings.
+                    if let Ok(id) = &id {
+                        record_leads(s, &rec, &bytes, id);
+                    }
                     if let Some(sum) = s.take_eviction_summary() {
                         self.inner.notices.lock().expect("notices lock").push(format!(
                             "exchange store over its cap: evicted {} bodies ({} bytes); their rows remain",
@@ -1047,4 +1051,20 @@ fn mint_token() -> String {
     let n = unsafe { libc::getrandom(b.as_mut_ptr().cast(), b.len(), 0) };
     assert_eq!(n, 16, "getrandom failed minting a proxy credential");
     b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// Run the passive checks over a stored exchange and record any leads (US8).
+fn record_leads(store: &mut Store, rec: &ExchangeRecord, bytes: &ExchangeBytes, id: &str) {
+    if bytes.resp_head.is_empty() {
+        return;
+    }
+    let encoding = super::store::content_encoding(&bytes.resp_head);
+    let decoded = super::slice::decode(&bytes.resp_body, &encoding, super::passive::BODY_CAP)
+        .map(|d| d.bytes)
+        .unwrap_or_default();
+    let path = super::store::path_of(rec.target.as_deref().unwrap_or("/"));
+    for lead in super::passive::check(rec, bytes, &decoded) {
+        let key = format!("{}|{}:{}|{}", lead.kind, rec.host, rec.port, path);
+        let _ = store.record_lead(lead.kind, lead.summary, &key, id);
+    }
 }

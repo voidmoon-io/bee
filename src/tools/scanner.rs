@@ -410,6 +410,7 @@ impl Tool for ScanTool {
         for f in &findings {
             let finding = f.to_finding(&args.scanner);
             let sighting = Sighting {
+                evidence_refs: Vec::new(),
                 run_id: self.run_id.clone(),
                 at: time::OffsetDateTime::now_utc(),
                 line: f.line,

@@ -119,6 +119,21 @@ impl CallHooks for ProxyCredentials {
     fn take_events(&self, call: &CallContext) -> Vec<crate::proxy_event::ProxyEvent> {
         self.interceptor.take_events(&call.call_id)
     }
+
+    fn turn_notes(&self) -> Vec<String> {
+        let n = self
+            .interceptor
+            .with_store(|s| s.announce_leads())
+            .unwrap_or(0);
+        if n == 0 {
+            return Vec::new();
+        }
+        vec![format!(
+            "[bee] {n} new passive lead{} from recorded HTTP traffic. `http_leads` lists them. \
+             Leads are observations to check, not findings.",
+            if n == 1 { "" } else { "s" }
+        )]
+    }
 }
 
 pub fn wire_ctx(call: &CallContext) -> WireCtx {

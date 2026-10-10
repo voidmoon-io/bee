@@ -203,12 +203,21 @@ pub struct Sighting {
     /// The producing tool's own rule identifier, when it has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rule_id: Option<String>,
+    /// Recorded exchanges this sighting cites as evidence, `http:<exchange-id>` (019 US8, FR-027) —
+    /// at most [`MAX_EVIDENCE_REFS`]. Ids only, so the event stays within [`MAX_EVENT_BYTES`]; review
+    /// resolves each against the exchange store, and one evicted since reads as `missing`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_refs: Vec<String>,
 }
+
+/// Most evidence references one sighting may carry.
+pub const MAX_EVIDENCE_REFS: usize = 16;
 
 impl Sighting {
     /// A sighting of `run_id`, now.
     pub fn now(run_id: impl Into<String>) -> Sighting {
         Sighting {
+            evidence_refs: Vec::new(),
             run_id: run_id.into(),
             at: OffsetDateTime::now_utc(),
             line: None,
@@ -440,6 +449,19 @@ impl Ledger {
         match override_dir {
             Some(d) => Ledger::at(d),
             None => Ledger::at(PathBuf::from(DEFAULT_LEDGER_DIR)),
+        }
+    }
+
+    /// The project directory whose `.bee/` holds this ledger — where the exchange store lives too
+    /// (019 US8). For a ledger outside any `.bee/`, the working directory.
+    pub fn project_root(&self) -> PathBuf {
+        let d = self.dir();
+        match d.parent() {
+            Some(p) if p.file_name().is_some_and(|n| n == ".bee") => p
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from(".")),
+            _ => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         }
     }
 

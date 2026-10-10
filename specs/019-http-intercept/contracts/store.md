@@ -48,7 +48,9 @@ CREATE TABLE refusals  (id INTEGER PRIMARY KEY, session_id TEXT, ts TEXT, call_i
 CREATE TABLE fuzz_runs (id TEXT PRIMARY KEY, session_id TEXT, call_id TEXT, spec TEXT, state TEXT,
                         planned INTEGER, sent INTEGER, refused INTEGER, failed INTEGER, summary TEXT);
 CREATE TABLE leads     (id TEXT PRIMARY KEY, session_id TEXT, kind TEXT, summary TEXT,
-                        exchange_ids TEXT, created TEXT, announced INTEGER DEFAULT 0);
+                        exchange_ids TEXT, created TEXT, announced INTEGER DEFAULT 0,
+                        listed INTEGER DEFAULT 0,     -- http_leads only_new
+                        dedupe_key TEXT);             -- kind|host:port|path: repeats fold into one lead
 ```
 
 ## Rules

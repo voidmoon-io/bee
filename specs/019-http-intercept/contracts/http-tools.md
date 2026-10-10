@@ -125,8 +125,11 @@ Held requests auto-forward unchanged at the deadline (FR-022). Bound: 8 KiB.
 
 ## `record_finding` (extended, M3)
 
-New optional arg `evidence: ["http:E7a2-44", …]` (≤ 16 refs). Unknown ids are rejected at record
-time; ids evicted later resolve as `missing` on review (FR-027).
+New optional arg `evidence_refs: ["http:E7a2-44", …]` (≤ 16 refs). (Named `evidence_refs`, not
+`evidence`, because `evidence` is already the finding's required text field.) The refs are stored
+on the sighting. Unknown ids are rejected at record time, resolved against the exchange store
+beside the ledger in the same `.bee/`. Ids whose body has since been evicted, or that are gone,
+resolve as `missing` on review (FR-027).
 
 ## `http_leads` (M3)
 

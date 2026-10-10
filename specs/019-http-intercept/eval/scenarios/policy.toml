@@ -1,0 +1,15 @@
+# SC-005 evaluation policy: interception on, the fixture target in scope. Set <T> to the port
+# `cargo run --features intercept --example vuln_target` prints.
+[policy]
+name = "eval-http"
+mode = "enforce"
+
+[policy.exec]
+allow = ["bash", "curl", "cat", "grep", "head", "jq"]
+
+[policy.http]
+targets = ["127.0.0.1:18080"]
+
+[policy.http.limits]
+rps = 20
+max_requests_per_run = 500

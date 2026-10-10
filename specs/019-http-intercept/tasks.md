@@ -436,14 +436,14 @@ turn start.
 
 **Independent Test**: spec US8, in `tests/intercept_leads.rs` and `tests/finding_ledger.rs`.
 
-- [ ] T084 [P] [US8] Write tests (fail first):
+- [X] T084 [P] [US8] Write tests (fail first):
   - in `tests/finding_ledger.rs`: `record_finding` with `evidence: ["http:<id>"]` stores the refs, an unknown id is rejected, and after eviction review shows `missing`;
   - a new `tests/intercept_leads.rs`: a reflected `/search?q=` produces a `reflected_parameter` lead, the ledger is unchanged, the next `TurnStart` injects "N new leads", and `http_leads only_new` lists them once;
   - lead summaries are bee templates containing no target bytes.
-- [ ] T085 [US8] Add `evidence_refs: Vec<String>` (≤ 16, each `http:<ExchangeId>`) to `Observed` events in `src/findings.rs`, keeping events within `MAX_EVENT_BYTES`. Validate the refs against `Store` at record time in `src/tools/finding.rs`, and resolve them on review in `src/app/findings.rs`, showing `missing` for evicted or unknown ones.
-- [ ] T086 [US8] Implement passive checks in `src/intercept/passive.rs`, run on store insert with bodies decoded and capped at 1 MiB: reflected query parameter, session-like cookies missing `HttpOnly`/`Secure`/`SameSite`, verbose error signatures, missing security headers on `text/html`, and credentials in the URL. Write the results to `leads`.
-- [ ] T087 [US8] Add a `TurnStart` hook in `src/hooks.rs`/`src/intercept/` that announces unannounced leads in one harness line and marks them announced. Implement the `http_leads` tool in `src/tools/http.rs` and register it.
-- [ ] T088 [US8] Write `specs/019-http-intercept/eval/README.md` describing the SC-005 paired live-provider evaluation (shell+curl tool set vs HTTP tool set against `vuln_target`, recording calls and tool-output tokens), plus a runner `scenarios/eval-http-*.toml` for each arm.
+- [X] T085 [US8] Add `evidence_refs: Vec<String>` (≤ 16, each `http:<ExchangeId>`) to `Observed` events in `src/findings.rs`, keeping events within `MAX_EVENT_BYTES`. Validate the refs against `Store` at record time in `src/tools/finding.rs`, and resolve them on review in `src/app/findings.rs`, showing `missing` for evicted or unknown ones.
+- [X] T086 [US8] Implement passive checks in `src/intercept/passive.rs`, run on store insert with bodies decoded and capped at 1 MiB: reflected query parameter, session-like cookies missing `HttpOnly`/`Secure`/`SameSite`, verbose error signatures, missing security headers on `text/html`, and credentials in the URL. Write the results to `leads`.
+- [X] T087 [US8] Add a `TurnStart` hook in `src/hooks.rs`/`src/intercept/` that announces unannounced leads in one harness line and marks them announced. Implement the `http_leads` tool in `src/tools/http.rs` and register it.
+- [X] T088 [US8] Write `specs/019-http-intercept/eval/README.md` describing the SC-005 paired live-provider evaluation (shell+curl tool set vs HTTP tool set against `vuln_target`, recording calls and tool-output tokens), plus a runner `scenarios/eval-http-*.toml` for each arm.
 
 ---
 

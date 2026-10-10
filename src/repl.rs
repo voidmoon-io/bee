@@ -505,6 +505,12 @@ pub async fn run_exchange(
         }
         let schemas = registry.schemas();
 
+        // Harness notes for this turn (019 US8: "N new passive leads") — bee's own words.
+        for note in sandbox.turn_notes() {
+            output.info(&note);
+            conversation.push(Message::User { text: note });
+        }
+
         let turn_start = Instant::now();
         // Show a "working" indicator from the instant the call is dispatched — this covers the
         // stream-open latency and the wait for the first token, which is the gap that otherwise

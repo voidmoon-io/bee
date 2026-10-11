@@ -949,8 +949,11 @@ if [ -x "$BEE" ] && "$BEE" run --help 2>/dev/null | grep -q -- '--http-scope-adv
     >/dev/null 2>&1 &
   T3=$!
   sleep 1
+  # `dash`: the bash tool runs its command with `sh -c`, and on Ubuntu `sh` is dash — the kernel checks
+  # the resolved image, so the allowlist names `dash`, not `sh`. Without it every tool call here is
+  # refused at exec, and the cases below would be judging a refusal.
   printf '%s\n' '[policy]' 'name = "http-vm"' 'mode = "enforce"' \
-    '[policy.exec]' 'allow = ["bash", "curl", "cat", "openssl", "head", "timeout"]' \
+    '[policy.exec]' 'allow = ["dash", "bash", "curl", "cat", "openssl", "head", "timeout"]' \
     '[policy.filesystem]' '"/home/ubuntu/httpwork" = "write"' \
     '[policy.http]' 'targets = ["127.0.0.1:18080", "127.0.0.1:18443"]' >"$HW/policy.toml"
   printf '%s\n' '[scenario]' 'id = "http-vm"' "policy_path = \"$HW/policy.toml\"" \
@@ -970,7 +973,10 @@ steps = [
     ("bash", {"command": "curl -sS --max-time 5 --noproxy '*' -o /dev/null -w 'code=%{http_code}' http://1.1.1.1/; echo"}),
     ("http_debug", {"connect": "1.1.1.1:443"}),
     ("bash", {"command": sni}),
-    ("bash", {"command": "cat .bee/http/index.sqlite >/dev/null && echo READ-OK; echo x > .bee/http/blobs/x && echo WRITE-OK; true"}),
+    # No `>/dev/null`: a scope that grants a write denies writes to unlisted paths, /dev/null among
+    # them, and the redirect would fail before the read was ever attempted. The read goes into a
+    # shell variable instead.
+    ("bash", {"command": "x=$(head -c 16 .bee/http/index.sqlite) && [ -n \"$x\" ] && echo READ-OK; echo x > .bee/http/blobs/x && echo WRITE-OK; true"}),
     ("http_debug", {"read": hw + "/src/secret.txt"}),
     ("http_history", {}),
 ]
@@ -989,7 +995,9 @@ PYPROV
   LAT_N=300
   for _ in $(seq 1 50); do curl -s -o /dev/null http://127.0.0.1:18080/; done
   for _ in $(seq 1 $LAT_N); do curl -s -o /dev/null -w '%{time_total}\n' http://127.0.0.1:18080/; done >"$HW/direct.txt"
-  LATCMD="for i in \$(seq 1 50); do curl -s -o /dev/null http://127.0.0.1:18080/; done; for i in \$(seq 1 $LAT_N); do curl -s -o /dev/null -w '%{time_total} ' http://127.0.0.1:18080/; done"
+  # Builtins only for the loop: the scope's exec allowlist has no `seq`, and a denied `seq` turns the
+  # tool's output into an `sh:` error instead of timings (the false-result trap in test/vm/README).
+  LATCMD="i=0; while [ \$i -lt 50 ]; do curl -s -o /dev/null http://127.0.0.1:18080/; i=\$((i+1)); done; i=0; while [ \$i -lt $LAT_N ]; do curl -s -o /dev/null -w '%{time_total} ' http://127.0.0.1:18080/; i=\$((i+1)); done"
   python3 - "$LATCMD" >"$HW/lat.prov.toml" <<'PYLAT'
 import json, sys
 print('[provider]\nprovider = "mock"')
@@ -1013,7 +1021,13 @@ try:
     ok = len(proxied) >= 100 and med <= 50 and p95 <= 200
     print(f"http-latency|{'PASS' if ok else 'FAIL'}|added median {med:.1f} ms, p95 {p95:.1f} ms over {len(proxied)} requests (limits 50 / 200)")
 except Exception as e:
-    print(f"http-latency|FAIL|could not measure: {e}")
+    # Say what the tool actually printed: a parse error alone hides a denied command or a missing file.
+    try:
+        got = json.load(open(sys.argv[2]))["turns"][0]["calls"][0]["result"]["content"][:160]
+    except Exception as e2:
+        got = f"<no transcript: {e2}>"
+    got = got.replace("|", "/").replace("\n", " ")
+    print(f"http-latency|FAIL|could not measure: {e}; tool output began: {got}")
 PYLATCHECK
 )
   kill "$T1" "$T2" "$T3" 2>/dev/null
@@ -1023,12 +1037,14 @@ PYLATCHECK
       emit "$c" FAIL "no transcript: $(tail -3 "$HW/run.log" | tr '\n' ' ')"
     done
   else
-    # One python pass over the transcript; prints `case|PASS|note` lines.
-    while IFS='|' read -r c st note; do emit "$c" "$st" "$note"; done < <(python3 - "$HW/t.json" "$HW/other.log" <<'PYCHECK'
+    # One python pass over the transcript; prints `case|PASS|note` lines. A case it never printed — the
+    # checker crashed, or skipped it — is a FAIL, not an absence: a missing line must not read as green.
+    seen=""
+    while IFS='|' read -r c st note; do seen="$seen $c"; emit "$c" "$st" "$note"; done < <(python3 - "$HW/t.json" "$HW/other.log" 2>"$HW/check.err" <<'PYCHECK'
 import json, sys
 t = json.load(open(sys.argv[1]))
 other_log = open(sys.argv[2]).read()
-calls = [c for turn in t["turns"] for c in turn["calls"]]
+calls = [c for turn in t["turns"] for c in turn.get("calls", [])]
 def res(i): return calls[i]["result"]["content"] if i < len(calls) else ""
 def audit(i): return calls[i].get("audit", []) if i < len(calls) else []
 def pev(i): return calls[i].get("proxy_events", []) if i < len(calls) else []
@@ -1056,12 +1072,16 @@ out("http-sni-mismatch", bool(sni) and "BEGIN CERTIFICATE" not in res(5), f"prox
 fs = [a for a in audit(6) if a["op"] == "file_open" and a["decision"] == "denied"
       and ".bee/http" in a["target"]]
 out("http-store-protected", "READ-OK" not in res(6) and "WRITE-OK" not in res(6) and len(fs) >= 2,
-    f"denials={[a['target'] for a in fs]}")
+    f"denials={[a['target'] for a in fs]}; output={res(6).strip()[:120]!r}")
 pf = [a for a in audit(7) if a.get("scope_id") == "proxy" and a["op"] == "file_open"
       and "secret.txt" in a["target"]]
 out("http-proxy-fs-deny", "errno=13" in res(7) and bool(pf), f"{res(7)!r}, proxy-scope audit={bool(pf)}")
 PYCHECK
 )
+    for c in $HTTP_CASES; do
+      [ "$c" = http-latency ] && continue  # judged separately above
+      case " $seen " in *" $c "*) ;; *) emit "$c" FAIL "not judged: $(tail -1 "$HW/check.err" 2>/dev/null)" ;; esac
+    done
   fi
   rm -rf "$HW"
 else

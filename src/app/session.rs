@@ -10,7 +10,6 @@
 //! consent prompting, and the sandbox lifetime belong to the command, because those are the parts
 //! that genuinely differ between headless and interactive.
 
-use std::path::Path;
 use std::process::ExitCode;
 
 use bee::{model_from_config, set_non_dumpable, Model};
@@ -94,75 +93,10 @@ pub fn fail(command: &str, e: &SessionError) -> ExitCode {
     ExitCode::from(e.code)
 }
 
-// --- skills, grants, and the sandbox ----------------------------------------------------------
+// --- tool children, and the enforcement invariant ------------------------------------------
 //
-// These lived in `bee-repl`'s binary. They are here because a headless session has a legitimate
-// claim on all of them: scenarios already carry a skills list, grant resolution is the same
-// attenuation-bounded operation either way, and both kinds of session need a sandbox. What differs
-// is only the *consent sink* — an interactive prompt versus a scenario's declared grants — so that
-// is the injected part rather than the whole path being duplicated.
-
-use std::sync::Arc;
-
-use bee::skills::{ConsentSink, Skill};
-use bee::{Sandbox, SkillRegistry, ToolRegistry};
-
-/// Discover skills from the project and user roots, printing any malformed-skill warnings. A bad
-/// skill warns; it never aborts a session.
-pub fn discover_skills(cwd: &Path, command: &str) -> Arc<SkillRegistry> {
-    let roots = SkillRegistry::default_roots(cwd);
-    let skills = Arc::new(SkillRegistry::discover(&roots));
-    for w in skills.warnings() {
-        eprintln!(
-            "{command}: skill warning: {}: {}",
-            w.path.display(),
-            w.reason
-        );
-    }
-    skills
-}
-
-/// Resolve skill capability grants before the scope compiles, and register whatever was granted.
-///
-/// The base policy is the session's; the ceiling bounds what a skill may add to it. Each
-/// within-ceiling request goes to `consent`; beyond-ceiling requests are refused outright. Returns
-/// the widened policy to compile, or `None` when there is no base policy to widen.
-pub async fn resolve_grants(
-    base: Option<&bee_core::Policy>,
-    ceiling: Option<&bee_core::Policy>,
-    skills: &SkillRegistry,
-    registry: &mut ToolRegistry,
-    consent: &dyn ConsentSink,
-    command: &str,
-) -> Option<bee_core::Policy> {
-    let base = base?.clone();
-    let ceiling = ceiling.cloned().unwrap_or_else(|| base.clone());
-
-    let skill_refs: Vec<&Skill> = skills.iter().collect();
-    let mut outcome = bee::skills::resolve_grants(&skill_refs, &base, &ceiling, consent).await;
-    for name in &outcome.granted {
-        println!("{command}: skill '{name}' capabilities granted");
-    }
-    for (name, reason) in &outcome.refused {
-        eprintln!("{command}: skill '{name}' refused — {reason}");
-    }
-    for tool in &outcome.tools {
-        // An unknown name was refused at validation; nothing to register.
-        let _ = registry.register(tool);
-    }
-    // Readable-scope: each discovered skill directory becomes readable so bundled resources
-    // resolve. Read, never write — a skill's own files are inputs.
-    for s in &skill_refs {
-        if let Some(dir) = s.dir.to_str() {
-            outcome
-                .policy
-                .filesystem
-                .entry(dir.to_string())
-                .or_insert(bee_core::Access::Read);
-        }
-    }
-    Some(outcome.policy)
-}
+// Skills, grants, the sandbox and the rest of a session are assembled by the library's Session
+// builder (`bee::session::build`, 024 FR-006); the commands only map configuration onto its spec.
 
 /// The environment variables tool children must not inherit: the provider key plus anything else
 /// the session names (MCP token variables are added by the caller that knows about them).
@@ -288,102 +222,3 @@ pub fn announce_host_mode(command: &str) {
 /// build — a host build has no kernel gate to fail.
 #[cfg_attr(not(feature = "enforce"), allow(dead_code))]
 pub const EX_UNSUPPORTED: u8 = 65;
-
-/// The interception setup a sandbox was built with (019): `Some` when `[policy.http]` is active.
-#[cfg(feature = "intercept")]
-pub type HttpPrepared = Option<bee::intercept::session::Prepared>;
-#[cfg(not(feature = "intercept"))]
-pub type HttpPrepared = Option<std::convert::Infallible>;
-
-/// Build the sandbox a session's tools run in, plus a human-readable label for the banner.
-///
-/// With the enforcement feature and a policy this is a real kernel-enforced scope; otherwise it is
-/// a hardened, credential-stripped host sandbox with no scope. With `[policy.http]` active it also
-/// binds the proxy listener, makes the proxy port the tool scope's only network rule, and attaches
-/// the proxy scope; the caller starts the worker.
-#[cfg(feature = "enforce")]
-pub fn build_sandbox(
-    policy: Option<bee_core::Policy>,
-    label_hint: Option<&Path>,
-    strip_env: Vec<String>,
-) -> Result<(Sandbox, String, HttpPrepared), String> {
-    use bee_userspace::{EnforcementPlan, Engine, ScopeMode, SystemResolver};
-
-    let Some(policy) = policy else {
-        return Ok((
-            Sandbox::host(strip_env),
-            "none — host mode (no kernel scope)".to_string(),
-            None,
-        ));
-    };
-
-    let resolver = SystemResolver::current();
-    #[cfg(feature = "intercept")]
-    let prepared = bee::intercept::session::prepare(&policy, &resolver)?;
-    #[cfg(not(feature = "intercept"))]
-    let prepared: HttpPrepared = None;
-    #[cfg_attr(not(feature = "intercept"), allow(unused_mut))]
-    let mut compiled = policy
-        .compile(&resolver)
-        .map_err(|e| format!("policy compile: {e}"))?;
-    #[cfg(feature = "intercept")]
-    if let Some(p) = &prepared {
-        compiled = p.tool_policy(compiled);
-    }
-    let plan = EnforcementPlan::prepare(&compiled, ScopeMode::Enforce)
-        .map_err(|e| format!("enforcement plan: {e}"))?;
-    let mut engine = Engine::init().map_err(|e| format!("engine init: {e}"))?;
-
-    let scope_id = format!("bee-session-{}", std::process::id());
-    let scope = engine
-        .create_scope(&scope_id, bee_userspace::cgroup::DEFAULT_PARENT, &plan)
-        .map_err(|e| format!("create scope: {e}"))?;
-    let reader = engine
-        .take_audit_reader(&scope_id)
-        .map_err(|e| format!("audit reader: {e}"))?;
-    let label = match label_hint {
-        Some(p) => format!("{} (enforced)", p.display()),
-        None => "policy (enforced)".to_string(),
-    };
-    #[cfg(feature = "intercept")]
-    let sidecar = match &prepared {
-        Some(p) => Some(
-            bee::intercept::session::attach_sidecar(&mut engine, &scope_id, &p.compiled)
-                .inspect_err(|_| {
-                    let _ = scope.teardown();
-                })?,
-        ),
-        None => None,
-    };
-    #[cfg_attr(not(feature = "intercept"), allow(unused_mut))]
-    let mut sandbox = Sandbox::enforced(engine, scope, reader, strip_env);
-    #[cfg(feature = "intercept")]
-    if let Some(sc) = sidecar {
-        sandbox = sandbox.with_sidecar(sc).map_err(|(sb, sc, e)| {
-            let _ = sc.scope.teardown();
-            let _ = sb.teardown();
-            e.to_string()
-        })?;
-    }
-    Ok((sandbox, label, prepared))
-}
-
-/// Host build: there is no kernel enforcement to apply, so a resolved policy is noted but not
-/// enforced. Tools still run hardened and credential-stripped.
-#[cfg(not(feature = "enforce"))]
-pub fn build_sandbox(
-    _policy: Option<bee_core::Policy>,
-    label_hint: Option<&Path>,
-    strip_env: Vec<String>,
-) -> Result<(Sandbox, String, HttpPrepared), String> {
-    let label = match label_hint {
-        Some(p) => format!(
-            "{} — IGNORED (host build; rebuild with --features enforce to enforce it)",
-            p.display()
-        ),
-        None => "none — host mode (no kernel scope)".to_string(),
-    };
-    // A host build never runs a policy (the enforcement invariant refuses one before this point), so
-    // `[policy.http]` cannot be active here; interception has nothing to prepare.
-    Ok((Sandbox::host(strip_env), label, None))
-}

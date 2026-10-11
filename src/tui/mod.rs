@@ -1,7 +1,7 @@
 //! The full-screen TUI front-end (008-grid-tui, M3–M4). Feature-gated behind `tui`.
 //!
 //! Architecture: The Elm Architecture (Model → Message → update → view) over the harness's tokio
-//! loop, consuming [`crate::session::SessionEvent`]s beside terminal input. The [`run`] event loop
+//! loop, consuming [`crate::tui::events::SessionEvent`]s beside terminal input. The [`run`] event loop
 //! (T018) selects over crossterm's async [`EventStream`], the `SessionEvent` channel, and an
 //! on-demand tick, driving the shared [`crate::repl::run_exchange`] turn loop through a
 //! [`SessionSink`] — the same engine the inline REPL uses (T005/T006), so both front-ends stay in
@@ -10,6 +10,9 @@
 pub mod app;
 pub mod chat;
 pub mod effects;
+// The TUI's event sink: the shared turn loop's output as a stream of events (008, moved from
+// `bee::session` by 024 so that name can hold the Session builder).
+pub mod events;
 pub mod frontend;
 pub mod input;
 pub mod markdown;
@@ -33,8 +36,8 @@ use crate::provider::{Conversation, Model};
 use crate::render_spec::RenderSpec;
 use crate::repl::{effective_system_prompt, run_exchange, ReplConfig, SteeringQueue};
 use crate::sandbox::Sandbox;
-use crate::session::SessionSink;
 use crate::tools::ToolRegistry;
+use crate::tui::events::SessionSink;
 
 use app::{update, App};
 use chat::{ChatMessage, Role};

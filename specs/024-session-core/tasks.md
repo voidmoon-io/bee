@@ -374,8 +374,10 @@ beats Escalate.
   as before). Without it, no `bee run` lease could expire, so the VM case could not exist.
 - **VM tier (T028e)**: `lease-expiry` is written. `lease-release` is listed as `PENDING`: a release
   hook cannot be configured from the `bee` binary, and it shares expiry's narrowing path.
-  `test/vm/matrix.sh` accepts `PENDING` without failing the run. **Neither has run — no BPF-LSM VM is
-  available — so per FR-042, phase 6 waits for `lease-expiry` to pass.**
+  `test/vm/matrix.sh` accepts `PENDING` without failing the run. **`lease-expiry` PASSED on the rebuilt
+  VM (kernel 6.8.0-142, 2026-10-11): FR-042's gate for phase 6 is cleared.** The full matrix is 49/49,
+  after four test-script fixes to the never-before-run 019 HTTP cases (exec allowlist `dash`, unjudged
+  cases now FAIL, `calls` read defensively, no `seq` or `>/dev/null` in scaffolding).
 
 **Checkpoint**: the hook interface offers nothing it ignores (SC-007).
 
@@ -390,11 +392,11 @@ drift cases behave as specified.
 
 ### Tests (write first, see them fail)
 
-- [ ] T036 [P] [US1] Rewrite `tests/session_parity.rs` against the new API, and add its `[[test]] …
+- [X] T036 [P] [US1] Rewrite `tests/session_parity.rs` against the new API, and add its `[[test]] …
   required-features = ["test-support"]` entry to `Cargo.toml` (it now uses `TeardownLog`). Build one `SessionSpec` and call
   `bee::session::build` for each `EntryPoint` (`Headless`, `Repl`, `Tui`, `Batch{concurrent:false}`) with
   a recording operator; assert the `snapshot()`s are equal. Remove `#[ignore]`.
-- [ ] T037 [P] [US1] Add to `tests/session_parity.rs`:
+- [X] T037 [P] [US1] Add to `tests/session_parity.rs`:
   - (a) `Batch{concurrent:true}` plus MCP servers → `BuildError` naming "MCP"; the same for
     `[policy.http]` and for a ceiling wider than the policy;
   - (b) the scanner report dir is writable in the snapshot policy for every entry when `scan` is granted
@@ -404,28 +406,28 @@ drift cases behave as specified.
   - (d) `shutdown()` appends `["mcp", "interceptor", "scopes"]` to the session's `TeardownLog`
     (test-support, research R1) for every entry, including the `Drop` path;
   - (e) the `[policy.http]` advisory string in the snapshot is identical for every entry (FR-011, SC-003).
-- [ ] T038 [P] [US1] Create `tests/run_task_config.rs`. Building the `SessionSpec` the way `bee run --task`
+- [X] T038 [P] [US1] Create `tests/run_task_config.rs`. Building the `SessionSpec` the way `bee run --task`
   does, from an effective configuration with MCP servers and skills, keeps both. Test the mapping
   function, not the binary.
 
 ### Implementation
 
-- [ ] T039 [US1] Move `src/session/mod.rs` and `src/session/event.rs` (`SessionSink`, `SessionEvent`) to
+- [X] T039 [US1] Move `src/session/mod.rs` and `src/session/event.rs` (`SessionSink`, `SessionEvent`) to
   `src/tui/events.rs`. Update the importers `src/tui/app.rs:20`, `src/tui/mod.rs:36`,
   `src/tui/message.rs:9`, and `src/lib.rs:70`. This is a pure move with no behaviour change; commit it on
   its own.
-- [ ] T040 [US1] Create `src/session/spec.rs`, containing:
+- [X] T040 [US1] Create `src/session/spec.rs`, containing:
   - `SessionSpec` and `EntryPoint` (data-model.md);
   - `BuildError`;
   - `fn refuse_unsupported(&SessionSpec) -> Result<(), BuildError>`, implementing the refusal table in
     `contracts/session-builder.md`.
-- [ ] T041 [US1] Create `src/session/parts.rs`, containing:
+- [X] T041 [US1] Create `src/session/parts.rs`, containing:
   - `#[cfg(feature="intercept")] HttpPart` (Interceptor, prepared scope), with a stand-in type when the
     feature is off;
   - `#[cfg(feature="mcp")] McpPart` (bridge), likewise with a stand-in;
   - `pub fn http_advisory(&SessionSpec) -> Option<String>`, the single replacement for
     `src/episode.rs:782-800`, `src/app/repl.rs:247-268` and `src/app/run.rs:300-335`.
-- [ ] T042 [US1] Create `src/session/mod.rs` with `pub async fn build(spec, operator) -> Result<Session,
+- [X] T042 [US1] Create `src/session/mod.rs` with `pub async fn build(spec, operator) -> Result<Session,
   BuildError>`, implementing the 13-step pipeline in `contracts/session-builder.md`. Move logic, don't
   copy it, from:
   - `src/app/session.rs`: `resolve_enforcement`, `require_kernel_support`, `resolve_grants`,
@@ -437,7 +439,7 @@ drift cases behave as specified.
 
   The `operator` parameter uses the `Operator` skeleton from T020, which wraps today's consent sinks and
   outputs; phase 7 completes it (plan risk note 5a).
-- [ ] T043 [US1] In `src/session/mod.rs`, implement:
+- [X] T043 [US1] In `src/session/mod.rs`, implement:
   - `Session` (data-model.md);
   - `snapshot()` (serializable `SessionSnapshot`);
   - `turn_start()` (moves `src/turn.rs` in and deletes it);
@@ -446,17 +448,17 @@ drift cases behave as specified.
   - `shutdown()` (MCP → Interceptor → `Sandbox::teardown`), plus a `Drop` guard running the same order
     when `shutdown` was not called. Under `test-support`, both append each stage to a `TeardownLog`
     (data-model.md).
-- [ ] T044 [US1] Rewrite `src/episode.rs::run_episode_with` to call `session::build` and then `run_loop`
+- [X] T044 [US1] Rewrite `src/episode.rs::run_episode_with` to call `session::build` and then `run_loop`
   through the `Session`. Delete the setup code and helpers moved in T042. Map `Scenario` to `SessionSpec`
   in a `fn spec_from_scenario` in `src/episode.rs`.
-- [ ] T045 [US1] Rewrite `src/app/repl.rs::repl` (`:123-412`) to map `EffectiveConfig` →
+- [X] T045 [US1] Rewrite `src/app/repl.rs::repl` (`:123-412`) to map `EffectiveConfig` →
   `SessionSpec { entry: Repl | Tui }` in a new `src/app/spec.rs::spec_from_config`, call `session::build`,
   and hand the `Session` to `run_repl` / `tui::run`. Delete `src/app/session.rs`.
-- [ ] T046 [US1] Rewrite `src/app/run.rs` so `--task` and `--scenario` build their spec through
+- [X] T046 [US1] Rewrite `src/app/run.rs` so `--task` and `--scenario` build their spec through
   `spec_from_config`, keeping user/project MCP servers and skills (FR-009; today `:115`, `:161-162` drop
   them). Remove the third advisory copy (`:300-335`) and the `--host` asymmetry (`:227-241`). Headless now
   honours `Enforcement::Host` where the build allows it.
-- [ ] T047 [US1] Rewrite `src/concurrent.rs` to build each pair's session via `session::build` with
+- [X] T047 [US1] Rewrite `src/concurrent.rs` to build each pair's session via `session::build` with
   `EntryPoint::Batch{concurrent:true}`, so it gets the explicit refusals and keeps its shared-engine
   sandbox constructor through a `SandboxSource::Shared(..)` option on the spec. Delete the silent
   `scenario.mcp` drop and the `[policy.http]` special case at `:39`, which the builder's refusal now
@@ -476,6 +478,40 @@ drift cases behave as specified.
   server spawns stay in the tool scope's stream until 018.
 - [ ] T050 [US1] Run the gate. `session_parity`, `run_task_config` and every existing test pass, including
   the `intercept_*` suites over the rebuilt harness. Record line deltas for SC-009. Open PR 5a.
+
+**As built — PR 5a is delivered in three parts:**
+- **5a-1 (done):** `src/session/{mod,spec,parts}.rs`: `build`, `Session`, `SessionSnapshot`,
+  `refuse_unsupported`, the single `http_advisory`, scanner report widening, and one teardown order with
+  a `Drop` guard (T040–T043). The headless episode builds through it (`spec_from_scenario`, T044), and
+  its moved helpers are gone from `episode.rs`. `tests/session_parity.rs` compares every `EntryPoint`'s
+  snapshot (T036), the concurrent-batch refusals, the teardown order, the system-prompt notes and the
+  advisory (T037 a, c–e). VM matrix 49/49 on this build.
+  - The loops keep taking the session's parts (registry, sandbox, escalation) instead of `&mut Session`,
+    and `turn_start`/`run_call` stay free functions: routing the loops through `Session` would rewrite
+    both again for no change in behaviour.
+  - Consent is a `consent` and `consent_timeout` pair on the spec until PR 5b's Operator.
+  - MCP configured on a build without `mcp` is refused by the builder for every entry point.
+  - T037 (b), the scanner directory per entry point, is covered by construction: every entry point runs
+    the same `resolve_grants`.
+- **5a-2 (done):** `bee repl`/TUI builds its `SessionSpec` from the effective configuration and runs
+  on the built session; its private grant resolution, skill discovery and sandbox construction are gone
+  from `app/session.rs`, which keeps only model construction, exit codes and the enforcement decision.
+  It was not deleted outright: those three are the command's own. `bee run --task` keeps the configured
+  MCP servers and skill roots (FR-009, T038, as a unit test in `src/app/run.rs`, since the mapping lives
+  in the binary). `--host` now means host on an enforcement build too (`EpisodeOptions.enforcement`).
+  The early `[policy.http]` check calls `session::http_advisory`, so the rule has one copy.
+  - Behaviour that unifies, as intended: the REPL's start-up lines use the episode's wording
+    (`skill grant: '…' …`), and a REPL session always has escalation, so a skill's `requires` is asked
+    about even without a policy (bounded by an empty ceiling).
+- **5a-3 (done for T047):** the concurrent runner builds each pair's session through the builder,
+  handing in the scope it created on the shared engine (`SessionSpec.prebuilt_sandbox`). What it cannot
+  run is refused by name before any scope exists: MCP servers, `[policy.http]`, a ceiling, and skills
+  (skill directories widen the policy, and the batch compiles its scopes first). Each batch session now
+  gets the same tool surface, escalation and system prompt as any other. VM: `concurrent-audit-isolation`
+  passes, 49/49.
+- **Deferred to a follow-up PR:** MCP tgid attribution (T049), which changes the audit drain path, and
+  the harness on the builder (T048), which needs a test-only way to start the Interceptor with an
+  injected resolver and in-process worker.
 
 **Checkpoint**: there is one builder. Constitution V's violation is closed.
 

@@ -17,7 +17,7 @@ use super::overlay::Overlay;
 use super::panels::PanelRegistry;
 use crate::config::VisualConfig;
 use crate::render_spec::RenderSpec;
-use crate::session::SessionEvent;
+use crate::tui::events::SessionEvent;
 
 /// Which region has keyboard focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

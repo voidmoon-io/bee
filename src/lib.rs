@@ -69,6 +69,8 @@ pub mod search;
 // Operator configuration for the security tooling (016-native-tools). Ungated: plain data, so a
 // configuration file keeps parsing on a build that compiled none of the tools.
 pub mod security;
+// The Session builder: one assembly of a session for every entry point (024 FR-006).
+pub mod session;
 pub mod skills;
 pub mod tools;
 pub mod transcript;

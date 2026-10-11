@@ -1,144 +1,183 @@
-//! Sessions built by different entry points must be the same session (024-session-core, FR-006,
-//! FR-040). PR 1 writes this test against today's construction paths and ignores it, because they
-//! are known to differ. PR 5a rewrites it against `bee::session::build` and removes the `#[ignore]`.
+//! Sessions built by different entry points are the same session (024 FR-006–FR-012, SC-001).
 //!
-//! Today only two entry points can build a session on a host:
+//! Every entry point now builds its session through `bee::session::build`; what differs between them
+//! is only what they put in the `SessionSpec`. Here one spec is built for each `EntryPoint` and the
+//! snapshots must be equal — the tool surface and each tool's dependencies, the escalation floor and
+//! ceiling, how grants are decided, and the system prompt. The refusals a concurrent batch makes are
+//! checked by name, and so is the one teardown order.
 //!
-//! * the episode (`bee::episode::run_episode_with`), observed through a model that records what it
-//!   is handed on its first call and then ends the episode;
-//! * the intercept test harness (`tests/support/harness.rs::Session::start`), which hand-copies the
-//!   Interceptor start-up.
-//!
-//! The concurrent runner needs `enforce` and a BPF-LSM kernel, and the REPL's setup lives in the
-//! binary (`src/app/`), so their parity is added in T047 and T061, once both go through the library
-//! builder.
-//!
-//! The effective policy and the escalation timeout are part of the snapshot, but neither path
-//! exposes them today: the episode keeps both local to `run_episode_with`, and the harness has no
-//! escalation. They are `None` until `Session::snapshot()` exists (T043).
+//! The REPL's and `bee run --task`'s mapping from configuration to a spec lives in the binary and
+//! joins this comparison when it moves onto the builder (024 PR 5a-2).
 
 #[path = "support/fixtures.rs"]
 mod fixtures;
 
-use std::sync::Mutex;
+use std::sync::Arc;
 use std::time::Duration;
 
-use bee::provider::{Conversation, Model, ModelError, StopReason, ToolSchema, Turn};
+use bee::session::{build, BuildError, Enforcement, EntryPoint, SessionSpec};
+use bee::skills::AllowWithinCeiling;
+use bee_core::Access;
+use fixtures::{http_policy, policy};
 
-/// What two sessions must agree on.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-struct Snapshot {
-    /// Registered tool names, sorted.
-    tools: Vec<String>,
-    /// The system prompt the model is given; `None` where the path builds no conversation.
-    system_prompt: Option<String>,
-    /// Filesystem keys of the effective policy; `None` where the path does not expose it.
-    policy_fs: Option<Vec<String>>,
-    /// The consent timeout; `None` where the path does not expose it or has no escalation.
-    escalation_timeout: Option<Duration>,
-}
+const ENTRIES: [EntryPoint; 4] = [
+    EntryPoint::Headless,
+    EntryPoint::Repl,
+    EntryPoint::Tui,
+    EntryPoint::Batch { concurrent: false },
+];
 
-/// A model that records the tools and system prompt of its first call, then ends the episode.
-#[derive(Default)]
-struct Recorder {
-    seen: Mutex<Option<(Vec<String>, String)>>,
-}
-
-#[async_trait::async_trait]
-impl Model for Recorder {
-    fn id(&self) -> &str {
-        "mock/recorder"
-    }
-
-    async fn complete(
-        &self,
-        convo: &Conversation,
-        tools: &[ToolSchema],
-    ) -> Result<Turn, ModelError> {
-        let mut seen = self.seen.lock().unwrap();
-        if seen.is_none() {
-            let mut names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
-            names.sort();
-            *seen = Some((names, convo.system.clone()));
-        }
-        Ok(Turn {
-            text: Some("done".into()),
-            tool_calls: Vec::new(),
-            stop: StopReason::EndTurn,
-            usage: None,
-        })
+fn spec(entry: EntryPoint) -> SessionSpec {
+    SessionSpec {
+        entry,
+        label: "parity".into(),
+        policy: Some(policy(&[("/tmp/work", Access::Write)])),
+        ceiling: Some(policy(&[("/tmp", Access::Write)])),
+        enforcement: Enforcement::Host,
+        tools: vec!["bash".into(), "read_file".into(), "render".into()],
+        ctf_flag: None,
+        skill_roots: Vec::new(),
+        mcp: Default::default(),
+        security: Default::default(),
+        workdir: std::env::temp_dir(),
+        system_prompt: "You are a test agent.".into(),
+        strip_env: Vec::new(),
+        http_scope_advisory: false,
+        lease_turns: Some(3),
+        consent: Arc::new(AllowWithinCeiling),
+        consent_timeout: Duration::from_secs(60),
     }
 }
 
-/// The session `bee run --scenario` builds, as far as it is observable from outside.
-async fn episode_snapshot(tools: &[&str]) -> Snapshot {
-    let model = Recorder::default();
-    bee::episode::run_episode_with(
-        &model,
-        &fixtures::scenario("parity", tools, 1, 30),
-        None,
-        None,
-        bee::episode::EpisodeOptions::default(),
-    )
-    .await;
-    let (tools, system) = model.seen.lock().unwrap().take().expect("model was called");
-    Snapshot {
-        tools,
-        system_prompt: Some(system),
-        policy_fs: None,
-        escalation_timeout: None,
+async fn snapshot(entry: EntryPoint) -> serde_json::Value {
+    let mut session = build(spec(entry), &|_| {}).await.expect("builds");
+    let snap = serde_json::to_value(session.snapshot()).unwrap();
+    session.shutdown().await.unwrap();
+    snap
+}
+
+async fn refused(spec: SessionSpec) -> String {
+    match build(spec, &|_| {}).await {
+        Err(BuildError(m)) => m,
+        Ok(_) => panic!("built a session that should have been refused"),
     }
 }
 
-/// The capture works: the episode hands the model its declared tools and its own system prompt.
+// SC-001: one spec, every entry point, one session.
 #[tokio::test]
-async fn the_episode_snapshot_is_observable() {
-    let s = episode_snapshot(&["bash", "read_file"]).await;
-    assert_eq!(s.tools, vec!["bash".to_string(), "read_file".to_string()]);
-    assert_eq!(s.system_prompt.as_deref(), Some("You are a test agent."));
-}
-
-#[cfg(feature = "intercept")]
-#[path = "support/harness.rs"]
-mod harness;
-
-/// The session the intercept test harness builds.
-#[cfg(feature = "intercept")]
-async fn harness_snapshot(tools: &[&str]) -> Snapshot {
-    let s = harness::Session::start(
-        harness::scope("targets = [\"127.0.0.1:9\"]", &[]),
-        &[],
-        tools,
-    )
-    .await;
-    let mut names: Vec<String> = s.registry.schemas().into_iter().map(|t| t.name).collect();
-    names.sort();
-    s.icpt.shutdown().await;
-    Snapshot {
-        tools: names,
-        system_prompt: None,
-        policy_fs: None,
-        escalation_timeout: None,
-    }
-}
-
-/// Known differences, each closed by PR 5a (T042–T048) or PR 5b (T061):
-///
-/// * scanner report dir — the episode widens the policy for scanner reports
-///   (`widen_for_scanner_reports`); the REPL and harness do not (FR-010);
-/// * `--task` MCP/skills — `bee run --task` drops user/project MCP servers and skills (FR-009);
-/// * concurrent drops — the concurrent runner silently drops `scenario.mcp` and special-cases
-///   `[policy.http]` instead of refusing (FR-008);
-/// * system prompt — the episode passes the scenario's prompt verbatim; the REPL appends the
-///   render/skill notes (`effective_system_prompt`); the harness builds no conversation (FR-007);
-/// * teardown order — each path tears down MCP, the Interceptor and the scopes in its own order, and
-///   the harness leaves the Interceptor to its caller (FR-012).
-#[cfg(feature = "intercept")]
-#[tokio::test]
-#[ignore = "known drift until phase 5: scanner dir, --task MCP/skills, concurrent drops, system prompt, teardown order"]
 async fn every_entry_point_builds_the_same_session() {
-    let tools = ["http_send", "bash"];
-    let episode = episode_snapshot(&tools).await;
-    let harness = harness_snapshot(&tools).await;
-    assert_eq!(episode, harness);
+    let headless = snapshot(EntryPoint::Headless).await;
+    for entry in &ENTRIES[1..] {
+        assert_eq!(snapshot(*entry).await, headless, "{entry:?}");
+    }
+    // And the snapshot says something: the tools, the floor and ceiling, the lease lifetime.
+    let tools: Vec<&str> = headless["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(tools, ["bash", "read_file", "render"]);
+    assert_eq!(headless["policy_fs"], serde_json::json!(["/tmp/work"]));
+    assert_eq!(headless["ceiling_fs"], serde_json::json!(["/tmp"]));
+    assert_eq!(headless["lease_turns"], 3);
+}
+
+// FR-007, SC-003: the system prompt carries the notes for the tools the session holds, for every
+// entry point — the headless path used to send the scenario's prompt bare.
+#[tokio::test]
+async fn the_system_prompt_names_the_render_tool_everywhere() {
+    for entry in ENTRIES {
+        let snap = snapshot(entry).await;
+        let prompt = snap["system_prompt"].as_str().unwrap();
+        assert!(prompt.starts_with("You are a test agent."), "{entry:?}");
+        assert!(prompt.contains("`render` tool"), "{entry:?}: {prompt}");
+    }
+}
+
+// FR-008: a concurrent batch refuses, by name and before any scope exists, what it cannot provide.
+#[tokio::test]
+async fn a_concurrent_batch_refuses_what_it_cannot_provide() {
+    let batch = EntryPoint::Batch { concurrent: true };
+
+    let mut with_mcp = spec(batch);
+    with_mcp.ceiling = None;
+    with_mcp.mcp.enabled = true;
+    with_mcp.mcp.servers =
+        vec![toml::from_str("name = \"fs\"\ntransport = \"stdio\"\ncommand = \"true\"").unwrap()];
+    assert!(refused(with_mcp).await.contains("MCP"));
+
+    let mut with_http = spec(batch);
+    with_http.ceiling = None;
+    with_http.policy = Some(http_policy(&["127.0.0.1:9"]));
+    assert!(refused(with_http).await.contains("[policy.http]"));
+
+    assert!(refused(spec(batch)).await.contains("ceiling"));
+
+    let mut plain = spec(batch);
+    plain.ceiling = None;
+    let mut s = build(plain, &|_| {})
+        .await
+        .expect("a plain batch session builds");
+    s.shutdown().await.unwrap();
+}
+
+// FR-012: one teardown order — MCP servers, the Interceptor, the scopes — whether the session is
+// shut down or dropped.
+#[tokio::test]
+async fn teardown_has_one_order_shut_down_or_dropped() {
+    for entry in ENTRIES {
+        let mut s = build(spec(entry), &|_| {}).await.unwrap();
+        let log = s.teardown_log.clone();
+        s.shutdown().await.unwrap();
+        assert_eq!(
+            *log.lock().unwrap(),
+            ["mcp", "interceptor", "scopes"],
+            "{entry:?}"
+        );
+
+        let s = build(spec(entry), &|_| {}).await.unwrap();
+        let log = s.teardown_log.clone();
+        drop(s);
+        assert_eq!(
+            *log.lock().unwrap(),
+            ["mcp", "interceptor", "scopes"],
+            "{entry:?} dropped"
+        );
+    }
+}
+
+// FR-011: the `[policy.http]` advisory is decided in one place, the same way for every entry point.
+#[test]
+fn the_http_advisory_has_one_answer() {
+    use bee::session::http_advisory;
+    let p = http_policy(&["127.0.0.1:9"]);
+    assert_eq!(
+        http_advisory(&policy(&[]), Enforcement::Host, false),
+        Ok(None)
+    );
+    if cfg!(feature = "intercept") {
+        // Host mode: nothing in the kernel blocks, so the proxy alone enforces — refused unless the
+        // operator accepted it.
+        let refusal = http_advisory(&p, Enforcement::Host, false).unwrap_err();
+        assert!(refusal.0.contains("--http-scope-advisory"), "{refusal}");
+        assert!(http_advisory(&p, Enforcement::Host, true)
+            .unwrap()
+            .is_some());
+    } else {
+        assert!(
+            http_advisory(&p, Enforcement::Host, true).is_err(),
+            "no interception compiled in"
+        );
+    }
+}
+
+// FR-008: kernel enforcement asked of a build without it is refused, not quietly downgraded.
+#[cfg(not(feature = "enforce"))]
+#[tokio::test]
+async fn kernel_enforcement_without_the_feature_is_refused() {
+    let mut s = spec(EntryPoint::Headless);
+    s.enforcement = Enforcement::Kernel;
+    let m = refused(s).await;
+    assert!(m.contains("--features enforce"), "{m}");
 }

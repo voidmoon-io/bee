@@ -14,7 +14,7 @@ use crate::metrics::{stop_label, Recorder};
 use crate::provider::{Conversation, Message, Model, ModelError, Turn, Usage};
 use crate::sandbox::{self, Sandbox};
 use crate::scenario::{Scenario, ScoringMode, WorkdirSetup};
-use crate::tools::{self, ToolRegistry};
+use crate::tools::ToolRegistry;
 use crate::transcript::{
     EpisodeStatus, EpisodeTranscript, HarnessNote, NoteKind, RecordedCall, Timing, TranscriptTurn,
 };
@@ -700,23 +700,10 @@ pub async fn run_episode_with(
     progress: Option<ProgressSink>,
     eopts: EpisodeOptions,
 ) -> EpisodeTranscript {
-    // Fail closed (Constitution I): a scenario that asks for MCP but a binary built without the
-    // `mcp` feature cannot provide it — refuse with a clear diagnostic rather than silently ignore.
-    #[cfg(not(feature = "mcp"))]
-    if scenario.mcp.enabled {
-        return infra_error(
-            scenario,
-            model,
-            "scenario enables [mcp] but bee was built without --features mcp".to_string(),
-        );
-    }
-
-    let flag = scenario.workdir.flag.as_ref().map(|f| f.value.as_str());
     // Strip the provider key vars plus any configured MCP `token_env` names from every tool child
     // (FR-018/FR-041), so an MCP Bearer token never leaks into a sandboxed stdio server's env.
     let mut strip_env = sandbox::key_vars(provider_key_env);
     strip_env.extend(scenario.mcp.token_env_names());
-    #[cfg_attr(not(feature = "mcp"), allow(unused_mut))]
     let mut opts = LoopOptions {
         progress,
         metrics: Recorder::new(
@@ -731,242 +718,37 @@ pub async fn run_episode_with(
         return infra_error(scenario, model, format!("workdir setup failed: {e}"));
     }
 
-    // Discover skills from the scenario's explicit roots (006-skills). Malformed skills warn via the
-    // progress sink but never abort the episode (Constitution I). The Arc is held until after the
-    // loop so the `skill` tool's registry outlives it.
-    let skills = std::sync::Arc::new(crate::skills::SkillRegistry::discover(&scenario.skills));
-    for w in skills.warnings() {
-        emit(
-            &opts,
-            format!("skill warning: {}: {}", w.path.display(), w.reason),
-        );
-    }
-
-    // Resolve skill capability grants BEFORE the scope compiles (006-skills, step 3). Non-interactive:
-    // the ceiling policy file is the operator's reviewable pre-authorization, so within-ceiling
-    // requests widen the compiled policy and anything beyond is refused unpromptably. Register any
-    // granted tools (Layer 1); the widened policy (Layer 2) flows into the scope below.
-    let skill_refs: Vec<&crate::skills::Skill> = skills.iter().collect();
-    let grants = resolve_episode_grants(scenario, &skill_refs).await;
-    for name in &grants.granted {
-        emit(
-            &opts,
-            format!("skill grant: '{name}' capabilities granted (within ceiling)"),
-        );
-    }
-    for (name, reason) in &grants.refused {
-        emit(&opts, format!("skill grant: '{name}' refused — {reason}"));
-    }
-    // Every tool is built from this episode's dependencies by the one constructor (024 FR-013): the
-    // CTF flag, the skills, and the ledger and scanner grants (016) of the skill-widened policy. After
-    // skill grants, so a scanner a skill widened the policy to include is visible; before the policy
-    // is moved into the scope, which is the last point it can be read. The Interceptor joins below,
-    // once it is running.
-    // The struct update supplies the feature-gated fields, which a slim build does not have.
-    #[allow(clippy::needless_update)]
-    let deps = tools::ToolDeps {
-        ctf_flag: flag.map(str::to_string),
-        // Only model-facing skills make a `skill` tool worth offering (006).
-        skills: skills
-            .model_facing()
-            .next()
-            .is_some()
-            .then(|| skills.clone()),
-        ..tools::ToolDeps::default()
-    }
-    .with_security(
-        &scenario.security,
-        Some(&grants.policy),
-        &format!("{}-{}", scenario.id, std::process::id()),
-    );
-    let mut registry = tools::ToolRegistry::with_deps(std::sync::Arc::new(deps));
-    for tool in scenario.tools.iter().chain(&grants.tools) {
-        // Scenario validation rejected unknown names; a skill-granted name is checked the same way.
-        let _ = registry.register(tool);
-    }
-    // Keep the resolved policy as the escalation floor before it is moved into the scope (007).
-    let escalation_base = grants.policy.clone();
-
-    // HTTP interception (019). Decided before the scope compiles: the proxy port is the tool scope's
-    // only network rule, so the listener is bound first.
-    let wants_http = grants.policy.http.as_ref().is_some_and(|h| h.is_active());
-    #[cfg(not(feature = "intercept"))]
-    if wants_http {
-        return infra_error(
-            scenario,
-            model,
-            "the policy declares [policy.http] targets, but bee was built without \
-             --features intercept; refusing to run its tools with an unenforced scope"
-                .into(),
-        );
-    }
-    #[cfg(feature = "intercept")]
-    let http_advisory: Option<String> = if wants_http {
-        match crate::intercept::session::advisory_reason(&grants.policy, cfg!(feature = "enforce"))
-        {
-            Some(reason) if !eopts.http_scope_advisory => {
-                return infra_error(
-                    scenario,
-                    model,
-                    crate::intercept::session::advisory_refusal(&reason),
-                )
-            }
-            Some(reason) => {
-                emit(&opts, crate::intercept::session::advisory_banner(&reason));
-                Some(reason)
-            }
-            None => None,
-        }
-    } else {
-        None
+    // The session, built the one way every entry point builds it (024 FR-006): skill grants, the
+    // `[policy.http]` advisory, the sandbox, the Interceptor, the tool surface, MCP servers and
+    // escalation.
+    let spec = spec_from_scenario(scenario, strip_env, eopts.http_scope_advisory);
+    let mut session = match crate::session::build(spec, &|line| emit(&opts, line)).await {
+        Ok(s) => s,
+        Err(e) => return infra_error(scenario, model, e.to_string()),
     };
-    #[cfg(feature = "intercept")]
-    let http_session_id = format!("{}-{}", sanitize_id(&scenario.id), std::process::id());
+    opts.escalation = session.escalation.take();
+    opts.tool_refresh = session.tool_refresh.clone();
 
-    #[cfg(feature = "enforce")]
-    #[cfg_attr(not(feature = "intercept"), allow(unused_mut))]
-    let (mut sandbox, http_prepared) =
-        match build_enforced_sandbox(scenario, grants.policy, strip_env) {
-            Ok(s) => s,
-            Err(detail) => return infra_error(scenario, model, detail),
-        };
-    #[cfg(all(not(feature = "enforce"), feature = "intercept"))]
-    let http_prepared = if wants_http {
-        match crate::intercept::session::prepare(
-            &grants.policy,
-            &bee_userspace::SystemResolver::current(),
-        ) {
-            Ok(p) => p,
-            Err(detail) => return infra_error(scenario, model, detail),
-        }
-    } else {
-        None
+    // The model is given the session's system prompt: the scenario's, plus the notes for the tools
+    // the session holds — the same prompt the REPL builds (024 FR-007).
+    let scenario = Scenario {
+        system_prompt: session.system_prompt.clone(),
+        ..scenario.clone()
     };
-    #[cfg(not(feature = "enforce"))]
-    #[cfg_attr(not(feature = "intercept"), allow(unused_mut))]
-    let mut sandbox = Sandbox::host(strip_env);
+    let mut transcript = run_loop(
+        model,
+        &scenario,
+        &mut session.registry,
+        &mut session.sandbox,
+        &opts,
+    )
+    .await;
+    transcript.http_scope = session.http_header();
 
-    // Start the proxy worker — in its sidecar scope, or advisory — and give the HTTP tools its handle.
-    #[cfg(feature = "intercept")]
-    let http_session = match http_prepared {
-        Some(prepared) => {
-            let enforcement = match &http_advisory {
-                Some(reason) => crate::intercept::sidecar::Enforcement::Advisory {
-                    reason: reason.clone(),
-                },
-                None => crate::intercept::sidecar::Enforcement::Kernel,
-            };
-            let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-            match crate::intercept::session::start(
-                prepared,
-                &mut sandbox,
-                &http_session_id,
-                &root,
-                enforcement,
-            )
-            .await
-            {
-                Ok(h) => {
-                    let deps = (**registry.deps())
-                        .clone()
-                        .with_interceptor(h.interceptor.clone());
-                    registry.set_deps(std::sync::Arc::new(deps));
-                    Some(h)
-                }
-                Err(detail) => {
-                    let _ = sandbox.teardown();
-                    return infra_error(scenario, model, format!("HTTP interception: {detail}"));
-                }
-            }
-        }
-        None => None,
-    };
-
-    // Register the model-facing `skill` tool alongside the built-ins (a no-op when no skill is
-    // model-facing: the deps above then hold none).
-    let _ = registry.register("skill");
-
-    // Dynamic capability grants (007-dynamic-grants). Reactive escalation on a kernel denial is
-    // gated on a declared ceiling (the operator's pre-authorization); proactive skill-`requires`
-    // escalation is always available. Consent is `AllowWithinCeiling` — the ceiling file IS the
-    // authorization for a non-interactive episode. Both hooks are inert without their trigger, so an
-    // episode with no ceiling and no capability-requesting skill behaves exactly as before.
-    {
-        let mut ceiling = match &scenario.ceiling_policy_path {
-            Some(p) => bee_core::Policy::from_path(p).unwrap_or_else(|_| escalation_base.clone()),
-            None => escalation_base.clone(),
-        };
-        // Keep the resolved base ⊆ ceiling: skill dirs were folded into the base as readable, so the
-        // ceiling must permit them too.
-        for s in skills.iter() {
-            if let Some(dir) = s.dir.to_str() {
-                ceiling
-                    .filesystem
-                    .entry(dir.to_string())
-                    .or_insert(bee_core::Access::Read);
-            }
-        }
-        let hooks: Vec<Box<dyn crate::hooks::LoopHook>> = vec![
-            Box::new(crate::grants::escalate::DenialEscalationHook {
-                enabled: scenario.ceiling_policy_path.is_some(),
-            }),
-            // 019 US3: a proxy refusal proposes exactly the refused host:port. The ceiling's
-            // `[policy.http]` bounds it; the scenario's ceiling file is the authorisation.
-            Box::new(crate::grants::escalate::ProxyRefusalHook {
-                enabled: scenario.ceiling_policy_path.is_some(),
-            }),
-            Box::new(crate::grants::escalate::SkillEscalationHook::new(
-                skills.clone(),
-            )),
-        ];
-        opts.escalation = Some(crate::grants::escalate::LoopEscalation {
-            base: escalation_base,
-            ceiling,
-            hooks,
-            consent: std::sync::Arc::new(crate::skills::AllowWithinCeiling),
-            timeout: std::time::Duration::from_secs(60),
-            default_ttl: scenario
-                .lease_turns
-                .map_or(crate::grants::Ttl::Forever, crate::grants::Ttl::Turns),
-        });
-    }
-
-    // Connect MCP servers (if any) once the sandbox exists, register their tools alongside the
-    // built-ins, and install the per-turn refresh hook (FR-043). The bridge (Arc so the hook can
-    // hold a clone) owns the stdio children; dropping it at the end kills them (FR-034/42).
-    #[cfg(feature = "mcp")]
-    let bridge = {
-        let b = std::sync::Arc::new(
-            crate::mcp::McpBridge::connect(scenario.mcp.clone(), &sandbox).await,
-        );
-        b.register_into(&mut registry);
-        opts.tool_refresh = Some(b.clone());
-        b
-    };
-
-    let mut transcript = run_loop(model, scenario, &mut registry, &mut sandbox, &opts).await;
-
-    // The proxy worker goes before the scopes: its sidecar scope is torn down first (019 P4).
-    #[cfg(feature = "intercept")]
-    if let Some(h) = &http_session {
-        h.shutdown().await;
-        transcript.http_scope = Some(crate::transcript::HttpSessionHeader {
-            enforcement: h.interceptor.enforcement().label().into(),
-            advisory_reason: http_advisory.clone(),
-            advisory_acknowledged: http_advisory.is_some(),
-        });
-    }
-
-    // Drop the refresh hook (its bridge clone) then the bridge, killing the MCP children (they live in
-    // the scope cgroup) before the scope itself is torn down.
-    #[cfg(feature = "mcp")]
-    {
-        opts.tool_refresh = None;
-        drop(bridge);
-    }
-    // A scope that will not empty means something survived the episode and is about to lose its
-    // enforcement when the engine drops. Surface it on the progress sink rather than discarding it.
-    if let Err(e) = sandbox.teardown() {
+    // MCP servers, then the Interceptor, then the scopes (FR-012). A scope that will not empty means
+    // something survived the episode and is about to lose its enforcement when the engine drops.
+    opts.tool_refresh = None;
+    if let Err(e) = session.shutdown().await {
         emit(
             &opts,
             format!("WARNING: {e} — a process may have outlived enforcement"),
@@ -980,182 +762,49 @@ pub async fn run_episode_with(
     transcript
 }
 
-/// A minimal empty policy, used only as the never-read `GrantOutcome::policy` on the host no-op path
-/// (no parseable base policy ⇒ no grants).
-fn empty_policy() -> bee_core::Policy {
-    bee_core::Policy {
-        name: "none".to_string(),
-        description: None,
-        mode: bee_core::Mode::default(),
-        filesystem: std::collections::BTreeMap::new(),
-        exec: Default::default(),
-        network: Default::default(),
-        exfiltration: Default::default(),
-        http: None,
-    }
-}
-
-/// Resolve skill capability grants for an episode (006-skills, step 3). Non-interactive: the ceiling
-/// policy file *is* the operator's reviewable pre-authorization, so within-ceiling requests widen the
-/// compiled policy and beyond-ceiling ones are refused unpromptably. Also folds each discovered
-/// skill's directory into the policy as readable, so the model can read bundled resources
-/// (`references/…`) through the scope. A `policy_path` that can't be parsed (e.g. host-mode
-/// `/dev/null`) yields a no-op outcome — instructions-only, no tool grants.
-async fn resolve_episode_grants(
+/// The session a scenario asks for. A `policy_path` that does not parse (the `/dev/null` placeholder
+/// of a host run) is no policy: nothing to widen, nothing to grant. An unreadable ceiling is the
+/// policy itself — widening is still on, and widens nothing.
+fn spec_from_scenario(
     scenario: &Scenario,
-    skills: &[&crate::skills::Skill],
-) -> crate::skills::GrantOutcome {
-    use bee_core::{Access, Policy};
-
-    let base = match Policy::from_path(&scenario.policy_path) {
-        Ok(p) => p,
-        Err(_) => {
-            return crate::skills::GrantOutcome {
-                policy: empty_policy(),
-                tools: Vec::new(),
-                granted: Vec::new(),
-                refused: Vec::new(),
-            }
-        }
-    };
-    let ceiling = match &scenario.ceiling_policy_path {
-        Some(p) => Policy::from_path(p).unwrap_or_else(|_| base.clone()),
-        None => base.clone(),
-    };
-    let mut outcome =
-        crate::skills::resolve_grants(skills, &base, &ceiling, &crate::skills::AllowWithinCeiling)
-            .await;
-    // Layer 2 readable-scope: declaring a skills root authorizes reading it, so each skill dir
-    // becomes readable in-scope for the model to pull bundled resources via read_file.
-    for s in skills {
-        if let Some(dir) = s.dir.to_str() {
-            outcome
-                .policy
-                .filesystem
-                .entry(dir.to_string())
-                .or_insert(Access::Read);
-        }
-    }
-    widen_for_scanner_reports(&mut outcome.policy, scenario);
-    outcome
-}
-
-/// Granting a scanner authorizes the report exchange the scan is made of (017).
-///
-/// The two-child pipeline has the scanner write SARIF to `.bee/scan/` and `bee sarif-worker` read it
-/// back — both of them tool children, both under the scope. But `:project_root/.bee` is a
-/// **default protection** (`PROTECTED_DEFAULTS`, FR-008): bee's own state is denied to tool children
-/// so the model cannot reach the ledger or the transcripts. The scan report lives inside that
-/// subtree, so under enforcement child 1's write and child 2's read were both refused and the scan
-/// failed with `cannot read …: Permission denied` — invisible under `--host`, where nothing enforces
-/// the deny at all.
-///
-/// So a resolved scanner grant widens the policy by exactly one subtree, in the same place and the
-/// same way a skill grant does. More-specific-wins means `.bee/scan` is carved out while the rest of
-/// `.bee` — `findings/` above all, where the ledger and its human verdicts live — stays denied.
-fn widen_for_scanner_reports(policy: &mut bee_core::Policy, scenario: &Scenario) {
-    #[cfg(feature = "scanners")]
-    {
-        use bee_core::Access;
-        let grants = crate::scanners::grants_from_policy(Some(policy), &scenario.security);
-        if grants.is_empty() {
-            return;
-        }
-        policy
-            .filesystem
-            .entry(format!(":project_root/{}", crate::tools::scanner::SCAN_DIR))
-            .or_insert(Access::Write);
-    }
-    #[cfg(not(feature = "scanners"))]
-    {
-        let _ = (policy, scenario);
-    }
-}
-
-/// Bring up a real bee scope from the resolved policy and wrap it as an [`Sandbox::Enforced`]. The
-/// policy is already widened by any approved skill grants and skill-dir reads (006-skills).
-/// The interception setup an enforced sandbox was built with: `Some` when `[policy.http]` is active.
-#[cfg(all(feature = "enforce", feature = "intercept"))]
-type HttpPrepared = Option<crate::intercept::session::Prepared>;
-#[cfg(all(feature = "enforce", not(feature = "intercept")))]
-type HttpPrepared = Option<std::convert::Infallible>;
-
-#[cfg(feature = "enforce")]
-fn build_enforced_sandbox(
-    scenario: &Scenario,
-    policy: bee_core::Policy,
     strip_env: Vec<String>,
-) -> Result<(Sandbox, HttpPrepared), String> {
-    use bee_userspace::{EnforcementPlan, Engine, ScopeMode, SystemResolver};
-
-    let resolver = SystemResolver::current();
-    // 019: bind the proxy listener and compile the proxy scope *before* the tool policy, whose only
-    // network rule becomes the proxy port.
-    #[cfg(feature = "intercept")]
-    let prepared = crate::intercept::session::prepare(&policy, &resolver)?;
-    #[cfg(not(feature = "intercept"))]
-    let prepared: HttpPrepared = None;
-    #[cfg_attr(not(feature = "intercept"), allow(unused_mut))]
-    let mut compiled = policy
-        .compile(&resolver)
-        .map_err(|e| format!("policy compile: {e}"))?;
-    #[cfg(feature = "intercept")]
-    if let Some(p) = &prepared {
-        compiled = p.tool_policy(compiled);
+    http_scope_advisory: bool,
+) -> crate::session::SessionSpec {
+    use bee_core::Policy;
+    let policy = Policy::from_path(&scenario.policy_path).ok();
+    let ceiling = scenario.ceiling_policy_path.as_ref().map(|p| {
+        Policy::from_path(p).unwrap_or_else(|_| {
+            policy
+                .clone()
+                .unwrap_or_else(crate::session::parts::empty_policy)
+        })
+    });
+    crate::session::SessionSpec {
+        entry: crate::session::EntryPoint::Headless,
+        label: scenario.id.clone(),
+        policy,
+        ceiling,
+        // A headless episode runs under the kernel whenever the build can; 024 PR 5a-2 lets `bee run`
+        // choose `--host` on an enforcement build.
+        enforcement: if cfg!(feature = "enforce") {
+            crate::session::Enforcement::Kernel
+        } else {
+            crate::session::Enforcement::Host
+        },
+        tools: scenario.tools.clone(),
+        ctf_flag: scenario.workdir.flag.as_ref().map(|f| f.value.clone()),
+        skill_roots: scenario.skills.clone(),
+        mcp: scenario.mcp.clone(),
+        security: scenario.security.clone(),
+        workdir: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+        system_prompt: scenario.system_prompt.clone(),
+        strip_env,
+        http_scope_advisory,
+        lease_turns: scenario.lease_turns,
+        // Non-interactive: the ceiling file is the operator's reviewable pre-authorization.
+        consent: std::sync::Arc::new(crate::skills::AllowWithinCeiling),
+        consent_timeout: std::time::Duration::from_secs(60),
     }
-    let plan = EnforcementPlan::prepare(&compiled, ScopeMode::Enforce)
-        .map_err(|e| format!("enforcement plan: {e}"))?;
-    let mut engine = Engine::init().map_err(|e| format!("engine init: {e}"))?;
-
-    let scope_id = format!(
-        "bee-episode-{}-{}",
-        sanitize(&scenario.id),
-        std::process::id()
-    );
-    let scope = engine
-        .create_scope(&scope_id, bee_userspace::cgroup::DEFAULT_PARENT, &plan)
-        .map_err(|e| format!("create scope: {e}"))?;
-    let reader = engine
-        .take_audit_reader(&scope_id)
-        .map_err(|e| format!("audit reader: {e}"))?;
-    // The proxy scope comes from the same engine, before it moves into the sandbox (019 P4).
-    #[cfg(feature = "intercept")]
-    let sidecar = match &prepared {
-        Some(p) => Some(
-            crate::intercept::session::attach_sidecar(&mut engine, &scope_id, &p.compiled)
-                .inspect_err(|_| {
-                    let _ = scope.teardown();
-                })?,
-        ),
-        None => None,
-    };
-    // `engine` moves into the sandbox so its eBPF programs stay attached for the whole episode.
-    #[cfg_attr(not(feature = "intercept"), allow(unused_mut))]
-    let mut sandbox = Sandbox::enforced(engine, scope, reader, strip_env);
-    #[cfg(feature = "intercept")]
-    if let Some(sc) = sidecar {
-        sandbox = sandbox.with_sidecar(sc).map_err(|(sb, sc, e)| {
-            let _ = sc.scope.teardown();
-            let _ = sb.teardown();
-            e.to_string()
-        })?;
-    }
-    Ok((sandbox, prepared))
-}
-
-/// A scenario id reduced to `[A-Za-z0-9-]`, for session and scope names.
-#[cfg_attr(not(feature = "intercept"), allow(dead_code))]
-fn sanitize_id(s: &str) -> String {
-    s.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect()
-}
-
-#[cfg(feature = "enforce")]
-fn sanitize(s: &str) -> String {
-    s.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect()
 }
 
 /// R3 cgroup-join spike (004-mcp-client, T016). **Constitution III gate**: proves a stdio MCP server
@@ -1224,8 +873,10 @@ mod mcp_cgroup_spike {
         let (scenario, tmp) = spike_scenario();
         let policy =
             bee_core::Policy::from_path(&scenario.policy_path).expect("parse spike policy");
-        let (sandbox, _http) = build_enforced_sandbox(&scenario, policy, sandbox::key_vars(None))
-            .expect("build enforced sandbox (need root + BPF-LSM)");
+        let scope_id = format!("bee-episode-{}-{}", scenario.id, std::process::id());
+        let (sandbox, _http) =
+            crate::session::parts::kernel_sandbox(&policy, &scope_id, sandbox::key_vars(None))
+                .expect("build enforced sandbox (need root + BPF-LSM)");
 
         let scope_cgid = match &sandbox {
             Sandbox::Enforced(e) => e.scope.cgroup_id,

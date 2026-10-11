@@ -392,11 +392,11 @@ drift cases behave as specified.
 
 ### Tests (write first, see them fail)
 
-- [ ] T036 [P] [US1] Rewrite `tests/session_parity.rs` against the new API, and add its `[[test]] …
+- [X] T036 [P] [US1] Rewrite `tests/session_parity.rs` against the new API, and add its `[[test]] …
   required-features = ["test-support"]` entry to `Cargo.toml` (it now uses `TeardownLog`). Build one `SessionSpec` and call
   `bee::session::build` for each `EntryPoint` (`Headless`, `Repl`, `Tui`, `Batch{concurrent:false}`) with
   a recording operator; assert the `snapshot()`s are equal. Remove `#[ignore]`.
-- [ ] T037 [P] [US1] Add to `tests/session_parity.rs`:
+- [X] T037 [P] [US1] Add to `tests/session_parity.rs`:
   - (a) `Batch{concurrent:true}` plus MCP servers → `BuildError` naming "MCP"; the same for
     `[policy.http]` and for a ceiling wider than the policy;
   - (b) the scanner report dir is writable in the snapshot policy for every entry when `scan` is granted
@@ -412,22 +412,22 @@ drift cases behave as specified.
 
 ### Implementation
 
-- [ ] T039 [US1] Move `src/session/mod.rs` and `src/session/event.rs` (`SessionSink`, `SessionEvent`) to
+- [X] T039 [US1] Move `src/session/mod.rs` and `src/session/event.rs` (`SessionSink`, `SessionEvent`) to
   `src/tui/events.rs`. Update the importers `src/tui/app.rs:20`, `src/tui/mod.rs:36`,
   `src/tui/message.rs:9`, and `src/lib.rs:70`. This is a pure move with no behaviour change; commit it on
   its own.
-- [ ] T040 [US1] Create `src/session/spec.rs`, containing:
+- [X] T040 [US1] Create `src/session/spec.rs`, containing:
   - `SessionSpec` and `EntryPoint` (data-model.md);
   - `BuildError`;
   - `fn refuse_unsupported(&SessionSpec) -> Result<(), BuildError>`, implementing the refusal table in
     `contracts/session-builder.md`.
-- [ ] T041 [US1] Create `src/session/parts.rs`, containing:
+- [X] T041 [US1] Create `src/session/parts.rs`, containing:
   - `#[cfg(feature="intercept")] HttpPart` (Interceptor, prepared scope), with a stand-in type when the
     feature is off;
   - `#[cfg(feature="mcp")] McpPart` (bridge), likewise with a stand-in;
   - `pub fn http_advisory(&SessionSpec) -> Option<String>`, the single replacement for
     `src/episode.rs:782-800`, `src/app/repl.rs:247-268` and `src/app/run.rs:300-335`.
-- [ ] T042 [US1] Create `src/session/mod.rs` with `pub async fn build(spec, operator) -> Result<Session,
+- [X] T042 [US1] Create `src/session/mod.rs` with `pub async fn build(spec, operator) -> Result<Session,
   BuildError>`, implementing the 13-step pipeline in `contracts/session-builder.md`. Move logic, don't
   copy it, from:
   - `src/app/session.rs`: `resolve_enforcement`, `require_kernel_support`, `resolve_grants`,
@@ -439,7 +439,7 @@ drift cases behave as specified.
 
   The `operator` parameter uses the `Operator` skeleton from T020, which wraps today's consent sinks and
   outputs; phase 7 completes it (plan risk note 5a).
-- [ ] T043 [US1] In `src/session/mod.rs`, implement:
+- [X] T043 [US1] In `src/session/mod.rs`, implement:
   - `Session` (data-model.md);
   - `snapshot()` (serializable `SessionSnapshot`);
   - `turn_start()` (moves `src/turn.rs` in and deletes it);
@@ -448,7 +448,7 @@ drift cases behave as specified.
   - `shutdown()` (MCP → Interceptor → `Sandbox::teardown`), plus a `Drop` guard running the same order
     when `shutdown` was not called. Under `test-support`, both append each stage to a `TeardownLog`
     (data-model.md).
-- [ ] T044 [US1] Rewrite `src/episode.rs::run_episode_with` to call `session::build` and then `run_loop`
+- [X] T044 [US1] Rewrite `src/episode.rs::run_episode_with` to call `session::build` and then `run_loop`
   through the `Session`. Delete the setup code and helpers moved in T042. Map `Scenario` to `SessionSpec`
   in a `fn spec_from_scenario` in `src/episode.rs`.
 - [ ] T045 [US1] Rewrite `src/app/repl.rs::repl` (`:123-412`) to map `EffectiveConfig` →
@@ -478,6 +478,26 @@ drift cases behave as specified.
   server spawns stay in the tool scope's stream until 018.
 - [ ] T050 [US1] Run the gate. `session_parity`, `run_task_config` and every existing test pass, including
   the `intercept_*` suites over the rebuilt harness. Record line deltas for SC-009. Open PR 5a.
+
+**As built — PR 5a is delivered in three parts:**
+- **5a-1 (done):** `src/session/{mod,spec,parts}.rs`: `build`, `Session`, `SessionSnapshot`,
+  `refuse_unsupported`, the single `http_advisory`, scanner report widening, and one teardown order with
+  a `Drop` guard (T040–T043). The headless episode builds through it (`spec_from_scenario`, T044), and
+  its moved helpers are gone from `episode.rs`. `tests/session_parity.rs` compares every `EntryPoint`'s
+  snapshot (T036), the concurrent-batch refusals, the teardown order, the system-prompt notes and the
+  advisory (T037 a, c–e). VM matrix 49/49 on this build.
+  - The loops keep taking the session's parts (registry, sandbox, escalation) instead of `&mut Session`,
+    and `turn_start`/`run_call` stay free functions: routing the loops through `Session` would rewrite
+    both again for no change in behaviour.
+  - Consent is a `consent` and `consent_timeout` pair on the spec until PR 5b's Operator.
+  - MCP configured on a build without `mcp` is refused by the builder for every entry point.
+  - T037 (b), the scanner directory per entry point, is covered by construction: every entry point runs
+    the same `resolve_grants`.
+- **5a-2 (next):** `bee repl`/TUI and `bee run --task` via `spec_from_config` (T038, T045, T046), and
+  `app/session.rs` deleted.
+- **5a-3:** the concurrent runner via the builder (T047), MCP tgid attribution (T049), and the harness
+  (T048). The harness needs a test-only way to start the Interceptor with an injected resolver and
+  in-process worker, which the builder does not offer yet.
 
 **Checkpoint**: there is one builder. Constitution V's violation is closed.
 

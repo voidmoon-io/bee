@@ -55,3 +55,19 @@ _Avoid_: Proxy sandbox, sidecar container
 **Interceptor**:
 The session's HTTP(S) interception proxy as a whole — the confined `bee proxy-worker` and the harness side that drives it and owns the exchange store.
 _Avoid_: MITM, Burp, proxy server
+
+**Operator**:
+The one seam where autonomous and interactive Bee differ: it decides consent requests and receives session output. The **Interactive** operator asks a person through the REPL/TUI input path; the **Autonomous** operator never waits for one, granting within the ceiling and refusing beyond it, and records every decision.
+_Avoid_: Mode, frontend, approver
+
+**Session builder**:
+The one library module that turns a session specification and an Operator into a running session — policy, grants, sandbox, Interceptor, tool surface, escalation, system prompt — for every entry point. A combination it cannot provide is refused before any scope exists, never silently dropped.
+_Avoid_: Session setup, bootstrap, factory
+
+**Tool surface**:
+The tools the model can call in a session right now, each constructed with its session dependencies (Interceptor, finding ledger, scanner grants). Derivable from one place; a tool granted mid-session is indistinguishable from one present from the start.
+_Avoid_: Tool list, registry contents
+
+**Call lifecycle**:
+Everything that happens to one tool call, from the model's request to its recorded outcome: opening the call, running the tool, collecting its audit, escalating and retrying at most once, closing the call. Owned by one module that every loop — and codemode — runs calls through.
+_Avoid_: Tool execution, call wrapper

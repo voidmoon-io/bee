@@ -14,9 +14,21 @@
 //!    </untrusted-data nonce="k3J9…">
 //!    ```
 //!
-//!    with a fresh 96-bit nonce per result. The content is not escaped or altered; it simply cannot
+//!    with a 96-bit nonce per result. The content is not escaped or altered; it simply cannot
 //!    produce the closing tag, because it cannot know the nonce. [`UNTRUSTED_DATA_CLAUSE`] explains
 //!    the envelope to the model once, in the system prompt.
+//!
+//! 3. **A nonce lives as long as its result** (025 research R10). The adapter draws a result's nonce
+//!    once, from [`NonceCache`], and reuses it on every later request. A nonce drawn per *request*
+//!    re-randomized every earlier result on every turn, so no request ever repeated the previous one's
+//!    bytes and the provider's prompt cache stopped at the first child result. What the envelope
+//!    relies on is that content cannot know **its own** envelope's nonce, and a nonce drawn after the
+//!    content exists keeps that whether it is reused or not. Reuse does make *older* nonces knowable
+//!    (the model sees them and could echo one into a later call), but a forged closing tag for an older
+//!    envelope arrives inside the later result's own envelope, so it closes nothing.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
 
 use crate::provider::Provenance;
 
@@ -33,12 +45,15 @@ pub const ERROR_PREFIX: &str = "[tool error] ";
 
 /// Render one tool result's content for the model.
 ///
-/// `name` is the tool's name, used as the envelope source for [`Provenance::Child`] content.
+/// `name` is the tool's name, used as the envelope source for [`Provenance::Child`] content. `nonce`
+/// is this result's nonce, from [`NonceCache::nonce_for`]; it is unused for [`Provenance::Harness`]
+/// content, which is not enveloped.
 pub fn frame_tool_result(
     name: &str,
     content: &str,
     is_error: bool,
     provenance: &Provenance,
+    nonce: &str,
 ) -> String {
     let source = match provenance {
         Provenance::Harness => None,
@@ -51,23 +66,68 @@ pub fn frame_tool_result(
     }
     match source {
         None => out.push_str(content),
-        Some(source) => {
-            let nonce = fresh_nonce();
-            out.push_str("<untrusted-data source=\"");
-            out.push_str(&attribute_safe(&source));
-            out.push_str("\" nonce=\"");
-            out.push_str(&nonce);
-            out.push_str("\">\n");
-            out.push_str(content);
-            if !content.ends_with('\n') {
-                out.push('\n');
-            }
-            out.push_str("</untrusted-data nonce=\"");
-            out.push_str(&nonce);
-            out.push_str("\">");
-        }
+        Some(source) => write_envelope(&mut out, &source, content, nonce),
     }
     out
+}
+
+/// Envelope text bee itself passes on but did not write, such as a running summary the model wrote from
+/// tool output (025 FR-008). `source` names where it came from (`bee:summary`).
+pub fn frame_untrusted(source: &str, content: &str, nonce: &str) -> String {
+    let mut out = String::with_capacity(content.len() + 96);
+    write_envelope(&mut out, source, content, nonce);
+    out
+}
+
+fn write_envelope(out: &mut String, source: &str, content: &str, nonce: &str) {
+    out.push_str("<untrusted-data source=\"");
+    out.push_str(&attribute_safe(source));
+    out.push_str("\" nonce=\"");
+    out.push_str(nonce);
+    out.push_str("\">\n");
+    out.push_str(content);
+    if !content.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str("</untrusted-data nonce=\"");
+    out.push_str(nonce);
+    out.push_str("\">");
+}
+
+/// The nonce of each result a conversation has sent, keyed by call id (025 R10). One per model, shared
+/// by every request it builds; entries for results no longer in the conversation are dropped by
+/// [`retain`](Self::retain), so the map never outgrows the conversation.
+#[derive(Debug, Default)]
+pub struct NonceCache {
+    by_key: Mutex<HashMap<String, String>>,
+}
+
+impl NonceCache {
+    /// The nonce for `key`, drawn on first use and the same on every later call.
+    pub fn nonce_for(&self, key: &str) -> String {
+        let mut map = self.by_key.lock().unwrap_or_else(|e| e.into_inner());
+        map.entry(key.to_string())
+            .or_insert_with(fresh_nonce)
+            .clone()
+    }
+
+    /// Drop every entry whose key is not in `keys`.
+    pub fn retain<'a>(&self, keys: impl IntoIterator<Item = &'a str>) {
+        let keep: HashSet<&str> = keys.into_iter().collect();
+        let mut map = self.by_key.lock().unwrap_or_else(|e| e.into_inner());
+        map.retain(|k, _| keep.contains(k.as_str()));
+    }
+
+    /// The nonce already drawn for `key`, if any.
+    pub fn get(&self, key: &str) -> Option<String> {
+        let map = self.by_key.lock().unwrap_or_else(|e| e.into_inner());
+        map.get(key).cloned()
+    }
+
+    /// Whether a nonce has been drawn for `key`.
+    pub fn contains(&self, key: &str) -> bool {
+        self.get(key).is_some()
+    }
 }
 
 /// `source` is bee-built (`tool:<name>`, `http:<id>`, `mcp:<server>`), but a server name comes from
@@ -88,7 +148,7 @@ fn attribute_safe(s: &str) -> String {
 /// content it brackets. Should the syscall fail — it does not, on any kernel bee supports — the
 /// fallback mixes time and a counter: still unique per result, and the failure is not silent in
 /// effect, because uniqueness is what the "differs between results" guarantee rests on.
-fn fresh_nonce() -> String {
+pub fn fresh_nonce() -> String {
     let mut buf = [0u8; 12];
     // SAFETY: `buf` is a valid, writable 12-byte buffer for the duration of the call.
     let n = unsafe { libc::getrandom(buf.as_mut_ptr().cast(), buf.len(), 0) };

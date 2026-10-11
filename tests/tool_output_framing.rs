@@ -9,9 +9,18 @@
 //!
 //! The rendering lives in one place, `bee::provider::framing`, which the provider adapter calls for
 //! every tool result; `src/provider/rig_model.rs` has the unit test proving the adapter uses it.
+//!
+//! 025 (research R10): the adapter draws each result's nonce once and reuses it on every later request,
+//! so the caller passes the nonce in. These tests draw a fresh one per frame, as the adapter does the
+//! first time it sees a result.
 
-use bee::provider::framing::{frame_tool_result, UNTRUSTED_DATA_CLAUSE};
+use bee::provider::framing::{self, frame_untrusted, fresh_nonce, UNTRUSTED_DATA_CLAUSE};
 use bee::provider::Provenance;
+
+/// Frame `content` with a newly drawn nonce, as the adapter does for a result it has not seen before.
+fn frame_tool_result(name: &str, content: &str, is_error: bool, provenance: &Provenance) -> String {
+    framing::frame_tool_result(name, content, is_error, provenance, &fresh_nonce())
+}
 
 /// The nonce attribute of the opening tag, and the full closing tag that must match it.
 fn envelope_nonce(framed: &str) -> String {
@@ -115,6 +124,25 @@ fn nonces_differ_between_results() {
     let a = envelope_nonce(&frame_tool_result("bash", "x", false, &Provenance::Child));
     let b = envelope_nonce(&frame_tool_result("bash", "x", false, &Provenance::Child));
     assert_ne!(a, b);
+}
+
+#[test]
+fn the_same_nonce_frames_identically() {
+    // A request built twice from the same conversation must be byte-identical, or the provider's
+    // prompt cache cannot reuse it (025 R10).
+    let nonce = fresh_nonce();
+    let a = framing::frame_tool_result("bash", "hello", false, &Provenance::Child, &nonce);
+    let b = framing::frame_tool_result("bash", "hello", false, &Provenance::Child, &nonce);
+    assert_eq!(a, b);
+    assert_eq!(envelope_nonce(&a), nonce);
+}
+
+#[test]
+fn untrusted_text_from_bee_is_enveloped_with_its_source() {
+    assert_eq!(
+        frame_untrusted("bee:summary", "x", "N"),
+        "<untrusted-data source=\"bee:summary\" nonce=\"N\">\nx\n</untrusted-data nonce=\"N\">"
+    );
 }
 
 #[test]

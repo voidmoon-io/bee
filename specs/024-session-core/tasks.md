@@ -118,7 +118,7 @@ any later phase may start until this phase is merged.
 - [X] T009 Update the comment at `tests/dynamic_grants.rs:14-20` to record that the replay seam now exists
   behind `test-support` (research R1, plan Complexity Tracking), and that host reactive-retry coverage
   lives in `tests/call_characterization.rs` and `tests/call_lifecycle.rs`.
-- [ ] T010 Run the gate, and confirm `call_characterization` and `episode_progress_strings` pass and
+- [X] T010 Run the gate, and confirm `call_characterization` and `episode_progress_strings` pass and
   `session_parity` is ignored-with-reason. Open PR 1.
 
 **Checkpoint**: today's behaviour is pinned. Every intended change in later phases shows up as a flipped

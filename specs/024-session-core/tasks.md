@@ -135,7 +135,7 @@ Interceptor, ledger and scanner grants, and `surface()` matches a session that h
 
 ### Tests (write first, see them fail)
 
-- [ ] T011 [P] [US4] Create `tests/tool_surface.rs`, with:
+- [X] T011 [P] [US4] Create `tests/tool_surface.rs`, with:
   - (a) a registry built with `ToolDeps { ledger: Some(tmp) }`, where `register("record_finding")` writes
     to `tmp` (cfg `findings`);
   - (b) `register("http_send")` with `deps.interceptor = None` yields the 016 `InterceptorUnavailable`
@@ -148,7 +148,7 @@ Interceptor, ledger and scanner grants, and `surface()` matches a session that h
 
 ### Implementation
 
-- [ ] T012 [US4] In `src/tools.rs`, add `pub struct ToolDeps` with:
+- [X] T012 [US4] In `src/tools.rs`, add `pub struct ToolDeps` with:
   - `ctf_flag`
   - `#[cfg(feature="findings")] ledger, run_id`
   - `#[cfg(feature="scanners")] scanner_grants`
@@ -157,7 +157,7 @@ Interceptor, ledger and scanner grants, and `surface()` matches a session that h
 
   Add `deps: Arc<ToolDeps>` to `ToolRegistry`, plus `ToolRegistry::with_deps`, `set_deps`, `deps()`.
   Keep `ToolRegistry::new()` as `with_deps(Default)`.
-- [ ] T013 [US4] In `src/tools.rs`, replace `register_named(r, name, flag)` (`:348-422`) with
+- [X] T013 [US4] In `src/tools.rs`, replace `register_named(r, name, flag)` (`:348-422`) with
   `ToolRegistry::register(&mut self, name) -> Result<(), UnknownTool>`, which builds each tool configured
   from `self.deps`:
   - security tools take their ledger, run id and grants, absorbing `configure_security_tools` (`:491`);
@@ -166,13 +166,13 @@ Interceptor, ledger and scanner grants, and `surface()` matches a session that h
 
   Delete `configure_security_tools` and `configure_http_tools`. Keep `registry_for(names, deps)` as a thin
   loop over `register`.
-- [ ] T014 [US4] In `src/tools.rs`, add `pub struct SurfaceEntry { name, schema: ToolSchema, deps: DepsSummary
+- [X] T014 [US4] In `src/tools.rs`, add `pub struct SurfaceEntry { name, schema: ToolSchema, deps: DepsSummary
   }` and `ToolRegistry::surface()`. `DepsSummary` lists which dependencies the tool was built with, as
   booleans or ids, never secrets.
-- [ ] T015 [US4] In `src/grants/escalate.rs` (`:147-149`), register granted tools via `registry.register(t)`.
+- [X] T015 [US4] In `src/grants/escalate.rs` (`:147-149`), register granted tools via `registry.register(t)`.
   Before registering, if the delta changed the policy and cfg `scanners` is on, call
   `registry.set_deps(..)` with scanner grants recomputed from `active.active()`.
-- [ ] T016 [US4] Update every caller to build `ToolDeps` first and register through it:
+- [X] T016 [US4] Update every caller to build `ToolDeps` first and register through it:
   - `src/episode.rs` (`:708` registry_for, `:754` skill grants, `:759` configure_security_tools, `:861`
     SkillTool insert, the `configure_http_tools` call);
   - `src/app/session.rs:150`;
@@ -182,8 +182,17 @@ Interceptor, ledger and scanner grants, and `surface()` matches a session that h
 
   Start the Interceptor **before** the first registration in the episode, the REPL and the harness (it
   is a dependency now).
-- [ ] T017 [US4] Run the gate. `tool_surface` passes; `call_characterization` and every existing test are
+- [X] T017 [US4] Run the gate. `tool_surface` passes; `call_characterization` and every existing test are
   unchanged. Open PR 2.
+
+**As built (PR 2)**: two deviations from the text above, both narrower.
+- `set_deps` **rebuilds** every tool `register` built, rather than the Interceptor having to start
+  before the first registration. In the episode and the REPL the Interceptor needs the sandbox, which
+  needs the grant-widened policy, which is resolved while tools register; a rebuilding `set_deps` keeps
+  that order and is also how escalation refreshes scanner grants. The harness, where the Interceptor
+  already exists, builds deps first.
+- `registry_for(names, flag)` keeps its signature, as a thin loop over `register` with
+  `ToolDeps::with_flag`, so the many test call sites stay as they are.
 
 **Checkpoint**: there is one tool constructor, and granted tools are configured.
 

@@ -787,7 +787,6 @@ pub async fn run_episode_with(
     }
 
     let flag = scenario.workdir.flag.as_ref().map(|f| f.value.as_str());
-    let mut registry = tools::registry_for(&scenario.tools, flag);
     // Strip the provider key vars plus any configured MCP `token_env` names from every tool child
     // (FR-018/FR-041), so an MCP Bearer token never leaks into a sandboxed stdio server's env.
     let mut strip_env = sandbox::key_vars(provider_key_env);
@@ -833,18 +832,33 @@ pub async fn run_episode_with(
     for (name, reason) in &grants.refused {
         emit(&opts, format!("skill grant: '{name}' refused — {reason}"));
     }
-    for tool in &grants.tools {
-        tools::register_named(&mut registry, tool, flag);
-    }
-    // Give the security tools this episode's ledger and scanner grants (016-native-tools). After
+    // Every tool is built from this episode's dependencies by the one constructor (024 FR-013): the
+    // CTF flag, the skills, and the ledger and scanner grants (016) of the skill-widened policy. After
     // skill grants, so a scanner a skill widened the policy to include is visible; before the policy
-    // is moved into the scope, which is the last point it can be read.
-    tools::configure_security_tools(
-        &mut registry,
+    // is moved into the scope, which is the last point it can be read. The Interceptor joins below,
+    // once it is running.
+    // The struct update supplies the feature-gated fields, which a slim build does not have.
+    #[allow(clippy::needless_update)]
+    let deps = tools::ToolDeps {
+        ctf_flag: flag.map(str::to_string),
+        // Only model-facing skills make a `skill` tool worth offering (006).
+        skills: skills
+            .model_facing()
+            .next()
+            .is_some()
+            .then(|| skills.clone()),
+        ..tools::ToolDeps::default()
+    }
+    .with_security(
         &scenario.security,
         Some(&grants.policy),
         &format!("{}-{}", scenario.id, std::process::id()),
     );
+    let mut registry = tools::ToolRegistry::with_deps(std::sync::Arc::new(deps));
+    for tool in scenario.tools.iter().chain(&grants.tools) {
+        // Scenario validation rejected unknown names; a skill-granted name is checked the same way.
+        let _ = registry.register(tool);
+    }
     // Keep the resolved policy as the escalation floor before it is moved into the scope (007).
     let escalation_base = grants.policy.clone();
 
@@ -928,7 +942,10 @@ pub async fn run_episode_with(
             .await
             {
                 Ok(h) => {
-                    crate::tools::http::configure_http_tools(&mut registry, &h.interceptor);
+                    let deps = (**registry.deps())
+                        .clone()
+                        .with_interceptor(h.interceptor.clone());
+                    registry.set_deps(std::sync::Arc::new(deps));
                     Some(h)
                 }
                 Err(detail) => {
@@ -940,12 +957,9 @@ pub async fn run_episode_with(
         None => None,
     };
 
-    // Register the model-facing `skill` tool alongside the built-ins.
-    if skills.model_facing().next().is_some() {
-        registry.insert(Box::new(crate::tools::skill::SkillTool::new(
-            skills.clone(),
-        )));
-    }
+    // Register the model-facing `skill` tool alongside the built-ins (a no-op when no skill is
+    // model-facing: the deps above then hold none).
+    let _ = registry.register("skill");
 
     // Dynamic capability grants (007-dynamic-grants). Reactive escalation on a kernel denial is
     // gated on a declared ceiling (the operator's pre-authorization); proactive skill-`requires`

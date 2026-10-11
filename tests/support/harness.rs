@@ -107,9 +107,13 @@ impl Session {
             icpt.clone(),
             PathBuf::from("/bin/true"),
         ));
-        let names: Vec<String> = tools.iter().map(|s| s.to_string()).collect();
-        let mut registry = bee::tools::registry_for(&names, None);
-        bee::tools::http::configure_http_tools(&mut registry, &icpt);
+        // The Interceptor is running before any tool is named, so every tool is built holding it
+        // (024 FR-013).
+        let deps = bee::tools::ToolDeps::default().with_interceptor(icpt.clone());
+        let mut registry = bee::tools::ToolRegistry::with_deps(std::sync::Arc::new(deps));
+        for name in tools {
+            registry.register(name).expect("a known tool");
+        }
         Session {
             icpt,
             sandbox,

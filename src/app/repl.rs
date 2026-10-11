@@ -10,7 +10,7 @@ use std::process::ExitCode;
 
 use clap::Args;
 
-use bee::repl::{run_repl, ReplConfig};
+use bee::repl::{run_repl, ReplConfig, ReplTerminal};
 
 use crate::app::config::{self, Flags};
 use crate::app::session::{self, EX_IOERR, EX_SOFTWARE, EX_USAGE};
@@ -195,11 +195,37 @@ async fn repl(args: ReplArgs) -> ExitCode {
     let mut strip_env = session::strip_vars(session.key_env.as_deref());
     strip_env.extend(mcp.token_env_names());
 
-    // The session, built the one way every entry point builds it (024 FR-006). Consent here is the
-    // interactive prompt: the operator is sitting in front of this session, so a capability asked for
-    // is a question, not a pre-authorization.
+    // The operator is sitting in front of this session, so a capability asked for is a question, not
+    // a pre-authorization (024 FR-001). The inline REPL opens its terminal first: the questions asked
+    // while the session is built and those asked while it runs share its one line reader.
+    let use_tui = choose_frontend(&args);
+    let (operator, mut terminal) = if use_tui {
+        (
+            bee::operator::Operator::with_consent(
+                bee::operator::OperatorKind::Interactive,
+                std::sync::Arc::new(PromptConsent),
+            )
+            .with_timeout(std::time::Duration::from_secs(120)),
+            None,
+        )
+    } else {
+        // Off a terminal there is nobody to ask: the channel's far end is dropped, so every request
+        // is refused, and `run_repl` reports why the session cannot start.
+        let (consent, consent_rx) = bee::operator::ChannelConsent::new();
+        let terminal = ReplTerminal::open().map(|t| t.with_consent(consent_rx));
+        let output: std::sync::Arc<dyn bee::operator::SessionOutput> = match &terminal {
+            Ok(t) => t.output(),
+            Err(_) => std::sync::Arc::new(bee::operator::NullOutput),
+        };
+        (
+            bee::operator::Operator::interactive(consent, output),
+            Some(terminal),
+        )
+    };
+
+    // The session, built the one way every entry point builds it (024 FR-006).
     let spec = bee::session::SessionSpec {
-        entry: if choose_frontend(&args) {
+        entry: if use_tui {
             bee::session::EntryPoint::Tui
         } else {
             bee::session::EntryPoint::Repl
@@ -225,15 +251,16 @@ async fn repl(args: ReplArgs) -> ExitCode {
         strip_env,
         http_scope_advisory: args.http_scope_advisory,
         lease_turns: None,
-        operator: bee::operator::Operator::with_consent(
-            bee::operator::OperatorKind::Interactive,
-            std::sync::Arc::new(PromptConsent),
-        )
-        .with_timeout(std::time::Duration::from_secs(120)),
+        operator,
         prebuilt_sandbox: None,
     };
-    let use_tui = spec.entry == bee::session::EntryPoint::Tui;
-    let mut built = match bee::session::build(spec, &|line| eprintln!("{CMD}: {line}")).await {
+    let report = |line: &str| eprintln!("{CMD}: {line}");
+    let building = bee::session::build(spec, &report);
+    let built = match terminal.as_mut() {
+        Some(Ok(t)) => t.serve_startup(building).await,
+        _ => building.await,
+    };
+    let mut built = match built {
         Ok(s) => s,
         Err(e) => {
             eprintln!("{CMD}: {e}");
@@ -296,6 +323,9 @@ async fn repl(args: ReplArgs) -> ExitCode {
             } else {
                 Some(
                     run_repl(
+                        terminal
+                            .take()
+                            .expect("the inline REPL opened its terminal"),
                         session.model.as_ref(),
                         &mut built.registry,
                         &mut built.sandbox,
@@ -307,11 +337,11 @@ async fn repl(args: ReplArgs) -> ExitCode {
         }
         #[cfg(not(feature = "tui"))]
         {
-            if use_tui {
-                eprintln!("{CMD}: --tui requires building with --features tui; running inline");
-            }
             Some(
                 run_repl(
+                    terminal
+                        .take()
+                        .expect("the inline REPL opened its terminal"),
                     session.model.as_ref(),
                     &mut built.registry,
                     &mut built.sandbox,
@@ -413,7 +443,10 @@ fn choose_frontend(args: &ReplArgs) -> bool {
     }
     #[cfg(not(feature = "tui"))]
     {
-        args.tui && !args.no_tui
+        if args.tui && !args.no_tui {
+            eprintln!("{CMD}: --tui requires building with --features tui; running inline");
+        }
+        false
     }
 }
 

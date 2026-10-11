@@ -458,7 +458,7 @@ drift cases behave as specified.
   `spec_from_config`, keeping user/project MCP servers and skills (FR-009; today `:115`, `:161-162` drop
   them). Remove the third advisory copy (`:300-335`) and the `--host` asymmetry (`:227-241`). Headless now
   honours `Enforcement::Host` where the build allows it.
-- [ ] T047 [US1] Rewrite `src/concurrent.rs` to build each pair's session via `session::build` with
+- [X] T047 [US1] Rewrite `src/concurrent.rs` to build each pair's session via `session::build` with
   `EntryPoint::Batch{concurrent:true}`, so it gets the explicit refusals and keeps its shared-engine
   sandbox constructor through a `SandboxSource::Shared(..)` option on the spec. Delete the silent
   `scenario.mcp` drop and the `[policy.http]` special case at `:39`, which the builder's refusal now
@@ -503,9 +503,15 @@ drift cases behave as specified.
   - Behaviour that unifies, as intended: the REPL's start-up lines use the episode's wording
     (`skill grant: '…' …`), and a REPL session always has escalation, so a skill's `requires` is asked
     about even without a policy (bounded by an empty ceiling).
-- **5a-3:** the concurrent runner via the builder (T047), MCP tgid attribution (T049), and the harness
-  (T048). The harness needs a test-only way to start the Interceptor with an injected resolver and
-  in-process worker, which the builder does not offer yet.
+- **5a-3 (done for T047):** the concurrent runner builds each pair's session through the builder,
+  handing in the scope it created on the shared engine (`SessionSpec.prebuilt_sandbox`). What it cannot
+  run is refused by name before any scope exists: MCP servers, `[policy.http]`, a ceiling, and skills
+  (skill directories widen the policy, and the batch compiles its scopes first). Each batch session now
+  gets the same tool surface, escalation and system prompt as any other. VM: `concurrent-audit-isolation`
+  passes, 49/49.
+- **Deferred to a follow-up PR:** MCP tgid attribution (T049), which changes the audit drain path, and
+  the harness on the builder (T048), which needs a test-only way to start the Interceptor with an
+  injected resolver and in-process worker.
 
 **Checkpoint**: there is one builder. Constitution V's violation is closed.
 

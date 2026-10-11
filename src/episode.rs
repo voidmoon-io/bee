@@ -768,7 +768,7 @@ pub async fn run_episode_with(
 /// The session a scenario asks for. A `policy_path` that does not parse (the `/dev/null` placeholder
 /// of a host run) is no policy: nothing to widen, nothing to grant. An unreadable ceiling is the
 /// policy itself — widening is still on, and widens nothing.
-fn spec_from_scenario(
+pub(crate) fn spec_from_scenario(
     scenario: &Scenario,
     strip_env: Vec<String>,
     eopts: &EpisodeOptions,
@@ -805,6 +805,7 @@ fn spec_from_scenario(
         // Non-interactive: the ceiling file is the operator's reviewable pre-authorization.
         consent: std::sync::Arc::new(crate::skills::AllowWithinCeiling),
         consent_timeout: std::time::Duration::from_secs(60),
+        prebuilt_sandbox: None,
     }
 }
 

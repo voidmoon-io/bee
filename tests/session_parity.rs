@@ -46,6 +46,7 @@ fn spec(entry: EntryPoint) -> SessionSpec {
         lease_turns: Some(3),
         consent: Arc::new(AllowWithinCeiling),
         consent_timeout: Duration::from_secs(60),
+        prebuilt_sandbox: None,
     }
 }
 
@@ -113,6 +114,11 @@ async fn a_concurrent_batch_refuses_what_it_cannot_provide() {
     assert!(refused(with_http).await.contains("[policy.http]"));
 
     assert!(refused(spec(batch)).await.contains("ceiling"));
+
+    let mut with_skills = spec(batch);
+    with_skills.ceiling = None;
+    with_skills.skill_roots = vec![std::env::temp_dir()];
+    assert!(refused(with_skills).await.contains("skills"));
 
     let mut plain = spec(batch);
     plain.ceiling = None;

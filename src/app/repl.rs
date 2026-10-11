@@ -227,6 +227,7 @@ async fn repl(args: ReplArgs) -> ExitCode {
         lease_turns: None,
         consent: std::sync::Arc::new(prompt_consent as fn(&bee::skills::GrantRequest<'_>) -> bool),
         consent_timeout: std::time::Duration::from_secs(120),
+        prebuilt_sandbox: None,
     };
     let use_tui = spec.entry == bee::session::EntryPoint::Tui;
     let mut built = match bee::session::build(spec, &|line| eprintln!("{CMD}: {line}")).await {

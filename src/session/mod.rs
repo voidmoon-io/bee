@@ -152,9 +152,21 @@ impl Drop for Session {
 /// Build a session from `spec` (contracts/session-builder.md). `report` receives the lines an operator
 /// should see while it is built — skill warnings, grant outcomes, the advisory banner — in the
 /// wording the headless progress stream has always used. Every refusal happens before a scope exists.
-pub async fn build(spec: SessionSpec, report: &dyn Fn(&str)) -> Result<Session, BuildError> {
+pub async fn build(mut spec: SessionSpec, report: &dyn Fn(&str)) -> Result<Session, BuildError> {
+    // A sandbox the entry point built is torn down if the session is refused, so its scope does not
+    // outlive the refusal.
+    let prebuilt = spec.prebuilt_sandbox.take();
+    let refuse = |e: BuildError| {
+        if let Some(sb) = &prebuilt {
+            let _ = sb.teardown();
+        }
+        Err(e)
+    };
+
     // 1. Refuse what this entry point cannot provide.
-    refuse_unsupported(&spec)?;
+    if let Err(e) = refuse_unsupported(&spec) {
+        return refuse(e);
+    }
 
     // 2. Skills, the same discovery for every entry point. A malformed skill warns; it never aborts.
     let skills = Arc::new(SkillRegistry::discover(&spec.skill_roots));
@@ -178,7 +190,11 @@ pub async fn build(spec: SessionSpec, report: &dyn Fn(&str)) -> Result<Session, 
     }
 
     // 4. The `[policy.http]` advisory, once.
-    let http_advisory = http_advisory(&grants.policy, spec.enforcement, spec.http_scope_advisory)?;
+    let http_advisory =
+        match http_advisory(&grants.policy, spec.enforcement, spec.http_scope_advisory) {
+            Ok(a) => a,
+            Err(e) => return refuse(e),
+        };
     #[cfg(feature = "intercept")]
     if let Some(reason) = &http_advisory {
         report(&crate::intercept::session::advisory_banner(reason));
@@ -219,8 +235,12 @@ pub async fn build(spec: SessionSpec, report: &dyn Fn(&str)) -> Result<Session, 
         }
     };
     #[cfg_attr(not(feature = "intercept"), allow(unused_mut, unused_variables))]
-    let (mut sandbox, http_prepared) =
-        parts::build_sandbox(&spec, &grants.policy, &scope_id).map_err(BuildError)?;
+    let (mut sandbox, http_prepared) = match prebuilt {
+        // A concurrent batch's scope, already created on its shared engine. `[policy.http]` was
+        // refused above, so there is no proxy to prepare.
+        Some(sandbox) => (sandbox, None),
+        None => parts::build_sandbox(&spec, &grants.policy, &scope_id).map_err(BuildError)?,
+    };
 
     // 8. The proxy worker, in its sidecar scope or advisory, and the HTTP tools' handle on it.
     #[cfg(feature = "intercept")]

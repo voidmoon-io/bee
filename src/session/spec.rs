@@ -69,6 +69,9 @@ pub struct SessionSpec {
     /// Who decides a grant request. 024 PR 5b replaces this pair with the Operator.
     pub consent: Arc<dyn ConsentSink>,
     pub consent_timeout: Duration,
+    /// A sandbox the entry point built itself — the concurrent runner's scopes share one engine and one
+    /// audit ring, which the builder cannot create per session. `None`: the builder builds it.
+    pub prebuilt_sandbox: Option<crate::sandbox::Sandbox>,
 }
 
 /// Why a session could not be built. Every refusal happens before a scope exists or a child runs.
@@ -105,6 +108,11 @@ pub fn refuse_unsupported(spec: &SessionSpec) -> Result<(), BuildError> {
             return Err(BuildError(format!(
                 "widening escalation (a ceiling policy) is {unsupported}"
             )));
+        }
+        // Skill directories widen the policy, and a concurrent batch compiles each scope before the
+        // session is built.
+        if !spec.skill_roots.is_empty() {
+            return Err(BuildError(format!("skills are {unsupported}")));
         }
     }
     if spec.mcp.enabled && !cfg!(feature = "mcp") {

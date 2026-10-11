@@ -71,6 +71,14 @@ jobs:
         run: cargo test --workspace --locked
       - name: test (mcp feature)
         run: cargo test --features mcp --locked
+      - name: test (test-support)
+        # 024 R1: the call-lifecycle orchestration tests run against the host sandbox's scripted
+        # audit source. `test-support` is test-only and never in a shipping feature set
+        # (tests/test_support_absent.rs).
+        run: cargo test --features test-support --locked
+      - name: test (intercept + test-support)
+        # The proxy-refusal retry path is compiled only with `intercept`.
+        run: cargo test --features intercept,test-support --locked
 
   enforce-check:
     name: enforce type-check (best-effort)

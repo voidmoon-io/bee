@@ -195,6 +195,12 @@ intercept = [
 # NEVER in a shipping build — only `test/vm/matrix.sh` enables it; every other build fails to decode
 # those frames (asserted in `src/intercept/control.rs`).
 vm-test = ["intercept"]
+# Test-only (024 R1): a host-only scripted audit source for orchestration tests, so the call
+# lifecycle's retry paths are testable without a BPF-LSM kernel. NEVER in a shipping build — a
+# scripted batch can fabricate the denials that drive grants. Test targets that need it declare
+# `required-features = ["test-support"]` below; `tests/test_support_absent.rs` guards its absence
+# from every shipping feature set.
+test-support = []
 
 [dependencies]
 bee-core = { workspace = true }
@@ -368,6 +374,16 @@ name = "vuln_target"
 required-features = ["intercept"]
 
 # 019 SC-007. Gated in the VM matrix (`http-latency`), compiled-only on host CI.
+[[test]]
+name = "call_characterization"
+path = "tests/call_characterization.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "episode_progress_strings"
+path = "tests/episode_progress_strings.rs"
+required-features = ["test-support"]
+
 [[bench]]
 name = "intercept_latency"
 harness = false

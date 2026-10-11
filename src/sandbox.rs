@@ -182,6 +182,52 @@ impl ChildEnv {
 /// A hardened host process with no kernel scope.
 pub struct HostSandbox {
     env: ChildEnv,
+    /// Scripted audit batches, popped one per drain (024 R1). Test-only: a batch can fabricate the
+    /// denials that drive grants, so this never compiles into a shipping build.
+    #[cfg(feature = "test-support")]
+    scripted: Option<std::sync::Arc<ScriptedAudit>>,
+}
+
+/// Audit batches a host test hands the sandbox in place of a kernel (024 R1, `test-support` only).
+///
+/// Each [`Sandbox::drain_audit`] pops one batch from `tool`, and each
+/// [`Sandbox::drain_sidecar_audit`] one from `proxy`; an empty queue drains nothing, as a real host
+/// sandbox does. A host sandbox enforces nothing, so a scripted batch only adds audit — it cannot
+/// weaken a kernel decision.
+#[cfg(feature = "test-support")]
+#[derive(Default)]
+pub struct ScriptedAudit {
+    tool: std::sync::Mutex<std::collections::VecDeque<Vec<AuditEvent>>>,
+    proxy: std::sync::Mutex<std::collections::VecDeque<Vec<AuditEvent>>>,
+}
+
+#[cfg(feature = "test-support")]
+impl ScriptedAudit {
+    /// Queue the batch the next tool-scope drain returns.
+    pub fn push_tool(&self, batch: Vec<AuditEvent>) {
+        self.tool.lock().expect("scripted audit").push_back(batch);
+    }
+
+    /// Queue the batch the next sidecar (proxy-scope) drain returns.
+    pub fn push_proxy(&self, batch: Vec<AuditEvent>) {
+        self.proxy.lock().expect("scripted audit").push_back(batch);
+    }
+
+    fn pop_tool(&self) -> Vec<AuditEvent> {
+        self.tool
+            .lock()
+            .expect("scripted audit")
+            .pop_front()
+            .unwrap_or_default()
+    }
+
+    fn pop_proxy(&self) -> Vec<AuditEvent> {
+        self.proxy
+            .lock()
+            .expect("scripted audit")
+            .pop_front()
+            .unwrap_or_default()
+    }
 }
 
 /// A second kernel scope beside the tool scope, holding one long-lived harness child (019 P4,
@@ -400,6 +446,17 @@ impl Sandbox {
     pub fn host(strip_env: Vec<String>) -> Self {
         Sandbox::Host(HostSandbox {
             env: ChildEnv::new(strip_env),
+            #[cfg(feature = "test-support")]
+            scripted: None,
+        })
+    }
+
+    /// A host sandbox whose drains return `audit`'s scripted batches (024 R1). Test-only.
+    #[cfg(feature = "test-support")]
+    pub fn host_scripted(strip_env: Vec<String>, audit: std::sync::Arc<ScriptedAudit>) -> Self {
+        Sandbox::Host(HostSandbox {
+            env: ChildEnv::new(strip_env),
+            scripted: Some(audit),
         })
     }
 
@@ -676,6 +733,10 @@ impl Sandbox {
                 e.tool_audit.extend(tool);
                 std::mem::take(&mut e.sidecar_audit)
             }
+            #[cfg(feature = "test-support")]
+            Sandbox::Host(HostSandbox {
+                scripted: Some(s), ..
+            }) => s.pop_proxy(),
             _ => Vec::new(),
         }
     }
@@ -770,6 +831,10 @@ impl Sandbox {
     /// (async).
     pub fn drain_audit(&mut self) -> Vec<AuditEvent> {
         match self {
+            #[cfg(feature = "test-support")]
+            Sandbox::Host(HostSandbox {
+                scripted: Some(s), ..
+            }) => s.pop_tool(),
             Sandbox::Host(_) => Vec::new(),
             #[cfg(feature = "enforce")]
             Sandbox::Enforced(e) => {

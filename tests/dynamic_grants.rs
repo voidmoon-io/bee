@@ -11,13 +11,17 @@
 //! a grant that is refused unpromptably, a grant that is already held and must not nag, and a sink
 //! that never answers.
 //!
-//! **Not covered here:** the reactive cycle (US1). It triggers on a kernel denial, and
-//! `Sandbox::Host` has no kernel — `drain_audit` returns an empty vec unconditionally
-//! (`src/sandbox.rs`), so no host test can produce the `KernelDenial` event that starts it. Its
-//! coverage is the VM matrix (`reload-widen-allow`, `reload-beyond-ceiling`; tasks T018), plus the
-//! unit tests on `escalate()` itself. Giving the host sandbox a way to replay scripted audit events
-//! would close the gap and was deliberately not done: it would put a test seam in the type that
-//! mediates enforcement.
+//! **Not covered here:** the reactive cycle (US1). It triggers on a kernel denial, and a plain
+//! `Sandbox::Host` has no kernel, so its `drain_audit` returns nothing. Its enforcement coverage is
+//! the VM matrix (`reload-widen-allow`, `reload-beyond-ceiling`; tasks T018), plus the unit tests on
+//! `escalate()` itself.
+//!
+//! This file once recorded a decision *not* to give the host sandbox a replay seam, because it
+//! would put a test seam in the type that mediates enforcement. 024-session-core revised that
+//! (research R1, plan Complexity Tracking): the seam now exists as `Sandbox::host_scripted`, behind
+//! the test-only `test-support` feature, which no shipping build enables (guarded by
+//! `tests/test_support_absent.rs`). Host coverage of the reactive retry path lives in
+//! `tests/call_characterization.rs` and, from PR 3, `tests/call_lifecycle.rs`.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};

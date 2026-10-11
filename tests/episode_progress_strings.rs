@@ -1,0 +1,276 @@
+//! The episode loop's progress lines, byte for byte (024-session-core PR 1, contracts/operator.md).
+//!
+//! `bee run` prints these to stderr, and the Autonomous operator's `ProgressOutput` must keep
+//! producing them unchanged once the loop's per-call code moves into `run_call`. FR-022 is the only
+//! permitted change (`DENIED` stops being set by proxy-scope events alone); the consent line is
+//! additive.
+//!
+//! Covers every line `run_loop` emits: header, harness note, turn, text, call, escalate (proactive,
+//! reactive, proxy), proxy event, result ok/ERR/DENIED, audit, done. The setup lines (`skill
+//! warning`, `skill grant`, the `[policy.http]` advisory, the teardown `WARNING`) come from
+//! `run_episode_with`, not the loop, and are pinned when setup moves into the Session builder.
+//!
+//! Gated on `test-support`: a `DENIED` result needs a kernel denial, and on host only the scripted
+//! audit source can produce one.
+
+#[path = "support/scripted.rs"]
+mod scripted;
+
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use bee::episode::{run_loop, LoopOptions};
+use bee::grants::escalate::{DenialEscalationHook, LoopEscalation};
+use bee::grants::{GrantDelta, Ttl};
+use bee::hooks::{Flow, LoopHook, StepEvent, StepEventKind};
+use bee::provider::mock_model::MockModel;
+use bee::provider::{StopReason, ToolCall, Turn};
+use bee::sandbox::{Sandbox, ScriptedAudit};
+use bee::scenario::Scenario;
+use bee::tools::{ToolRegistry, ToolResult};
+use bee_core::{Access, Mode, Policy};
+use scripted::*;
+
+fn policy(fs: &[(&str, Access)]) -> Policy {
+    let mut p = Policy {
+        name: "p".into(),
+        description: None,
+        mode: Mode::Enforce,
+        filesystem: Default::default(),
+        exec: Default::default(),
+        network: Default::default(),
+        exfiltration: Default::default(),
+        http: None,
+    };
+    for (path, a) in fs {
+        p.filesystem.insert(path.to_string(), *a);
+    }
+    p
+}
+
+fn scenario() -> Scenario {
+    Scenario {
+        id: "progress".into(),
+        policy_path: "/dev/null".into(),
+        system_prompt: "test".into(),
+        task: "go".into(),
+        turn_limit: 10,
+        timeout_secs: 30,
+        tools: vec![SCRIPTED.into(), "bash".into()],
+        mode: Default::default(),
+        workdir: Default::default(),
+        mcp: Default::default(),
+        skills: Vec::new(),
+        ceiling_policy_path: None,
+        security: Default::default(),
+    }
+}
+
+fn turn(text: Option<&str>, id: &str) -> Turn {
+    Turn {
+        text: text.map(str::to_string),
+        tool_calls: vec![ToolCall {
+            id: id.into(),
+            name: SCRIPTED.into(),
+            arguments: serde_json::json!({}),
+        }],
+        stop: StopReason::ToolUse,
+        usage: None,
+    }
+}
+
+/// Proposes write access to `/tmp/y` before the call with id `on`: a stand-in for a skill's
+/// `requires`, so the proactive line is exercised without a skills root.
+struct ProactiveOn {
+    on: &'static str,
+}
+
+#[async_trait::async_trait]
+impl LoopHook for ProactiveOn {
+    fn observes(&self, kind: StepEventKind) -> bool {
+        kind == StepEventKind::BeforeToolCall
+    }
+
+    async fn on_event(&self, ev: &StepEvent<'_>) -> Flow {
+        match ev {
+            StepEvent::BeforeToolCall(call) if call.id == self.on => {
+                let mut d = GrantDelta::default();
+                d.filesystem.insert("/tmp/y".into(), Access::Write);
+                Flow::Escalate(d)
+            }
+            _ => Flow::Continue,
+        }
+    }
+}
+
+/// Run `turns` (then a closing text turn) and return the progress lines, with the `done` line's
+/// millisecond count replaced by `N` — the only part that is not deterministic.
+async fn progress(
+    turns: Vec<Turn>,
+    attempts: Vec<Attempt>,
+    hooks: Vec<Box<dyn LoopHook>>,
+    ceiling: Policy,
+    setup: impl FnOnce(&mut Sandbox, &FakeCallHooks),
+) -> Vec<String> {
+    let audit = Arc::new(ScriptedAudit::default());
+    let mut sb = Sandbox::host_scripted(Vec::new(), audit.clone());
+    let call_hooks = Arc::new(FakeCallHooks::default());
+    setup(&mut sb, &call_hooks);
+    sb.set_call_hooks(call_hooks);
+    let mut registry = ToolRegistry::new();
+    registry.insert(Box::new(ScriptedTool::new(audit, attempts)));
+
+    let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+    let sink = lines.clone();
+    let opts = LoopOptions {
+        progress: Some(Box::new(move |l: &str| {
+            sink.lock().unwrap().push(l.to_string())
+        })),
+        escalation: Some(LoopEscalation {
+            base: policy(&[]),
+            ceiling,
+            hooks,
+            consent: RecordingConsent::new(true),
+            timeout: Duration::from_secs(5),
+            default_ttl: Ttl::Forever,
+        }),
+        ..LoopOptions::default()
+    };
+    let mut turns = turns;
+    turns.push(text_turn("all done"));
+    run_loop(
+        &MockModel::scripted(turns),
+        &scenario(),
+        &mut registry,
+        &mut sb,
+        &opts,
+    )
+    .await;
+
+    let mut out = lines.lock().unwrap().clone();
+    let last = out.last_mut().expect("a done line");
+    let (head, ms) = last.rsplit_once(" · ").expect("done line shape");
+    assert!(
+        ms.ends_with("ms") && ms[..ms.len() - 2].chars().all(|c| c.is_ascii_digit()),
+        "done line ends in a millisecond count: {last}"
+    );
+    *last = format!("{head} · Nms");
+    out
+}
+
+#[tokio::test]
+async fn every_loop_line_is_byte_identical() {
+    let mut err_with_exit = ToolResult::error("boom\nsecond line");
+    err_with_exit.exit_code = Some(2);
+    let lines = progress(
+        vec![
+            turn(Some("\n  Looking around.\nnot this line"), "c1"),
+            turn(None, "c2"),
+            turn(None, "c3"),
+            turn(None, "c4"),
+            turn(None, "c5"),
+        ],
+        vec![
+            Attempt::ok("fine\nmore"),
+            Attempt {
+                result: err_with_exit,
+                ..Attempt::ok("")
+            },
+            Attempt::error("EACCES").with_audit(vec![ev(
+                "file_open",
+                "/etc/shadow",
+                "denied",
+                None,
+            )]),
+            Attempt::error("EACCES").with_audit(vec![ev("file_open", "/tmp/x", "denied", None)]),
+            Attempt::ok("written"),
+            Attempt::ok("fetched"),
+        ],
+        vec![
+            Box::new(DenialEscalationHook { enabled: true }),
+            Box::new(ProactiveOn { on: "c5" }),
+        ],
+        policy(&[("/tmp", Access::Write)]),
+        |_, hooks| {
+            hooks
+                .notes
+                .lock()
+                .unwrap()
+                .push("3 new passive leads".into());
+            hooks.push("c5", vec![refusal("c5", "10.0.0.9", 80)]);
+        },
+    )
+    .await;
+
+    let expected = [
+        "episode 'progress' · mock/scripted · tools: scripted,bash",
+        "  3 new passive leads",
+        "turn 0",
+        // `preview` skips blank lines and trims only the end, so the indent stays.
+        "  text:   Looking around.",
+        "  call scripted {}",
+        "  result ok: fine",
+        "turn 1",
+        "  call scripted {}",
+        "  result ERR (exit 2): boom",
+        "turn 2",
+        "  call scripted {}",
+        "  escalate(reactive): Refused(\"exceeds capability ceiling: attenuation violation on filesystem:/etc/shadow: no parent rule covers this path\")",
+        "  result DENIED: EACCES",
+        "  audit: file_open denied /etc/shadow",
+        "turn 3",
+        "  call scripted {}",
+        "  escalate(reactive): Granted(\"g0\")",
+        "  result ok: written",
+        "turn 4",
+        "  call scripted {}",
+        "  escalate(proactive): Granted(\"g1\")",
+        "  refused by proxy: 10.0.0.9:80 (refused_out_of_scope)",
+        "  result ok: fetched",
+        "turn 5",
+        "  text: all done",
+        "done: completed · 6 turns · Nms",
+    ];
+    assert_eq!(lines, expected);
+}
+
+/// The proxy-refusal escalation line exists only with `intercept`.
+#[cfg(feature = "intercept")]
+#[tokio::test]
+async fn the_proxy_escalation_line() {
+    fn http(targets: &[&str]) -> Policy {
+        let mut p = policy(&[]);
+        p.http = Some(bee_core::HttpPolicy {
+            targets: targets
+                .iter()
+                .map(|t| bee_core::HostPort::try_from(t.to_string()).unwrap())
+                .collect(),
+            ..Default::default()
+        });
+        p
+    }
+    let lines = progress(
+        vec![turn(None, "c1")],
+        vec![Attempt::error("refused"), Attempt::ok("200 OK")],
+        vec![Box::new(bee::grants::escalate::ProxyRefusalHook {
+            enabled: true,
+        })],
+        http(&["10.0.0.9:80"]),
+        |sb, hooks| {
+            hooks.push("c1", vec![refusal("c1", "10.0.0.9", 80)]);
+            sb.set_http_scope_hook(Arc::new(FakeHttpScope::default()));
+        },
+    )
+    .await;
+    let expected = [
+        "episode 'progress' · mock/scripted · tools: scripted,bash",
+        "turn 0",
+        "  call scripted {}",
+        "  escalate(proxy): Granted(\"g0\")",
+        "  result ok: 200 OK",
+        "turn 1",
+        "  text: all done",
+        "done: completed · 2 turns · Nms",
+    ];
+    assert_eq!(lines, expected);
+}

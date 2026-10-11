@@ -98,13 +98,17 @@ impl Tool for HttpReplay {
             source: format!("http:{}", r.id),
         });
         let v = result.map(|r| {
-            json!({
+            let mut v = json!({
                 "id": r.id,
                 "parent": r.parent,
                 "probe": r.probe,
                 "diff": r.diff,
                 "enforcement": icpt.enforcement().label(),
-            })
+            });
+            if let Some(why) = r.probe_skipped {
+                v["probe_skipped"] = json!(why);
+            }
+            v
         });
         respond("http_replay", icpt, v, BOUND, provenance)
     }

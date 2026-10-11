@@ -47,6 +47,7 @@ fn write_policy(tag: &str, contents: &str) -> PathBuf {
 
 fn scenario(skills: Vec<PathBuf>) -> Scenario {
     Scenario {
+        context: Default::default(),
         id: "skills-ep".into(),
         policy_path: "/dev/null".into(),
         system_prompt: "You are a test agent.".into(),

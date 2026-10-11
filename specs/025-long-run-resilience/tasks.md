@@ -63,11 +63,11 @@ edits an existing expected string.
 
 **Purpose**: module skeletons, so later phases' parallel tasks have files to land in.
 
-- [ ] T001 Create `src/context/mod.rs` (empty `pub mod config; pub mod budget;`, plus a module doc that
+- [X] T001 Create `src/context/mod.rs` (empty `pub mod config; pub mod budget;`, plus a module doc that
   summarizes research R1–R8 and links `specs/025-long-run-resilience/contracts/context.md`). Add
   `pub mod context;` to `src/lib.rs` in alphabetical position. Create `src/context/config.rs` and
   `src/context/budget.rs` with module docs only. `cargo check` passes.
-- [ ] T002 [P] Create `src/provider/limits.rs` with a module doc only. Add `pub mod limits;` in
+- [X] T002 [P] Create `src/provider/limits.rs` with a module doc only. Add `pub mod limits;` in
   `src/provider.rs` beside the existing `pub mod framing;`.
 
 ---
@@ -141,7 +141,7 @@ result the model sees at min(24,000 bytes, 10% of budget). The record keeps the 
 
 ### Tests first
 
-- [ ] T008 [P] [US4] Create `tests/context_budget.rs` with the seven tests in quickstart.md Phase B.
+- [X] T008 [P] [US4] Create `tests/context_budget.rs` with the seven tests in quickstart.md Phase B.
   Notes:
   - Use `bee::provider::mock_model::MockModel` and `tests/support/fixtures.rs` (`scenario`, `call_turn`,
     `text_turn`).
@@ -151,25 +151,25 @@ result the model sees at min(24,000 bytes, 10% of budget). The record keeps the 
   - For `oversize_request_ends_context_exhausted`, set `[context] window_tokens = 8192` with compaction
     off and feed a 200 KiB task. Assert status `ContextExhausted` and that `from_fn` was never called.
   - For `estimate_calibrates_from_usage`, unit-test `ContextManager::observe` directly.
-- [ ] T009 [P] [US4] Add unit tests in `src/provider/limits.rs` for known ids, with and without the
+- [X] T009 [P] [US4] Add unit tests in `src/provider/limits.rs` for known ids, with and without the
   provider prefix (`anthropic/claude-sonnet-4-6`, `claude-opus-4-8`), and for an unknown id → `None`. Add
   tests in `src/context/config.rs` for validation: `soft ≥ hard`, a zero share, and `window` smaller than
   `4096 + max_tokens` must each be rejected.
 
 ### Implementation
 
-- [ ] T010 [P] [US4] Implement `pub fn context_window(model_id: &str) -> Option<u32>` in
+- [X] T010 [P] [US4] Implement `pub fn context_window(model_id: &str) -> Option<u32>` in
   `src/provider/limits.rs`:
   - strip the provider prefix exactly as `metrics::pricing::rates` does;
   - map the Claude ids listed in `pricing.rs` to their published windows: 200,000 for each, and
     1,000,000 for any id whose provider documents a 1M window (check the current model docs);
   - leave a `// keep in step with metrics/pricing.rs` comment.
-- [ ] T011 [P] [US4] Implement `ContextConfig` (every field `Option`, `serde(deny_unknown_fields)`,
+- [X] T011 [P] [US4] Implement `ContextConfig` (every field `Option`, `serde(deny_unknown_fields)`,
   `Default`) and `ResolvedContext` (concrete values, defaults from data-model.md) in
   `src/context/config.rs`. Add `ContextConfig::merge(self, over: ContextConfig) -> ContextConfig` (each
   `Some` in `over` wins) and `resolve(&self, max_tokens: u32) -> Result<ResolvedContext, ConfigError>`
   with the validation rules in data-model.md.
-- [ ] T012 [US4] Implement `ContextBudget`, `WindowSource` and the estimator in `src/context/budget.rs`:
+- [X] T012 [US4] Implement `ContextBudget`, `WindowSource` and the estimator in `src/context/budget.rs`:
   - `budget_for(model_id, provider_window: Option<u32>, cfg: &ResolvedContext, max_tokens)`, following
     contracts/config.md precedence;
   - `reply_reserve = max_tokens + window / 50`;
@@ -177,7 +177,7 @@ result the model sees at min(24,000 bytes, 10% of budget). The record keeps the 
     `framing::UNTRUSTED_DATA_CLAUSE` + `serde_json::to_vec(tools)` length + each message's text, with a
     fixed 120 bytes per `ToolResult` for envelope overhead;
   - `tokens(bytes, ratio)`.
-- [ ] T013 [US4] Implement `ContextManager` in `src/context/mod.rs` with the fields in data-model.md
+- [X] T013 [US4] Implement `ContextManager` in `src/context/mod.rs` with the fields in data-model.md
   (`notes` and `summary` stay unused until Phase 6) and these methods:
   - `for_session(cfg: &ContextConfig, model_id, provider_window, max_tokens) -> Result<(Self, Option<String>), ConfigError>`.
     The `Option<String>` is the unknown-window notice from contracts/context.md.
@@ -189,18 +189,18 @@ result the model sees at min(24,000 bytes, 10% of budget). The record keeps the 
   - `observe(sent_bytes, usage)`: the R2 recalibration with EWMA 0.5, clamped to [2.0, 6.0].
   - `reset()`.
   - `Prepared` and `ContextExhausted` types.
-- [ ] T014 [US4] Add `#[serde(default)] context_window: Option<u32>` to `ProviderConfig` in
+- [X] T014 [US4] Add `#[serde(default)] context_window: Option<u32>` to `ProviderConfig` in
   `src/config.rs` (its doc names `[context] window_tokens` as the override). Add
   `#[serde(default)] context: ContextConfig` to `Scenario` in `src/scenario.rs`, and fold a top-level
   `[context]` table in `ScenarioFile` into it in `from_path`, the same way `[mcp]` and `[security]` are
   folded.
-- [ ] T015 [US4] Add `EpisodeStatus::ContextExhausted { detail: String }` in `src/transcript.rs`. Extend
+- [X] T015 [US4] Add `EpisodeStatus::ContextExhausted { detail: String }` in `src/transcript.rs`. Extend
   `status_label` (`src/episode.rs:79`) to give `"context exhausted"`. Map it to fail in
   `batch::Status::from_episode` (`src/batch.rs`) and in `src/viz/grid.rs`. Map it to exit 3 in
   `src/app/run.rs` (define `const EX_INCOMPLETE: u8 = 3` beside the other exit constants, with a doc
   comment). Add `ExchangeOutcome::ContextExhausted(String)` in `src/repl.rs` and handle it wherever
   `ExchangeOutcome` is matched (`grep -rn "ExchangeOutcome::" src`).
-- [ ] T015a [US4] Add the shared note plumbing that Phases 4, 5 and 6 build on, so they do not depend on
+- [X] T015a [US4] Add the shared note plumbing that Phases 4, 5 and 6 build on, so they do not depend on
   each other (analysis I2):
   - in `src/transcript.rs`: `NoteKind { StuckGeneral, StuckPolicy, FinishRequired, Passive }`,
     `HarnessNote` (data-model.md), and `#[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -211,7 +211,7 @@ result the model sees at min(24,000 bytes, 10% of budget). The record keeps the 
     every `pending` note as `Message::User` and record it on the turn. The episode loop emits each as
     `  {text}` progress; the REPL uses `output.info`. Nothing queues a note yet in this phase;
   - when 024 PR5 has landed, `pending` is a `Session` field.
-- [ ] T016 [US4] Wire the episode loop (`src/episode.rs` `run_loop`):
+- [X] T016 [US4] Wire the episode loop (`src/episode.rs` `run_loop`):
   - create the manager at loop start from `scenario.context` and the model id. The model's `max_tokens`
     is not on the `Model` trait, so add `LoopOptions.max_tokens: Option<u32>`, set it from
     `ProviderConfig.max_tokens` in `run_episode_with`, and default it to 4096.
@@ -223,7 +223,7 @@ result the model sees at min(24,000 bytes, 10% of budget). The record keeps the 
   - Map a provider error whose detail matches a context-length refusal (`prompt is too long`,
     `context_length_exceeded`, `maximum context length`) to `ContextExhausted` instead of `ApiError`.
     Put the match in one `fn is_context_overflow(&ModelError) -> bool` in `src/context/mod.rs`.
-- [ ] T017 [US4] Wire the REPL (`src/repl.rs` `run_exchange`) the same way:
+- [X] T017 [US4] Wire the REPL (`src/repl.rs` `run_exchange`) the same way:
   - add `context: ContextConfig` and `max_tokens: Option<u32>` to `ReplConfig`, defaulting to off and
     4096;
   - keep a `ContextManager` across exchanges: add it to the state passed in, or to `ReplSession`
@@ -232,7 +232,7 @@ result the model sees at min(24,000 bytes, 10% of budget). The record keeps the 
   - cap pushed results;
   - on `Err`, `output.error(..)` and return `ContextExhausted`;
   - in `run_repl`, the `/clear` arm calls `ctx.reset()`.
-- [ ] T018 [US4] Add the `[context]` table to app config:
+- [X] T018 [US4] Add the `[context]` table to app config:
   - `ContextSection = bee::context::config::ContextConfig` as `FileConfig.context` in
     `src/app/config/file.rs`;
   - fold the layers in `Merged::build` with `ContextConfig::merge` (`src/app/config/mod.rs`);
@@ -240,7 +240,7 @@ result the model sees at min(24,000 bytes, 10% of budget). The record keeps the 
   - pass it into `ReplConfig` (`src/app/repl.rs`) and the ad-hoc scenario (`src/app/run.rs`). For a
     scenario file, the scenario's table wins: `cfg.context.merge(scenario.context)`.
   - Add parsing and layering tests to `src/app/config/tests.rs`.
-- [ ] T019 [US4] Run the gate. If `episode_progress_strings` sees a new line, it can only be the
+- [X] T019 [US4] Run the gate. If `episode_progress_strings` sees a new line, it can only be the
   unknown-window notice. The fixtures use the mock provider, so either add the `mock/*` ids to
   `limits.rs` with a 200,000 window (preferred: the mock is not a real model, and the notice would be
   noise in every test), or pin the line as new.

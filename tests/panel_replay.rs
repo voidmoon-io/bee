@@ -35,6 +35,7 @@ fn render_call(id: &str, target: RenderTarget, spec: RenderSpec) -> RecordedCall
 
 fn turn(index: u32, calls: Vec<RecordedCall>) -> TranscriptTurn {
     TranscriptTurn {
+        notes: Vec::new(),
         index,
         assistant_text: None,
         calls,

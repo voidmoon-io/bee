@@ -95,6 +95,14 @@ pub struct Scenario {
     /// file, where capabilities live.
     #[serde(default)]
     pub security: crate::security::SecurityConfig,
+    /// Context budget and compaction settings (025). Sourced from the **top-level** `[context]` table,
+    /// like `[mcp]` and `[security]`, and merged over the user's and project's `[context]`.
+    #[serde(default, skip_serializing_if = "is_default_context")]
+    pub context: crate::context::ContextConfig,
+}
+
+fn is_default_context(c: &crate::context::ContextConfig) -> bool {
+    *c == crate::context::ContextConfig::default()
 }
 
 fn default_tools() -> Vec<String> {
@@ -111,6 +119,9 @@ struct ScenarioFile {
     /// The top-level `[security]` table, folded the same way (016-native-tools).
     #[serde(default)]
     security: Option<crate::security::SecurityConfig>,
+    /// The top-level `[context]` table (025), folded the same way.
+    #[serde(default)]
+    context: Option<crate::context::ContextConfig>,
 }
 
 impl Scenario {
@@ -130,6 +141,9 @@ impl Scenario {
         }
         if let Some(security) = file.security {
             s.security = security;
+        }
+        if let Some(context) = file.context {
+            s.context = context;
         }
         // Resolve a relative policy_path against the scenario file's directory for portability.
         if s.policy_path.is_relative() {

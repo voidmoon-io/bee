@@ -157,6 +157,30 @@ async fn repl(args: ReplArgs) -> ExitCode {
         Err(e) => return session::fail(CMD, &e),
     };
 
+    // The context budget (025), built now so a bad `[context]` is refused before anything starts and
+    // a guessed window is announced once.
+    let context_inputs = bee::context::ContextInputs {
+        config: cfg.context,
+        provider_window: cfg.provider.context_window,
+        max_tokens: cfg.provider.max_tokens,
+    };
+    let context = match bee::context::ContextManager::for_session(
+        &context_inputs,
+        None,
+        session.model.id(),
+    ) {
+        Ok((ctx, notice)) => {
+            if let Some(n) = notice {
+                eprintln!("{CMD}: {n}");
+            }
+            ctx
+        }
+        Err(e) => {
+            eprintln!("{CMD}: invalid [context]: {e}");
+            return ExitCode::from(EX_USAGE);
+        }
+    };
+
     let mut registry = registry_for(&cfg.tools, None);
 
     // Strip the provider key plus any MCP token variables from tool children (FR-018/FR-041).
@@ -366,6 +390,8 @@ async fn repl(args: ReplArgs) -> ExitCode {
         http_pane: http_session
             .as_ref()
             .map(|h| bee::intercept::pane::pane_source(h.interceptor.clone())),
+        context: context_inputs,
+        state: std::sync::Mutex::new(bee::repl::ReplState::with_context(context)),
         ..ReplConfig::default()
     };
 

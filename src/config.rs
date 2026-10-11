@@ -106,6 +106,10 @@ pub struct ProviderConfig {
     pub api_key_env: String,
     #[serde(default)]
     pub max_tokens: Option<u32>,
+    /// The model's context window in tokens, for a model bee's table does not know (025). A
+    /// `[context] window_tokens` in user, project or scenario config overrides it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u32>,
     #[serde(default)]
     pub temperature: Option<f32>,
     /// Anthropic **extended thinking** (opt-in). `thinking = "adaptive"` lets the model decide when

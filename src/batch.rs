@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::config::ProviderConfig;
-use crate::episode::{run_episode, ProgressSink};
+use crate::episode::{run_episode_with, ProgressSink};
 use crate::provider::model_from_config;
 use crate::scenario::Scenario;
 use crate::transcript::{EpisodeStatus, EpisodeTranscript};
@@ -167,8 +167,20 @@ pub async fn run_batch(config: &BatchConfig, progress: Option<ProgressSink>) -> 
                         let label = format!("{}/{}", scenario.id, cfg.model_id());
                         Box::new(move |line: &str| s(&format!("[{label}] {line}"))) as ProgressSink
                     });
-                    transcripts
-                        .push(run_episode(model.as_ref(), scenario, key_env, ep_progress).await);
+                    // The provider file's window and reply limit size the context budget (025); a
+                    // scenario's own `[context]` is merged over them in the loop.
+                    let eopts = crate::episode::EpisodeOptions {
+                        context: crate::context::ContextInputs {
+                            provider_window: cfg.context_window,
+                            max_tokens: cfg.max_tokens,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    };
+                    transcripts.push(
+                        run_episode_with(model.as_ref(), scenario, key_env, ep_progress, eopts)
+                            .await,
+                    );
                 }
                 Err(e) => {
                     // Parseable but not buildable (e.g. `openai-compat` without `base_url`): record

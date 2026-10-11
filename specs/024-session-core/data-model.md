@@ -118,16 +118,20 @@ the first attempt and any retry share it.
 | `denied_attempt_proxy_events` | `Vec<ProxyEvent>` | The attempt a proxy refusal retried (FR-021). Empty if no proxy retry. |
 | `retried` | `bool` | At most one retry per call (FR-019). |
 | `timed_out` | `bool` | |
-| `refused_by_hook` | `Option<String>` | A `BeforeToolCall → Deny`; the tool never ran. |
+| `refused_by_hook` | `Option<String>` | A `BeforeToolCall → Deny`; the tool never ran. Added with hook Deny handling in PR 4. |
 | `escalations` | `Vec<EscalationRecord { trigger: Trigger, outcome: EscalateOutcome }>` | `Trigger = Proactive \| KernelDenial{op,target} \| ProxyRefusal{host,port}` |
 
 Derived:
 
-- `tool_denials()` counts denials in `audit` and `denied_attempt_audit`, never in `proxy_audit` (FR-022).
+- `tool_denials()` counts tool-scope denials in `audit` — the attempt that stands — never in
+  `proxy_audit` (FR-022), and not in `denied_attempt_audit`: a denial a granted retry replaced is kept
+  in the record (FR-021) but the call that stands was not denied. (As built in PR 3; the pinned
+  characterization scenario s2 requires it.)
 - `to_recorded() -> RecordedCall` gives the transcript form. `RecordedCall` gains
-  `denied_attempt_audit`, `denied_attempt_proxy_events`, `proxy_audit`, `escalations`, `timed_out`,
-  `retried`, all with
-  `serde(default, skip_serializing_if = empty/false)`.
+  `denied_attempt_audit`, `denied_attempt_proxy_events`, `escalations`, `timed_out` and `retried`,
+  all with `serde(default, skip_serializing_if = empty/false)`. `RecordedCall.audit` keeps its
+  meaning — tool and proxy events together, the proxy's tagged `scope_id = "proxy"` — so no separate
+  `proxy_audit` field is serialized (as built in PR 3).
 
 ## Hook types
 

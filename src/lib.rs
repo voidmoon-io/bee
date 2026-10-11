@@ -25,6 +25,8 @@
 #[cfg(feature = "astgrep")]
 pub mod astgrep;
 pub mod batch;
+// One tool call, start to finish — the only copy of the call protocol (024 FR-017).
+pub mod call;
 #[cfg(feature = "concurrent")]
 pub mod concurrent;
 pub mod config;

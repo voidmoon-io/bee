@@ -5,13 +5,18 @@
 //! `interceptor_unavailable`, so a tool can never fall back to unscoped egress. Results are bounded,
 //! and every slice of target-derived bytes is framed `Remote { source: "http:<id>" }` so it reaches
 //! the model inside an untrusted-data envelope (contracts/model-framing.md).
+//!
+//! The tools are adapters over [`crate::intercept::ops`] (024 US6): each parses its arguments into an
+//! op spec, makes one op call, and reports through [`respond`].
 
 use serde_json::{json, Value};
 
+use crate::intercept::ops::bound::bounded_json;
+use crate::intercept::ops::{self, CallCtx, OpError, Refusal};
 use crate::intercept::sidecar::Interceptor;
 use crate::provider::ToolSchema;
 use crate::sandbox::Sandbox;
-use crate::tools::{Tool, ToolOutcome, ToolResult, UnavailableReason};
+use crate::tools::{Provenance, Tool, ToolOutcome, ToolResult, UnavailableReason};
 
 /// Per-tool output bounds (contracts/http-tools.md).
 pub const SCOPE_BOUND: usize = 8 * 1024;
@@ -60,76 +65,89 @@ pub(crate) fn invalid(tool: &str, detail: impl std::fmt::Display) -> ToolResult 
     ToolResult::invalid_args(tool, detail)
 }
 
-/// Render `v` as compact JSON within `bound` bytes — always **valid** JSON. Each tool shapes its
-/// result to fit first; this is the backstop. It halves the longest string field (marking the cut)
-/// until the serialised form fits, so a model never receives a JSON value cut off mid-token.
-pub(crate) fn bounded_json(v: &Value, bound: usize) -> String {
-    let mut v = v.clone();
-    for _ in 0..32 {
-        let s = serde_json::to_string(&v).unwrap_or_default();
-        if s.len() <= bound {
-            return s;
-        }
-        if !halve_longest_string(&mut v) {
-            break;
-        }
-    }
-    serde_json::json!({ "error": format!("result exceeded its {bound}-byte bound") }).to_string()
+/// The result of one op call, as tool `tool` reports it: a value rendered within `bound` bytes with
+/// the proxy's notices appended and tagged with `provenance`, or the op's error. The one place an
+/// [`OpError`] becomes a tool result (024 FR-036).
+pub(crate) fn respond(
+    tool: &str,
+    icpt: &Interceptor,
+    result: Result<Value, OpError>,
+    bound: usize,
+    provenance: Option<Provenance>,
+) -> ToolResult {
+    respond_text(
+        tool,
+        icpt,
+        result.map(|v| bounded_json(&v, bound)),
+        provenance,
+    )
 }
 
-/// Halve the longest string in `v` (by serialised length, which is what the bound counts). `false`
-/// when there is no string left worth shortening.
-fn halve_longest_string(v: &mut Value) -> bool {
-    fn longest(v: &mut Value) -> Option<(&mut String, usize)> {
-        match v {
-            Value::String(s) => {
-                let n = serde_json::to_string(s).map(|j| j.len()).unwrap_or(0);
-                Some((s, n))
+/// [`respond`] for a body the tool has already bounded.
+pub(crate) fn respond_text(
+    tool: &str,
+    icpt: &Interceptor,
+    result: Result<String, OpError>,
+    provenance: Option<Provenance>,
+) -> ToolResult {
+    match result {
+        Ok(body) => {
+            let r = ToolResult::ok(with_notices(body, icpt));
+            match provenance {
+                Some(p) => r.with_provenance(p),
+                None => r,
             }
-            Value::Array(a) => a.iter_mut().filter_map(longest).max_by_key(|(_, n)| *n),
-            Value::Object(o) => o.values_mut().filter_map(longest).max_by_key(|(_, n)| *n),
-            _ => None,
         }
+        Err(e) => op_error(tool, e),
     }
-    let Some((s, n)) = longest(v) else {
-        return false;
-    };
-    if n < 32 {
-        return false;
-    }
-    let mut cut = s.len() / 2;
-    while !s.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    s.truncate(cut);
-    s.push_str("… [cut]");
-    true
 }
 
-/// Text for the model from body bytes: printable as-is, or — when the bytes are mostly not text — a
-/// one-line description instead of a page of escapes.
-pub(crate) fn text_or_binary(b: &[u8]) -> String {
-    let text = String::from_utf8_lossy(b);
-    let odd = text
-        .chars()
-        .filter(|c| (c.is_control() && !matches!(c, '\n' | '\r' | '\t')) || *c == '\u{FFFD}')
-        .count();
-    if !b.is_empty() && odd * 10 > text.chars().count() {
-        return format!(
-            "(binary: {} bytes shown here would be mostly unprintable)",
-            b.len()
-        );
+/// An op's error as tool `tool`'s result.
+pub(crate) fn op_error(tool: &str, e: OpError) -> ToolResult {
+    match e {
+        OpError::Unavailable(d) => unavailable(&d),
+        OpError::Invalid(d) => invalid(tool, d),
+        OpError::Refused { reason, note } => {
+            let reason = match reason {
+                Refusal::OutOfScope { host, port, layer } => {
+                    UnavailableReason::OutOfScope { host, port, layer }
+                }
+                Refusal::EgressOnly { host } => UnavailableReason::EgressOnly { host },
+                Refusal::LimitExceeded { limit, value } => {
+                    UnavailableReason::LimitExceeded { limit, value }
+                }
+            };
+            let mut r = ToolOutcome::<()>::unavailable(reason).into_tool_result(|_| String::new());
+            if let Some(n) = note {
+                r.content.push('\n');
+                r.content.push_str(&n);
+            }
+            r
+        }
+        OpError::Failed(d) => ToolOutcome::<()>::failed(d).into_tool_result(|_| String::new()),
     }
-    text.into_owned()
 }
 
 /// Operator notices (restart, eviction) appended to the next result — never silent.
-pub(crate) fn with_notices(mut body: String, icpt: &Interceptor) -> String {
+fn with_notices(mut body: String, icpt: &Interceptor) -> String {
     for n in icpt.take_notices() {
         body.push_str("\n[bee] ");
         body.push_str(&crate::safe_text::safe_line(&n));
     }
     body
+}
+
+/// The current call's attribution, from the sandbox's call context. Computed once per call by the
+/// adapter: ops never see the sandbox.
+pub(crate) fn call_ctx(sandbox: &Sandbox) -> CallCtx {
+    match sandbox.call_context() {
+        Some(c) => crate::intercept::creds::wire_ctx(c),
+        None => CallCtx {
+            call_id: "unattributed".into(),
+            turn: 0,
+            origin: "tool".into(),
+        },
+    }
 }
 
 // ── http_scope ───────────────────────────────────────────────────────────────────────────────────
@@ -164,60 +182,14 @@ impl Tool for HttpScope {
             Ok(i) => i,
             Err(r) => return r,
         };
-        let v = scope_view(icpt);
-        ToolResult::ok(with_notices(bounded_json(&v, SCOPE_BOUND), icpt))
+        respond(
+            "http_scope",
+            icpt,
+            Ok(ops::scope_view(icpt)),
+            SCOPE_BOUND,
+            None,
+        )
     }
-}
-
-/// The `http_scope` result (contracts/http-tools.md#http_scope).
-pub fn scope_view(icpt: &Interceptor) -> Value {
-    let scope = icpt.http_scope();
-    let checker = crate::intercept::worker::scope::ScopeChecker::new(scope.clone());
-    let scope = &scope;
-    let enforcement = icpt.enforcement();
-    let entries: Vec<Value> = scope
-        .targets
-        .iter()
-        .chain(&scope.egress)
-        .map(|e| {
-            let layers: Vec<Value> = e
-                .enforced_by
-                .iter()
-                .map(|l| match l {
-                    // In advisory mode no kernel rule is installed; say so rather than list one.
-                    bee_core::compiler::EnforcedBy::Kernel { addr, port } => match enforcement {
-                        crate::intercept::sidecar::Enforcement::Kernel => {
-                            json!({ "layer": "kernel", "addr": addr, "port": port })
-                        }
-                        crate::intercept::sidecar::Enforcement::Advisory { .. } => {
-                            json!({ "layer": "kernel", "addr": addr, "port": port, "installed": false })
-                        }
-                    },
-                    bee_core::compiler::EnforcedBy::Proxy { host } => {
-                        json!({ "layer": "proxy", "host": host })
-                    }
-                })
-                .collect();
-            json!({
-                "host": e.host,
-                "port": e.port,
-                "role": e.role,
-                "inspect": checker.is_inspected(&e.host, e.port),
-                "insecure_upstream": checker.is_insecure_upstream(&e.host),
-                "enforced_by": layers,
-            })
-        })
-        .collect();
-    let mut v = json!({
-        "enforcement": enforcement.label(),
-        "entries": entries,
-        "limits": scope.limits,
-        "widening": "requires operator approval",
-    });
-    if let crate::intercept::sidecar::Enforcement::Advisory { reason } = enforcement {
-        v["advisory_reason"] = json!(reason);
-    }
-    v
 }
 
 // ── http_debug (vm-test builds only) ─────────────────────────────────────────────────────────────

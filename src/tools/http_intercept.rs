@@ -6,12 +6,13 @@
 
 use serde_json::{json, Value};
 
+use crate::intercept::ops::OpError;
 use crate::intercept::sidecar::{InterceptError, Interceptor};
 use crate::intercept::worker::rules::{Action, Matcher, RuleSpec};
 use crate::provider::ToolSchema;
 use crate::sandbox::Sandbox;
-use crate::tools::http::{bounded_json, invalid, live, unavailable, with_notices};
-use crate::tools::{Provenance, Tool, ToolOutcome, ToolResult};
+use crate::tools::http::{live, respond};
+use crate::tools::{Provenance, Tool, ToolResult};
 
 pub const BOUND: usize = 8 * 1024;
 
@@ -56,7 +57,7 @@ impl Tool for HttpIntercept {
             Err(r) => return r,
         };
         let action = args.get("action").and_then(Value::as_str).unwrap_or("");
-        let out: Result<Value, ToolResult> = match action {
+        let out: Result<Value, OpError> = match action {
             "add_rule" => {
                 let rule = args.get("rule").cloned().unwrap_or(Value::Null);
                 let matcher = rule.get("matcher").cloned().unwrap_or(json!({}));
@@ -75,7 +76,7 @@ impl Tool for HttpIntercept {
                     })
                     .and_then(|s| s.validate().map(|_| s));
                 match spec {
-                    Err(e) => Err(invalid("http_intercept", e)),
+                    Err(e) => Err(OpError::Invalid(e)),
                     Ok(_) => icpt
                         .add_rule(matcher, act)
                         .await
@@ -84,7 +85,7 @@ impl Tool for HttpIntercept {
                 }
             }
             "remove_rule" => match args.get("rule_id").and_then(Value::as_str) {
-                None => Err(invalid("http_intercept", "remove_rule needs rule_id")),
+                None => Err(OpError::Invalid("remove_rule needs rule_id".into())),
                 Some(id) => icpt
                     .remove_rule(id)
                     .await
@@ -104,34 +105,24 @@ impl Tool for HttpIntercept {
                     .await
                     .map(|_| json!({ "released": h }))
                     .map_err(fail),
-                _ => Err(invalid(
-                    "http_intercept",
-                    "release needs hold_id and decision",
+                _ => Err(OpError::Invalid(
+                    "release needs hold_id and decision".into(),
                 )),
             },
-            other => Err(invalid(
-                "http_intercept",
-                format!("unknown action `{other}`"),
-            )),
+            other => Err(OpError::Invalid(format!("unknown action `{other}`"))),
         };
-        match out {
-            // Held-request summaries name hosts and paths from other tools' traffic: data.
-            Ok(v) => ToolResult::ok(with_notices(bounded_json(&v, BOUND), icpt)).with_provenance(
-                Provenance::Remote {
-                    source: "http:intercept".into(),
-                },
-            ),
-            Err(r) => r,
-        }
+        // Held-request summaries name hosts and paths from other tools' traffic: data.
+        let provenance = Provenance::Remote {
+            source: "http:intercept".into(),
+        };
+        respond("http_intercept", icpt, out, BOUND, Some(provenance))
     }
 }
 
-fn fail(e: InterceptError) -> ToolResult {
+/// The worker validates rules again; its `invalid` is the model's to fix.
+fn fail(e: InterceptError) -> OpError {
     match e {
-        InterceptError::Unavailable(d) => unavailable(&d),
-        InterceptError::Worker { code, message } if code == "invalid" => {
-            invalid("http_intercept", message)
-        }
-        other => ToolOutcome::<()>::failed(other.to_string()).into_tool_result(|_| String::new()),
+        InterceptError::Worker { code, message } if code == "invalid" => OpError::Invalid(message),
+        other => other.into(),
     }
 }

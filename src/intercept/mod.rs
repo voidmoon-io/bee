@@ -5,7 +5,8 @@
 //!
 //! - the **harness** side — [`sidecar`] spawns and talks to the worker, [`creds`] attributes
 //!   traffic to tool calls, [`store`] is the exchange index, and [`query`], [`slice`], [`diff`],
-//!   [`fuzz`], [`passive`] and [`har`] answer the `http_*` tools from it;
+//!   [`fuzz`], [`passive`] and [`har`] answer from it; [`ops`] are the typed operations the `http_*`
+//!   tools adapt;
 //! - the **worker** side — [`worker`] runs as `bee proxy-worker` inside its own kernel scope, the
 //!   *proxy scope*, whose network rules are exactly the resolved target and egress hosts.
 //!
@@ -18,6 +19,7 @@ pub mod creds;
 pub mod diff;
 pub mod fuzz;
 pub mod har;
+pub mod ops;
 pub mod pane;
 pub mod passive;
 pub mod query;

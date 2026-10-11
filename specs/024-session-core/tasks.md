@@ -656,7 +656,7 @@ unchanged.
 
 ### Tests (write first, see them fail)
 
-- [ ] T063 [P] [US6] Create `tests/intercept_ops.rs` (cfg `intercept`, using `tests/support/harness.rs` and
+- [X] T063 [P] [US6] Create `tests/intercept_ops.rs` (cfg `intercept`, using `tests/support/harness.rs` and
   `examples/vuln_target.rs`). Call `bee::intercept::ops::{send, replay, sitemap, read_exchange}` directly
   with an explicit `CallCtx`:
   - an out-of-scope redirect stops at that hop;
@@ -666,32 +666,54 @@ unchanged.
 
 ### Implementation
 
-- [ ] T064 [US6] Create `src/intercept/ops/mod.rs` (declared in `src/intercept/mod.rs`) with `OpError`
+- [X] T064 [US6] Create `src/intercept/ops/mod.rs` (declared in `src/intercept/mod.rs`) with `OpError`
   (`From<InterceptError>`, absorbing the three mappings at `http_send.rs:131`, `http_replay.rs:112` and
   `http_fuzz.rs:103`) and `pub type CallCtx = WireCtx`.
-- [ ] T065 [P] [US6] Create `src/intercept/ops/bound.rs`, moving `bounded_json`, `text_or_binary`, `clip` and
+- [X] T065 [P] [US6] Create `src/intercept/ops/bound.rs`, moving `bounded_json`, `text_or_binary`, `clip` and
   `b64` from `src/tools/http.rs` and `src/tools/http_send.rs`. Repoint `src/intercept/diff.rs:272` to
   `ops::bound::b64`, which removes the intercept → tools dependency.
-- [ ] T066 [P] [US6] Create `src/intercept/ops/send.rs` with `StructuredRequest`, `build_request` (from
+- [X] T066 [P] [US6] Create `src/intercept/ops/send.rs` with `StructuredRequest`, `build_request` (from
   `http_send.rs:277-384`), and `send` with redirect following and the Target-scope stop (from
   `http_send.rs:114-182, 388-415`), returning `SendResult`.
-- [ ] T067 [P] [US6] Create `src/intercept/ops/replay.rs` with `ReplaySpec`, `replay` (`http_replay.rs:194-262`),
+- [X] T067 [P] [US6] Create `src/intercept/ops/replay.rs` with `ReplaySpec`, `replay` (`http_replay.rs:194-262`),
   `stored_request` (`:122-159`) and `side_of` (`:162-192`).
-- [ ] T068 [P] [US6] Create `src/intercept/ops/fuzz_run.rs` with `FuzzSpec`, `fuzz` (`http_fuzz.rs:114-290`,
+- [X] T068 [P] [US6] Create `src/intercept/ops/fuzz_run.rs` with `FuzzSpec`, `fuzz` (`http_fuzz.rs:114-290`,
   including the store read-back and `insert_fuzz_run`) and `template_from` (`:293-357`). The payload-file
   read stays in the tool.
-- [ ] T069 [P] [US6] Create `src/intercept/ops/sitemap.rs` (`http_sitemap.rs:25-242`) and
+- [X] T069 [P] [US6] Create `src/intercept/ops/sitemap.rs` (`http_sitemap.rs:25-242`) and
   `src/intercept/ops/read.rs`, holding `read_exchange` (`http_get.rs:103-161`) and `scope_view`
   (`http.rs:192-240`).
-- [ ] T070 [US6] In `src/tools/http.rs`, add `pub(crate) fn respond(icpt, Result<Value, OpError>, bound,
+- [X] T070 [US6] In `src/tools/http.rs`, add `pub(crate) fn respond(icpt, Result<Value, OpError>, bound,
   provenance) -> ToolResult`, absorbing `live`/`unavailable`/`with_notices`. Rewrite each of
   `src/tools/http_{send,replay,fuzz,sitemap,get,history,leads,intercept}.rs` and `http_scope` as: schema +
   argument parsing into the op spec + one op call + `respond`. Remove the imports between tools.
-- [ ] T071 [US6] Delete `CallOrigin::Fuzz` (`src/sandbox.rs:69-70`), its arm in `src/intercept/creds.rs:146`,
+- [X] T071 [US6] Delete `CallOrigin::Fuzz` (`src/sandbox.rs:69-70`), its arm in `src/intercept/creds.rs:146`,
   and the "or `fuzz:<run>`" text in `src/intercept/control.rs:31` (FR-038).
 - [ ] T072 [US6] Run the gate plus `cargo test --features intercept --test intercept_tools --test
   intercept_replay --test intercept_fuzz --test intercept_rules --test intercept_leads --test
   fail_closed_tools --test tool_output_framing`, all unchanged. Open PR 6.
+
+**As built — PR 6:**
+
+- `src/intercept/ops/{mod,bound,send,replay,fuzz_run,sitemap,read}.rs` hold every piece of Interceptor
+  logic the tools had. `src/intercept` no longer imports `crate::tools`, and no `http_*` tool imports
+  another.
+- `OpError::Refused` carries an ops-level `Refusal` (`OutOfScope | EgressOnly | LimitExceeded`) plus an
+  optional `note`, rather than the tools' `UnavailableReason`. This keeps the dependency pointing one
+  way. `http::op_error` maps it, and `NotGranted` (the fuzz payload file's `cat`) stays in the adapter.
+- `respond` takes the tool name, because `invalid_args` names the tool. `respond_text` serves
+  `http_history`, which bounds its own body by dropping rows. `live` stays a separate pre-call check,
+  since an op needs a live `&Interceptor`.
+- `SendResult.refused` is the typed `Refusal`, not `(ProxyEventKind, RawTarget)`. `Hop` serialises to
+  the old `redirects[]` JSON, and `Preview` carries the content type, headers and body preview.
+- `FuzzSpec` holds the parsed `Template` and optional `rps`/`concurrency`, which the op clamps to the
+  policy. `FuzzResult` is `{ run_id, summary }`.
+- `sitemap`, `read_exchange` and `template_from` are sync, because nothing in them awaits.
+  `read_exchange` takes the content bound explicitly.
+- The `structured` unit tests moved to `ops::send` (now over `StructuredRequest`), and `http_send`
+  gained two tests for its argument parsing.
+- Because validation is now split between the adapter and `build_request`, an argument with several
+  faults may report a different first error. Single-fault messages are unchanged.
 
 **Checkpoint**: Interceptor logic lives in one module (US6).
 

@@ -4,11 +4,12 @@
 
 use serde_json::{json, Value};
 
+use crate::intercept::ops::OpError;
 use crate::intercept::sidecar::Interceptor;
 use crate::provider::ToolSchema;
 use crate::sandbox::Sandbox;
-use crate::tools::http::{bounded_json, invalid, live, with_notices};
-use crate::tools::{Tool, ToolOutcome, ToolResult};
+use crate::tools::http::{invalid, live, respond};
+use crate::tools::{Tool, ToolResult};
 
 pub const BOUND: usize = 8 * 1024;
 
@@ -61,13 +62,11 @@ impl Tool for HttpLeads {
             .and_then(Value::as_u64)
             .unwrap_or(20)
             .clamp(1, 100) as u32;
-        match icpt.with_store(|s| s.leads(only_new, limit)) {
-            // Summaries are bee templates and ids are bee's: harness content, not target data.
-            Ok(rows) => ToolResult::ok(with_notices(
-                bounded_json(&json!({ "leads": rows }), BOUND),
-                icpt,
-            )),
-            Err(e) => ToolOutcome::<()>::failed(e.to_string()).into_tool_result(|_| String::new()),
-        }
+        let rows = icpt
+            .with_store(|s| s.leads(only_new, limit))
+            .map(|rows| json!({ "leads": rows }))
+            .map_err(|e| OpError::Failed(e.to_string()));
+        // Summaries are bee templates and ids are bee's: harness content, not target data.
+        respond("http_leads", icpt, rows, BOUND, None)
     }
 }

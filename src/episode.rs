@@ -32,12 +32,9 @@ pub struct LoopOptions {
     /// Optional metrics recorder — one [`crate::metrics::CallRecord`] per model call. `None` (the
     /// default, and what host tests use) records nothing.
     pub metrics: Option<Recorder>,
-    /// Optional per-turn tool-refresh hook (004-mcp-client, FR-043). Called at the top of each turn
-    /// with `&mut registry`; the MCP path installs a closure that re-registers tools when an MCP
-    /// server sent `tools/list_changed`. rmcp-agnostic (a plain closure) so non-MCP callers are
-    /// unaffected. `None` (the default) is a no-op.
-    #[allow(clippy::type_complexity)]
-    pub refresh_tools: Option<Box<dyn Fn(&mut ToolRegistry) + Send + Sync>>,
+    /// A source of tools that can change mid-session — the MCP bridge (004 FR-043). Refreshed at turn
+    /// start through [`crate::turn::RefreshHook`] (024 FR-030). `None` (the default): nothing to refresh.
+    pub tool_refresh: Option<std::sync::Arc<dyn crate::turn::ToolRefresh>>,
     /// Dynamic capability grants (007-dynamic-grants). `None` ⇒ escalation is off and the loop
     /// behaves exactly as before. When set, the loop builds an [`crate::grants::ActivePolicy`] and
     /// drives the escalation hooks each step.
@@ -53,7 +50,7 @@ impl Default for LoopOptions {
             max_retries: 5,
             progress: None,
             metrics: None,
-            refresh_tools: None,
+            tool_refresh: None,
             escalation: None,
             context: crate::context::ContextInputs::default(),
         }
@@ -79,6 +76,32 @@ fn preview(s: &str, max: usize) -> String {
         format!("{clipped}…")
     } else {
         first.to_string()
+    }
+}
+
+/// Progress lines for what a turn start changed — none when it changed nothing, so an episode without
+/// leases prints exactly what it did before.
+fn emit_turn_start(opts: &LoopOptions, report: &crate::turn::TurnStartReport) {
+    if !report.released.is_empty() {
+        emit(
+            opts,
+            format!("  lease released: {}", report.released.join(", ")),
+        );
+    }
+    if !report.expired.is_empty() {
+        emit(
+            opts,
+            format!("  lease expired: {}", report.expired.join(", ")),
+        );
+    }
+    if !report.removed_tools.is_empty() {
+        emit(
+            opts,
+            format!("  tools withdrawn: {}", report.removed_tools.join(", ")),
+        );
+    }
+    if let Some(e) = &report.narrow_error {
+        emit(opts, format!("  WARNING: scope narrowing: {e}"));
     }
 }
 
@@ -235,11 +258,19 @@ pub async fn run_loop(
             break;
         }
 
-        // Refresh MCP tools if a server sent `tools/list_changed` since last turn (FR-043), then take
-        // a fresh schema snapshot for this turn.
-        if let Some(refresh) = &opts.refresh_tools {
-            refresh(registry);
-        }
+        // The top of the model turn (024): hooks may release leases, leases whose lifetime ran out
+        // expire, the scope narrows if either happened, and the MCP tools refresh if they changed.
+        // Then a fresh schema snapshot for this turn.
+        let report = crate::turn::turn_start(
+            index,
+            opts.escalation.as_ref().map_or(&[], |e| e.hooks.as_slice()),
+            active_policy.as_mut(),
+            sandbox,
+            registry,
+            opts.tool_refresh.as_ref(),
+        )
+        .await;
+        emit_turn_start(opts, &report);
         let schemas = registry.schemas();
 
         // Harness notes for this turn (019 US8: "N new passive leads", 025 reminders) — bee's own
@@ -894,7 +925,9 @@ pub async fn run_episode_with(
             hooks,
             consent: std::sync::Arc::new(crate::skills::AllowWithinCeiling),
             timeout: std::time::Duration::from_secs(60),
-            default_ttl: crate::grants::Ttl::Forever,
+            default_ttl: scenario
+                .lease_turns
+                .map_or(crate::grants::Ttl::Forever, crate::grants::Ttl::Turns),
         });
     }
 
@@ -907,13 +940,7 @@ pub async fn run_episode_with(
             crate::mcp::McpBridge::connect(scenario.mcp.clone(), &sandbox).await,
         );
         b.register_into(&mut registry);
-        let hook = b.clone();
-        opts.refresh_tools = Some(Box::new(move |reg: &mut ToolRegistry| {
-            if hook.take_dirty() {
-                reg.remove_mcp_tools();
-                hook.register_into(reg);
-            }
-        }));
+        opts.tool_refresh = Some(b.clone());
         b
     };
 
@@ -934,7 +961,7 @@ pub async fn run_episode_with(
     // the scope cgroup) before the scope itself is torn down.
     #[cfg(feature = "mcp")]
     {
-        opts.refresh_tools = None;
+        opts.tool_refresh = None;
         drop(bridge);
     }
     // A scope that will not empty means something survived the episode and is about to lose its
@@ -1170,6 +1197,7 @@ mod mcp_cgroup_spike {
         )
         .unwrap();
         let scn = Scenario {
+            lease_turns: None,
             context: Default::default(),
             id: "mcp-spike".into(),
             policy_path: policy,

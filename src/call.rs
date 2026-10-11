@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::grants::escalate::{escalate, EscalateOutcome, LoopEscalation};
 use crate::grants::{ActivePolicy, GrantOrigin};
-use crate::hooks::{Flow, StepEvent};
+use crate::hooks::StepEvent;
 use crate::provider::ToolCall;
 use crate::proxy_event::ProxyEvent;
 use crate::sandbox::{CallContext, CallOrigin, Sandbox};
@@ -108,6 +108,8 @@ pub struct CallOutcome {
     pub timed_out: bool,
     /// Every widen cycle run during the call, in order.
     pub escalations: Vec<EscalationRecord>,
+    /// A hook refused the call before it ran (FR-031): the tool never executed, and `result` says so.
+    pub refused_by_hook: Option<String>,
 }
 
 impl CallOutcome {
@@ -147,6 +149,7 @@ impl CallOutcome {
             escalations: self.escalations.clone(),
             retried: self.retried,
             timed_out: self.timed_out,
+            refused_by_hook: self.refused_by_hook.clone(),
         }
     }
 }
@@ -177,11 +180,26 @@ pub async fn run_call(
     };
     let mut escalations = Vec::new();
 
-    // 1. Proactive escalation: a hook may ask for a grant before the call runs (a loaded skill's
-    //    `requires`). The call then runs under the possibly-widened scope.
+    // 1. Before the call: a hook may refuse it, and then it never runs (FR-031); or ask for a grant
+    //    (a loaded skill's `requires`), and the call then runs under the possibly-widened scope.
     if let Some(e) = esc.as_mut() {
-        if let Some(rec) = proactive(e, tc, sandbox, registry).await {
-            escalations.push(rec);
+        match before_call(e, tc, sandbox, registry).await {
+            Before::Refused(reason) => {
+                return CallOutcome {
+                    result: ToolResult::refused_by_hook(&reason),
+                    audit: Vec::new(),
+                    denied_attempt_audit: Vec::new(),
+                    proxy_audit: Vec::new(),
+                    proxy_events: Vec::new(),
+                    denied_attempt_proxy_events: Vec::new(),
+                    retried: false,
+                    timed_out: false,
+                    escalations,
+                    refused_by_hook: Some(reason),
+                }
+            }
+            Before::Run(Some(rec)) => escalations.push(rec),
+            Before::Run(None) => {}
         }
     }
 
@@ -273,6 +291,7 @@ pub async fn run_call(
         retried,
         timed_out,
         escalations,
+        refused_by_hook: None,
     }
 }
 
@@ -328,17 +347,28 @@ async fn widen(
     EscalationRecord { trigger, outcome }
 }
 
-/// The proactive step (007 US2): dispatch `BeforeToolCall`; on a proposed grant, widen.
-async fn proactive(
+/// What the hooks decided before a call.
+enum Before {
+    /// Run it — after the proactive widen cycle, if a hook proposed one.
+    Run(Option<EscalationRecord>),
+    /// Do not run it.
+    Refused(String),
+}
+
+/// Dispatch `BeforeToolCall`: a refusal stops the call (FR-031, and outranks any proposed grant —
+/// FR-034); a proposed grant runs the proactive widen cycle (007 US2).
+async fn before_call(
     e: &mut Escalation<'_>,
     tc: &ToolCall,
     sandbox: &mut Sandbox,
     registry: &mut ToolRegistry,
-) -> Option<EscalationRecord> {
-    let Flow::Escalate(delta) =
-        crate::hooks::dispatch(&e.config.hooks, &StepEvent::BeforeToolCall(tc)).await
-    else {
-        return None;
+) -> Before {
+    let d = crate::hooks::dispatch(&e.config.hooks, &StepEvent::BeforeToolCall(tc)).await;
+    if let Some(reason) = d.deny {
+        return Before::Refused(reason);
+    }
+    let Some(delta) = d.escalate else {
+        return Before::Run(None);
     };
     let skill = tc
         .arguments
@@ -346,7 +376,7 @@ async fn proactive(
         .and_then(|v| v.as_str())
         .unwrap_or("skill")
         .to_string();
-    Some(
+    Before::Run(Some(
         widen(
             e,
             Trigger::Proactive,
@@ -356,7 +386,7 @@ async fn proactive(
             registry,
         )
         .await,
-    )
+    ))
 }
 
 /// The reactive step (007 US1): dispatch `KernelDenial` for the first denial; on a proposed grant
@@ -374,9 +404,9 @@ async fn reactive(
         target,
         call: tc,
     };
-    let Flow::Escalate(delta) = crate::hooks::dispatch(&e.config.hooks, &ev).await else {
-        return None;
-    };
+    let delta = crate::hooks::dispatch(&e.config.hooks, &ev)
+        .await
+        .escalate?;
     Some(
         widen(
             e,
@@ -414,9 +444,9 @@ async fn proxy_refusal(
         port: ev.port,
         call: tc,
     };
-    let Flow::Escalate(delta) = crate::hooks::dispatch(&e.config.hooks, &step).await else {
-        return None;
-    };
+    let delta = crate::hooks::dispatch(&e.config.hooks, &step)
+        .await
+        .escalate?;
     Some(
         widen(
             e,

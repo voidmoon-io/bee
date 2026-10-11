@@ -70,10 +70,9 @@ pub struct ReplConfig {
     /// Pre-rendered `/mcp` output: configured MCP servers, their status, and the domain policy
     /// (004-mcp-client, US10). `None` when MCP is not configured / the `mcp` feature is off.
     pub mcp_summary: Option<String>,
-    /// Optional per-turn tool-refresh hook (004-mcp-client, FR-043): re-registers MCP tools when a
-    /// server sent `tools/list_changed`. rmcp-agnostic (a plain closure); `None` is a no-op.
-    #[allow(clippy::type_complexity)]
-    pub refresh_tools: Option<Box<dyn Fn(&mut ToolRegistry) + Send + Sync>>,
+    /// A source of tools that can change mid-session — the MCP bridge (004 FR-043). Refreshed at turn
+    /// start through [`crate::turn::RefreshHook`] (024 FR-030). `None`: nothing to refresh.
+    pub tool_refresh: Option<Arc<dyn crate::turn::ToolRefresh>>,
     /// Discovered skills (006-skills), shared with the `skill` tool. Backs the `/skill` command and
     /// the system-prompt nudge. Defaults to an empty registry (no skills, no `/skill`).
     pub skills: Arc<crate::skills::SkillRegistry>,
@@ -108,6 +107,10 @@ pub struct ReplState {
     pub context: Option<crate::context::ContextManager>,
     /// bee's notes for the next model call, recorded on the turn they precede (025 FR-028).
     pub pending: Vec<crate::transcript::HarnessNote>,
+    /// Model turns since the session began (024 D3): what lease lifetimes are counted in, and the turn
+    /// a call is stamped with. Monotonic across exchanges, and not reset by `/clear` — a lease
+    /// outlives the conversation that asked for it.
+    pub model_turns: u32,
 }
 
 impl ReplState {
@@ -116,6 +119,7 @@ impl ReplState {
         ReplState {
             context: Some(context),
             pending: Vec::new(),
+            model_turns: 0,
         }
     }
 
@@ -146,16 +150,14 @@ impl ReplState {
 ///
 /// A grant outlives the exchange that requested it — the point of a capability is that the next
 /// message can use it — but [`run_exchange`] takes `&ReplConfig`, so the mutable half lives behind a
-/// lock rather than in the signature. The turn counter is monotonic across exchanges for the same
-/// reason: a `Ttl::Turns` lease measured per-exchange would silently reset every time the user
-/// pressed enter.
+/// lock rather than in the signature. Lease lifetimes are counted in model turns by
+/// [`ReplState::model_turns`], which is monotonic across exchanges: a `Ttl::Turns` lease measured
+/// per exchange would silently reset every time the user pressed enter.
 pub struct ReplEscalation {
     /// The static half: base, ceiling, hooks, consent sink, timeout, default TTL.
     pub config: crate::grants::escalate::LoopEscalation,
     /// The mutable half. `tokio::sync::Mutex` because it is held across the consent `await`.
     pub active: tokio::sync::Mutex<crate::grants::ActivePolicy>,
-    /// Turns elapsed since the session began, for lease TTL accounting.
-    turn: std::sync::atomic::AtomicU32,
 }
 
 impl ReplEscalation {
@@ -165,13 +167,7 @@ impl ReplEscalation {
         ReplEscalation {
             config,
             active: tokio::sync::Mutex::new(active),
-            turn: std::sync::atomic::AtomicU32::new(0),
         }
-    }
-
-    /// The current session turn, incrementing it for the next caller.
-    fn next_turn(&self) -> u32 {
-        self.turn.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -188,7 +184,7 @@ impl Default for ReplConfig {
             policy_label: "none".to_string(),
             mascot: true,
             mcp_summary: None,
-            refresh_tools: None,
+            tool_refresh: None,
             skills: Arc::new(crate::skills::SkillRegistry::default()),
             visual: crate::config::VisualConfig::default(),
             escalation: None,
@@ -509,6 +505,25 @@ async fn consume_stream(
 /// Tell the user what an escalation did. Only a grant or a refusal is worth a line: `AlreadyHeld` is
 /// the ordinary case — a skill re-stating capabilities it was given at startup — and narrating it on
 /// every call would be noise that trains the user to ignore the ones that matter.
+/// What a turn start changed, as info lines — none when it changed nothing.
+fn report_turn_start(output: &dyn ReplOutput, report: &crate::turn::TurnStartReport) {
+    for id in &report.released {
+        output.info(&format!("capability lease {id} released"));
+    }
+    for id in &report.expired {
+        output.info(&format!("capability lease {id} expired"));
+    }
+    if !report.removed_tools.is_empty() {
+        output.info(&format!(
+            "tools withdrawn: {}",
+            report.removed_tools.join(", ")
+        ));
+    }
+    if let Some(e) = &report.narrow_error {
+        output.error(&format!("scope narrowing: {e}"));
+    }
+}
+
 fn report_escalation(
     output: &dyn ReplOutput,
     subject: &str,
@@ -560,9 +575,32 @@ pub async fn run_exchange(
         // Fold in any steering the user typed since the last model call — the agent catches it now.
         drain_steering(steering, conversation, output);
 
-        // Refresh MCP tools if a server sent `tools/list_changed` (FR-043), then snapshot schemas.
-        if let Some(refresh) = &config.refresh_tools {
-            refresh(&mut *registry);
+        // The top of the model turn (024): one session-wide model-turn count, then the turn start —
+        // released and expired leases narrow the scope, the MCP tools refresh if they changed.
+        let model_turn = {
+            let mut state = lock_state(config);
+            let t = state.model_turns;
+            state.model_turns += 1;
+            t
+        };
+        {
+            let mut active = match config.escalation.as_ref() {
+                Some(esc) => Some(esc.active.lock().await),
+                None => None,
+            };
+            let report = crate::turn::turn_start(
+                model_turn,
+                config
+                    .escalation
+                    .as_ref()
+                    .map_or(&[], |e| e.config.hooks.as_slice()),
+                active.as_deref_mut(),
+                sandbox,
+                registry,
+                config.tool_refresh.as_ref(),
+            )
+            .await;
+            report_turn_start(output, &report);
         }
         let schemas = registry.schemas();
 
@@ -734,14 +772,14 @@ pub async fn run_exchange(
                 (Some(esc), Some(active)) => Some(crate::call::Escalation {
                     config: &esc.config,
                     active,
-                    lease_turn: esc.next_turn(),
+                    lease_turn: model_turn,
                 }),
                 _ => None,
             };
             let outcome = crate::call::run_call(
                 crate::call::CallInput {
                     call: tc,
-                    turn: turns.len() as u32,
+                    turn: model_turn,
                     origin: crate::sandbox::CallOrigin::Tool,
                     timeout: crate::call::TimeoutPolicy::PerCall(Duration::from_secs(
                         config.tool_timeout_secs,

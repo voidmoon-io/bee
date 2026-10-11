@@ -17,6 +17,7 @@ const FLAG: &str = "FLAG{bee-ctf-2026}";
 
 fn ctf_scenario(turn_limit: u32) -> Scenario {
     Scenario {
+        lease_turns: None,
         context: Default::default(),
         id: "ctf-test".into(),
         policy_path: "/dev/null".into(),
@@ -186,6 +187,7 @@ fn score_report_counts_techniques() {
             escalations: Vec::new(),
             retried: false,
             timed_out: false,
+            refused_by_hook: None,
             proxy_events: Vec::new(),
             call: ToolCall {
                 id: "c".into(),

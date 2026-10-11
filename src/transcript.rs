@@ -91,6 +91,9 @@ pub struct RecordedCall {
     /// An attempt hit the time limit. When it was a retry, the attempt before it stands (FR-025).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub timed_out: bool,
+    /// A hook refused the call before it ran (024 FR-031); the tool never executed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused_by_hook: Option<String>,
 }
 
 /// The interception session a transcript was recorded under (019 T044): how `[policy.http]` was

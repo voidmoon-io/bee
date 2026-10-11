@@ -372,13 +372,8 @@ async fn repl(args: ReplArgs) -> ExitCode {
             let bridge = std::sync::Arc::new(bee::mcp::McpBridge::connect(policy, &sbox).await);
             bridge.register_into(&mut registry);
             let summary = bridge.summary();
-            let hook = bridge.clone();
-            let refresh: Box<dyn Fn(&mut bee::ToolRegistry) + Send + Sync> = Box::new(move |reg| {
-                if hook.take_dirty() {
-                    reg.remove_mcp_tools();
-                    hook.register_into(reg);
-                }
-            });
+            // Refreshed at each turn start through the hook mechanism (024 FR-030).
+            let refresh: std::sync::Arc<dyn bee::turn::ToolRefresh> = bridge.clone();
             (Some(bridge), Some(summary), Some(refresh))
         }
         None => (None, None, None),
@@ -395,7 +390,7 @@ async fn repl(args: ReplArgs) -> ExitCode {
         #[cfg(feature = "mcp")]
         mcp_summary,
         #[cfg(feature = "mcp")]
-        refresh_tools: mcp_refresh,
+        tool_refresh: mcp_refresh,
         skills: skills.clone(),
         visual: cfg.visual,
         escalation,

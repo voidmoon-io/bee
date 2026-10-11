@@ -204,6 +204,7 @@ fn enforcement_trace_extracts_audit() {
         escalations: Vec::new(),
         retried: false,
         timed_out: false,
+        refused_by_hook: None,
         proxy_events: Vec::new(),
         call: ToolCall {
             id: "c1".into(),

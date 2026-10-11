@@ -369,6 +369,19 @@ async fn connect_remote(
     finalize_connection(cfg, running, shared).await
 }
 
+/// The bridge's tools change when a server sends `tools/list_changed`; turn start refreshes them
+/// through [`crate::turn::RefreshHook`] (004 FR-043, 024 FR-030).
+impl crate::turn::ToolRefresh for McpBridge {
+    fn take_dirty(&self) -> bool {
+        McpBridge::take_dirty(self)
+    }
+
+    fn reregister(&self, registry: &mut ToolRegistry) {
+        registry.remove_mcp_tools();
+        self.register_into(registry);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

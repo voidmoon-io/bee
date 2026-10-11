@@ -12,6 +12,7 @@ use bee::{run_loop, LoopOptions};
 
 fn scenario(turn_limit: u32) -> Scenario {
     Scenario {
+        lease_turns: None,
         context: Default::default(),
         id: "loop-test".into(),
         policy_path: "/dev/null".into(),

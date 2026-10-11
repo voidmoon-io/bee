@@ -370,11 +370,16 @@ async fn s5_proxy_refusal_granted_and_retried() {
     case.proxy = vec![vec![refusal("c1", "10.0.0.9", 80)], Vec::new()];
     let (e, r) = (episode(&case).await, repl(&case).await);
     assert_same_calls(&e, &r);
-    // The widening reaches the proxy, the call is retried once, and the record is the retry's —
-    // including its (empty) proxy events.
+    // The widening reaches the proxy, the call is retried once, and the result is the retry's.
     assert_eq!((e.asked, e.attempts), (1, 2));
     assert_eq!(e.http_updates, vec![vec!["10.0.0.9:80".to_string()]]);
     assert_eq!(e.calls, vec![call("200 OK", false, &[])]);
+
+    // DRIFT FR-021: the refusal that justified the widening. Both loops replace the call's proxy
+    // events with the retry's, so it is in neither record; PR 3 keeps it in
+    // `denied_attempt_proxy_events`.
+    assert!(e.calls[0].proxy.is_empty());
+    assert!(r.calls[0].proxy.is_empty());
 }
 
 // ── 6. A retry runs into the time limit ─────────────────────────────────────────────────────────

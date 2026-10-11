@@ -347,7 +347,8 @@ then confirm each tool's output for the same inputs is unchanged.
   retry; a call MUST be retried at most once in total.
 - **FR-020**: A retry MUST happen only when the escalation widened the scope; a request that was already
   held, refused, or timed out MUST NOT be retried.
-- **FR-021**: The audit trail MUST retain the denial that triggered an escalation, in both modes.
+- **FR-021**: The audit trail MUST retain the denial that triggered an escalation, in both modes and at
+  both layers: the kernel denial, or the proxy refusal, that the call was retried after.
 - **FR-022**: Proxy-scope denials MUST be reported as the proxy's and MUST NOT be counted as, or tag the
   result as, the tool's denial, in both modes. Proxy-scope events MUST NOT drive tool-scope escalation.
 - **FR-023**: Kernel audit events produced by a call MUST be attributed to that call even when they arrive
@@ -415,7 +416,9 @@ then confirm each tool's output for the same inputs is unchanged.
 These were settled before specification and are not open questions:
 
 - **D1 — Pre-retry denial is kept.** The denial that triggered an escalation stays in the audit trail in
-  both modes. It is the event that justified widening scope (FR-021).
+  both modes. It is the event that justified widening scope (FR-021). This holds for a proxy refusal
+  as much as a kernel denial (raised by PR 1's characterization: both loops replace the call's proxy
+  events with the retry's).
 - **D2 — The two denial layers are never conflated.** Proxy-scope denials are reported separately from,
   and never counted as, the tool's denials, everywhere (FR-022).
 - **D3 — A lease "turn" is a model turn**, in both modes (FR-029).

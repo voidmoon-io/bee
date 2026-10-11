@@ -114,7 +114,8 @@ the first attempt and any retry share it.
 | `audit` | `Vec<AuditEvent>` | Tool scope, including late events (FR-023). |
 | `denied_attempt_audit` | `Vec<AuditEvent>` | The attempt that triggered a retry (FR-021). Empty if no retry. |
 | `proxy_audit` | `Vec<AuditEvent>` | Proxy-scope kernel events, `scope_id = "proxy"`. |
-| `proxy_events` | `Vec<ProxyEvent>` | |
+| `proxy_events` | `Vec<ProxyEvent>` | The final attempt's. |
+| `denied_attempt_proxy_events` | `Vec<ProxyEvent>` | The attempt a proxy refusal retried (FR-021). Empty if no proxy retry. |
 | `retried` | `bool` | At most one retry per call (FR-019). |
 | `timed_out` | `bool` | |
 | `refused_by_hook` | `Option<String>` | A `BeforeToolCall → Deny`; the tool never ran. |
@@ -124,7 +125,8 @@ Derived:
 
 - `tool_denials()` counts denials in `audit` and `denied_attempt_audit`, never in `proxy_audit` (FR-022).
 - `to_recorded() -> RecordedCall` gives the transcript form. `RecordedCall` gains
-  `denied_attempt_audit`, `proxy_audit`, `escalations`, `timed_out`, `retried`, all with
+  `denied_attempt_audit`, `denied_attempt_proxy_events`, `proxy_audit`, `escalations`, `timed_out`,
+  `retried`, all with
   `serde(default, skip_serializing_if = empty/false)`.
 
 ## Hook types

@@ -204,7 +204,8 @@ record identical normalized audits.
   - kernel → granted → retry (`retried`, `denied_attempt_audit` holds the denial — FR-021);
   - kernel → refused (no retry);
   - kernel → `AlreadyHeld` (no retry — FR-020);
-  - proxy refusal → granted → retry in a new call;
+  - proxy refusal → granted → retry in a new call (`denied_attempt_proxy_events` holds the refusal —
+    FR-021);
   - kernel and proxy in the same call (one retry total — FR-019);
   - retry timeout under `Deadline` and under `PerCall`: in both, the retry gets only the time the first
     attempt left and is not started when none remains (FR-024), and `result` and `audit` come from the same
@@ -236,7 +237,7 @@ record identical normalized audits.
   `escalate()` and the hooks in `escalate.rs`. Add a compile-time `Send` assertion:
   `fn _assert_send() { fn s<T: Send>(_: T) {} s(run_call(..)) }`, or the equivalent static check.
 - [ ] T022 [US3] In `src/transcript.rs`, extend `RecordedCall` (`:55-66`) with `denied_attempt_audit`,
-  `proxy_audit`, `escalations` (serialized form of `EscalationRecord`), `retried` and `timed_out`, all
+  `denied_attempt_proxy_events`, `proxy_audit`, `escalations` (serialized form of `EscalationRecord`), `retried` and `timed_out`, all
   `#[serde(default, skip_serializing_if = ...)]`. Fix the doc at `:117` so `audit_trail` is described as
   the concatenation of every call's `denied_attempt_audit + audit + proxy_audit`.
 - [ ] T023 [US3] Replace the per-call block in `src/episode.rs::run_loop` (`:299-463`) with `run_call(...,

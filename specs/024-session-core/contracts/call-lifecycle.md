@@ -29,7 +29,8 @@ pub async fn run_call(input: CallInput<'_>, sandbox: &mut Sandbox, registry: &mu
 5. `end_call` → proxy events.
 6. If not yet retried and a proxy event is `refused_out_of_scope`: dispatch `ProxyRefusal`; widen cycle
    (Target scope); record. If granted and time remains → `begin_call` anew, execute, settle, drain,
-   `end_call`; the earlier attempt's audit moves to `denied_attempt_audit`.
+   `end_call`; the earlier attempt's audit moves to `denied_attempt_audit` and its proxy events (the
+   refusal) to `denied_attempt_proxy_events` (FR-021).
 7. `drain_sidecar_audit` → `proxy_audit`; then a final `drain_audit` → appended to `audit` (late events).
 
 ## Guarantees

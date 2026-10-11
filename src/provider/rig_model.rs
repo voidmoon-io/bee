@@ -24,8 +24,8 @@ use rig_core::OneOrMany;
 
 use crate::config::{Effort, ProviderConfig, ProviderType, ThinkingMode};
 use crate::provider::{
-    Conversation, EventStream, Message as HMessage, Model, ModelError, StopReason, StreamEvent,
-    ToolCall, ToolSchema, Turn, Usage,
+    framing, Conversation, EventStream, Message as HMessage, Model, ModelError, StopReason,
+    StreamEvent, ToolCall, ToolSchema, Turn, Usage,
 };
 
 /// Default output token cap for providers (Anthropic *requires* `max_tokens`).
@@ -304,10 +304,19 @@ fn to_completion_request(
                     });
                 }
             }
+            // The one place a tool result is rendered for a provider (019 P1): error status as a
+            // prefix (rig cannot carry the flag), child/remote content inside a nonced envelope.
             HMessage::ToolResult {
-                call_id, content, ..
+                call_id,
+                name,
+                content,
+                is_error,
+                provenance,
             } => {
-                history.push(Message::tool_result(call_id, content.clone()));
+                history.push(Message::tool_result(
+                    call_id,
+                    framing::frame_tool_result(name, content, *is_error, provenance),
+                ));
             }
         }
     }
@@ -326,7 +335,13 @@ fn to_completion_request(
 
     Ok(CompletionRequest {
         model: None,
-        preamble: Some(convo.system.clone()),
+        // The envelope's explanation rides with every request, after the scenario's own prompt, so
+        // no session can reach a provider without it (contracts/model-framing.md §3).
+        preamble: Some(format!(
+            "{}\n\n{}",
+            convo.system,
+            framing::UNTRUSTED_DATA_CLAUSE
+        )),
         chat_history,
         documents: Vec::new(),
         tools: tool_defs,
@@ -471,6 +486,7 @@ mod tests {
                     name: "read_file".to_string(),
                     content: "myhost\n".to_string(),
                     is_error: false,
+                    provenance: crate::provider::Provenance::Harness,
                 },
             ],
         }
@@ -498,7 +514,10 @@ mod tests {
             None,
         )
         .expect("build request");
-        assert_eq!(req.preamble.as_deref(), Some("SYSTEM-PROMPT"));
+        // The scenario prompt first, then the fixed untrusted-data clause (019 P1).
+        let preamble = req.preamble.as_deref().expect("preamble");
+        assert!(preamble.starts_with("SYSTEM-PROMPT\n\n"), "{preamble}");
+        assert!(preamble.ends_with(framing::UNTRUSTED_DATA_CLAUSE));
         assert_eq!(req.max_tokens, Some(4096));
         assert_eq!(req.temperature, Some(0.0));
         assert_eq!(req.tools.len(), 1);
@@ -545,6 +564,30 @@ mod tests {
             wire.contains("myhost"),
             "tool result content missing: {wire}"
         );
+    }
+
+    // 019 P1: the adapter renders every tool result through `framing` — an error reaches the
+    // provider request distinguishable from output, and child content arrives enveloped.
+    #[test]
+    fn tool_results_reach_the_request_framed() {
+        let mut convo = sample_convo();
+        convo.messages.push(HMessage::ToolResult {
+            call_id: "call-2".into(),
+            name: "bash".into(),
+            content: "Permission denied".into(),
+            is_error: true,
+            provenance: crate::provider::Provenance::Child,
+        });
+        let req = to_completion_request(&convo, &sample_tools(), Some(64), None, None)
+            .expect("build request");
+        let wire = serde_json::to_string(&req.chat_history).expect("serialize chat_history");
+        assert!(
+            wire.contains("[tool error] <untrusted-data source=\\\"tool:bash\\\" nonce="),
+            "{wire}"
+        );
+        // A harness success is passed through untouched.
+        assert!(wire.contains("myhost\\n"), "{wire}");
+        assert!(!wire.contains("[tool error] myhost"), "{wire}");
     }
 
     fn anthropic_cfg(

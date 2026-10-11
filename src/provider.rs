@@ -10,8 +10,35 @@ use futures_util::stream::{self, BoxStream};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod framing;
 pub mod mock_model;
 pub mod rig_model;
+
+/// Where a tool result's content came from — which decides how it is framed for the model
+/// (019-http-intercept P1, contracts/model-framing.md).
+///
+/// Content bee composed itself is passed through as-is. Content a scoped child printed, or a network
+/// peer sent, is *data the model must not take instructions from*, and is wrapped in a nonced
+/// `<untrusted-data>` envelope by [`framing::frame_tool_result`] — the single place results are
+/// rendered for a provider.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Provenance {
+    /// Composed entirely by bee: refusal messages, `cvss`, `http_scope`.
+    #[default]
+    Harness,
+    /// stdout/stderr of a scoped child: `bash`, `search`, file reads, scanner output.
+    Child,
+    /// Bytes from a network peer, named by `source` (`http:<exchange-id>`, `mcp:<server>`).
+    Remote { source: String },
+}
+
+impl Provenance {
+    /// For `skip_serializing_if`: transcripts written before 019 stay byte-identical for harness results.
+    pub fn is_harness(&self) -> bool {
+        matches!(self, Provenance::Harness)
+    }
+}
 
 /// The ordered message log the loop maintains and re-sends each turn.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -55,6 +82,10 @@ pub enum Message {
         name: String,
         content: String,
         is_error: bool,
+        /// How the content is framed for the model (019 P1). Defaults to `Harness` so conversations
+        /// serialised before it deserialise unchanged.
+        #[serde(default, skip_serializing_if = "Provenance::is_harness")]
+        provenance: Provenance,
     },
 }
 

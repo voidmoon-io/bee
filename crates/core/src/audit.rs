@@ -42,12 +42,55 @@ fn decision_str(d: u8) -> &'static str {
     }
 }
 
+/// Size of the binary destination a connect record carries (019 P5): `family: u16 LE`,
+/// `port: u16 BE`, then the 16-byte address laid out exactly like `NetKey.addr` — IPv4 in the first
+/// four bytes with the remaining twelve zero, IPv6 in all sixteen.
+pub const CONNECT_TARGET_LEN: usize = 20;
+
+const AF_INET: u16 = 2;
+const AF_INET6: u16 = 10;
+
+/// Format a connect record's binary destination as `ip:port` (`[v6]:port` for IPv6).
+///
+/// An empty target — a record from an eBPF object older than P5 — formats as `""`, which
+/// [`crate`] consumers already treat as "destination unknown". Anything else that is not exactly the
+/// documented encoding formats as `<malformed>` rather than as a plausible-looking address: a wrong
+/// destination in an audit record is worse than an admittedly missing one, because a grant built from
+/// it would widen the scope to the wrong place.
+fn format_connect_target(t: &[u8]) -> String {
+    if t.is_empty() {
+        return String::new();
+    }
+    if t.len() != CONNECT_TARGET_LEN {
+        return "<malformed>".into();
+    }
+    let family = u16::from_le_bytes([t[0], t[1]]);
+    let port = u16::from_be_bytes([t[2], t[3]]);
+    let addr = &t[4..20];
+    match family {
+        AF_INET if addr[4..].iter().all(|b| *b == 0) => {
+            let ip = std::net::Ipv4Addr::new(addr[0], addr[1], addr[2], addr[3]);
+            format!("{ip}:{port}")
+        }
+        AF_INET6 => {
+            let mut a = [0u8; 16];
+            a.copy_from_slice(addr);
+            format!("[{}]:{port}", std::net::Ipv6Addr::from(a))
+        }
+        _ => "<malformed>".into(),
+    }
+}
+
 impl AuditEvent {
     /// Build an event from a kernel record. `ts` is the wall-clock time the user-space consumer maps
     /// the record's monotonic `ts_ns` to (the monotonic→wall conversion is a loader concern).
     pub fn from_record(rec: &AuditRecord, scope_id: Option<String>, ts: OffsetDateTime) -> Self {
         let len = (rec.target_len as usize).min(rec.target.len());
-        let target = String::from_utf8_lossy(&rec.target[..len]).into_owned();
+        let target = if rec.op == Op::Connect as u8 {
+            format_connect_target(&rec.target[..len])
+        } else {
+            String::from_utf8_lossy(&rec.target[..len]).into_owned()
+        };
         AuditEvent {
             ts: ts
                 .format(&time::format_description::well_known::Rfc3339)
@@ -107,5 +150,80 @@ mod tests {
         let json = ev.to_json();
         assert!(json.contains("\"op\":\"file_open\""));
         assert!(json.contains("\"target\":\"/home/jg/.ssh/id_rsa\""));
+    }
+
+    // ── 019 P5: a kernel connect denial names its destination (FR-009, research R13) ─────────────
+
+    /// A connect record carrying the 20-byte binary destination the eBPF hook writes:
+    /// `family: u16 LE`, `port: u16 BE`, `addr: [u8; 16]` laid out like `NetKey.addr`.
+    fn connect_rec(family: u16, port: u16, addr: [u8; 16], target_len: u16) -> AuditRecord {
+        let mut r = rec();
+        r.op = Op::Connect as u8;
+        r.target = [0u8; bee_common::TARGET_MAX];
+        r.target[0..2].copy_from_slice(&family.to_le_bytes());
+        r.target[2..4].copy_from_slice(&port.to_be_bytes());
+        r.target[4..20].copy_from_slice(&addr);
+        r.target_len = target_len;
+        r
+    }
+
+    fn v4(a: [u8; 4]) -> [u8; 16] {
+        let mut out = [0u8; 16];
+        out[..4].copy_from_slice(&a);
+        out
+    }
+
+    fn target_of(r: &AuditRecord) -> String {
+        AuditEvent::from_record(r, None, OffsetDateTime::UNIX_EPOCH).target
+    }
+
+    #[test]
+    fn a_v4_connect_formats_as_ip_port() {
+        assert_eq!(
+            target_of(&connect_rec(2, 443, v4([10, 0, 0, 5]), 20)),
+            "10.0.0.5:443"
+        );
+    }
+
+    #[test]
+    fn a_v4_connect_with_trailing_bytes_is_malformed() {
+        let mut addr = v4([10, 0, 0, 5]);
+        addr[15] = 1;
+        assert_eq!(target_of(&connect_rec(2, 443, addr, 20)), "<malformed>");
+    }
+
+    #[test]
+    fn a_v6_connect_formats_bracketed() {
+        let ip: std::net::Ipv6Addr = "2001:db8::1".parse().unwrap();
+        assert_eq!(
+            target_of(&connect_rec(10, 443, ip.octets(), 20)),
+            "[2001:db8::1]:443"
+        );
+    }
+
+    #[test]
+    fn a_connect_without_a_target_formats_empty() {
+        // Records from an eBPF object older than P5 carry no destination.
+        let mut r = rec();
+        r.op = Op::Connect as u8;
+        r.target_len = 0;
+        assert_eq!(target_of(&r), "");
+    }
+
+    #[test]
+    fn a_connect_target_of_the_wrong_size_or_family_is_malformed() {
+        assert_eq!(
+            target_of(&connect_rec(2, 443, v4([1, 2, 3, 4]), 19)),
+            "<malformed>"
+        );
+        assert_eq!(
+            target_of(&connect_rec(1, 443, v4([1, 2, 3, 4]), 20)),
+            "<malformed>"
+        );
+    }
+
+    #[test]
+    fn a_file_record_is_unchanged() {
+        assert_eq!(target_of(&rec()), "/home/jg/.ssh/id_rsa");
     }
 }

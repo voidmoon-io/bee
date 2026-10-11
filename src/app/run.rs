@@ -11,7 +11,7 @@ use std::process::ExitCode;
 use clap::Args;
 
 use bee::transcript::EpisodeStatus;
-use bee::{run_batch, run_episode, BatchConfig, EpisodeTranscript, Scenario};
+use bee::{run_batch, run_episode_with, BatchConfig, EpisodeOptions, EpisodeTranscript, Scenario};
 
 use crate::app::config::{self, EffectiveConfig, Flags};
 use crate::app::session::{self, EX_DATAERR, EX_IOERR, EX_SOFTWARE, EX_UNAVAILABLE, EX_USAGE};
@@ -97,6 +97,11 @@ pub struct RunArgs {
     /// Required to start an unenforced session — bee will not fall back to one silently.
     #[arg(long, conflicts_with = "policy")]
     pub host: bool,
+    /// Accept `[policy.http]` interception enforced by the proxy alone, when the kernel will not
+    /// block: host mode, a build without `enforce`, or a policy in `mode = "observe"`. Without it
+    /// such a session refuses to start. Deliberately not settable from any configuration file.
+    #[arg(long)]
+    pub http_scope_advisory: bool,
 }
 
 impl RunArgs {
@@ -248,16 +253,27 @@ async fn run(args: RunArgs) -> ExitCode {
         }
     }
 
+    // `[policy.http]` (019): refuse before a provider is contacted when nothing would enforce it
+    // as written — the build lacks interception, or the kernel will not block and the operator
+    // has not said `--http-scope-advisory`.
+    if let Err(detail) = check_http_scope(&scenario, args.host, args.http_scope_advisory) {
+        eprintln!("{CMD}: {detail}");
+        return ExitCode::from(EX_USAGE);
+    }
+
     let session = match session::build(&cfg, CMD) {
         Ok(s) => s,
         Err(e) => return session::fail(CMD, &e),
     };
 
-    let transcript = run_episode(
+    let transcript = run_episode_with(
         session.model.as_ref(),
         &scenario,
         session.key_env.as_deref(),
         progress_sink(args.quiet),
+        EpisodeOptions {
+            http_scope_advisory: args.http_scope_advisory,
+        },
     )
     .await;
 
@@ -276,6 +292,45 @@ async fn run(args: RunArgs) -> ExitCode {
         EpisodeStatus::InfraError { .. } => ExitCode::from(EX_SOFTWARE),
         EpisodeStatus::ApiError { .. } => ExitCode::from(EX_UNAVAILABLE),
         _ => ExitCode::SUCCESS,
+    }
+}
+
+/// The `[policy.http]` gate for a single episode (019 T043/T044). The episode path re-checks; this
+/// copy exists so the refusal is a usage error before anything is contacted.
+fn check_http_scope(scenario: &Scenario, host: bool, advisory_ack: bool) -> Result<(), String> {
+    let policy = match bee_core::Policy::from_path(&scenario.policy_path) {
+        Ok(p) => p,
+        // An unreadable policy is reported where it always was: when the episode loads it.
+        Err(_) => return Ok(()),
+    };
+    if !policy.http.as_ref().is_some_and(|h| h.is_active()) {
+        return Ok(());
+    }
+    #[cfg(not(feature = "intercept"))]
+    {
+        let _ = (host, advisory_ack);
+        Err(
+            "the policy declares [policy.http] targets, but this bee was built without \
+             --features intercept"
+                .into(),
+        )
+    }
+    #[cfg(feature = "intercept")]
+    {
+        let kernel_scope = cfg!(feature = "enforce") && !host;
+        match bee::intercept::session::advisory_reason(&policy, kernel_scope) {
+            Some(reason) if !advisory_ack => {
+                Err(bee::intercept::session::advisory_refusal(&reason))
+            }
+            Some(reason) => {
+                eprintln!(
+                    "{CMD}: {}",
+                    bee::intercept::session::advisory_banner(&reason)
+                );
+                Ok(())
+            }
+            None => Ok(()),
+        }
     }
 }
 

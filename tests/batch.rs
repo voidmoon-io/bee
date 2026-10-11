@@ -199,6 +199,7 @@ fn enforcement_trace_extracts_audit() {
         target: "/etc/shadow".into(),
     };
     let call = RecordedCall {
+        proxy_events: Vec::new(),
         call: ToolCall {
             id: "c1".into(),
             name: "read_file".into(),
@@ -208,6 +209,7 @@ fn enforcement_trace_extracts_audit() {
         audit: vec![denied.clone()],
     };
     let transcript = EpisodeTranscript {
+        http_scope: None,
         scenario_id: "s".into(),
         model_id: "mock/x".into(),
         status: EpisodeStatus::Completed,

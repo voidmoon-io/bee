@@ -46,6 +46,17 @@ fn prepare_episodes(
         let result = Policy::from_path(&scenario.policy_path)
             .map_err(|e| format!("policy {}: {e}", scenario.policy_path.display()))
             .and_then(|policy| {
+                // 019: the interception proxy needs a second scope per episode, which the shared-
+                // engine runner cannot give it until 018's Supervisor. Refused by name, so the
+                // operator learns why, rather than through the plan's `ProxyLoopbackMissing`.
+                if policy.http.as_ref().is_some_and(|h| h.is_active()) {
+                    return Err(
+                        "[policy.http] is not supported by the concurrent runner (it cannot host \
+                         the proxy's sidecar scope; see specs/018) — run these episodes without \
+                         --concurrent"
+                            .to_string(),
+                    );
+                }
                 policy
                     .compile(resolver)
                     .map_err(|e| format!("policy compile: {e}"))
@@ -280,6 +291,7 @@ mod tests {
             mcp: Default::default(),
             skills: Vec::new(),
             ceiling_policy_path: None,
+            security: Default::default(),
         }
     }
 

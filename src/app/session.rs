@@ -288,29 +288,47 @@ pub fn announce_host_mode(command: &str) {
 #[cfg_attr(not(feature = "enforce"), allow(dead_code))]
 pub const EX_UNSUPPORTED: u8 = 65;
 
+/// The interception setup a sandbox was built with (019): `Some` when `[policy.http]` is active.
+#[cfg(feature = "intercept")]
+pub type HttpPrepared = Option<bee::intercept::session::Prepared>;
+#[cfg(not(feature = "intercept"))]
+pub type HttpPrepared = Option<std::convert::Infallible>;
+
 /// Build the sandbox a session's tools run in, plus a human-readable label for the banner.
 ///
 /// With the enforcement feature and a policy this is a real kernel-enforced scope; otherwise it is
-/// a hardened, credential-stripped host sandbox with no scope.
+/// a hardened, credential-stripped host sandbox with no scope. With `[policy.http]` active it also
+/// binds the proxy listener, makes the proxy port the tool scope's only network rule, and attaches
+/// the proxy scope; the caller starts the worker.
 #[cfg(feature = "enforce")]
 pub fn build_sandbox(
     policy: Option<bee_core::Policy>,
     label_hint: Option<&Path>,
     strip_env: Vec<String>,
-) -> Result<(Sandbox, String), String> {
+) -> Result<(Sandbox, String, HttpPrepared), String> {
     use bee_userspace::{EnforcementPlan, Engine, ScopeMode, SystemResolver};
 
     let Some(policy) = policy else {
         return Ok((
             Sandbox::host(strip_env),
             "none — host mode (no kernel scope)".to_string(),
+            None,
         ));
     };
 
     let resolver = SystemResolver::current();
-    let compiled = policy
+    #[cfg(feature = "intercept")]
+    let prepared = bee::intercept::session::prepare(&policy, &resolver)?;
+    #[cfg(not(feature = "intercept"))]
+    let prepared: HttpPrepared = None;
+    #[cfg_attr(not(feature = "intercept"), allow(unused_mut))]
+    let mut compiled = policy
         .compile(&resolver)
         .map_err(|e| format!("policy compile: {e}"))?;
+    #[cfg(feature = "intercept")]
+    if let Some(p) = &prepared {
+        compiled = p.tool_policy(compiled);
+    }
     let plan = EnforcementPlan::prepare(&compiled, ScopeMode::Enforce)
         .map_err(|e| format!("enforcement plan: {e}"))?;
     let mut engine = Engine::init().map_err(|e| format!("engine init: {e}"))?;
@@ -326,7 +344,27 @@ pub fn build_sandbox(
         Some(p) => format!("{} (enforced)", p.display()),
         None => "policy (enforced)".to_string(),
     };
-    Ok((Sandbox::enforced(engine, scope, reader, strip_env), label))
+    #[cfg(feature = "intercept")]
+    let sidecar = match &prepared {
+        Some(p) => Some(
+            bee::intercept::session::attach_sidecar(&mut engine, &scope_id, &p.compiled)
+                .inspect_err(|_| {
+                    let _ = scope.teardown();
+                })?,
+        ),
+        None => None,
+    };
+    #[cfg_attr(not(feature = "intercept"), allow(unused_mut))]
+    let mut sandbox = Sandbox::enforced(engine, scope, reader, strip_env);
+    #[cfg(feature = "intercept")]
+    if let Some(sc) = sidecar {
+        sandbox = sandbox.with_sidecar(sc).map_err(|(sb, sc, e)| {
+            let _ = sc.scope.teardown();
+            let _ = sb.teardown();
+            e.to_string()
+        })?;
+    }
+    Ok((sandbox, label, prepared))
 }
 
 /// Host build: there is no kernel enforcement to apply, so a resolved policy is noted but not
@@ -336,7 +374,7 @@ pub fn build_sandbox(
     _policy: Option<bee_core::Policy>,
     label_hint: Option<&Path>,
     strip_env: Vec<String>,
-) -> Result<(Sandbox, String), String> {
+) -> Result<(Sandbox, String, HttpPrepared), String> {
     let label = match label_hint {
         Some(p) => format!(
             "{} — IGNORED (host build; rebuild with --features enforce to enforce it)",
@@ -344,5 +382,7 @@ pub fn build_sandbox(
         ),
         None => "none — host mode (no kernel scope)".to_string(),
     };
-    Ok((Sandbox::host(strip_env), label))
+    // A host build never runs a policy (the enforcement invariant refuses one before this point), so
+    // `[policy.http]` cannot be active here; interception has nothing to prepare.
+    Ok((Sandbox::host(strip_env), label, None))
 }

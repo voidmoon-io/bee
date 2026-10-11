@@ -84,6 +84,11 @@ pub struct ReplConfig {
     /// episode, the operator is present, so consent can be a prompt rather than a pre-authorizing
     /// ceiling file.
     pub escalation: Option<ReplEscalation>,
+    /// The live HTTP history pane (019 US9): returns a fresh table when exchanges have arrived since
+    /// the last call, `None` otherwise. Set only in a session with `[policy.http]`.
+    #[allow(clippy::type_complexity)]
+    pub http_pane:
+        Option<std::sync::Arc<dyn Fn() -> Option<crate::render_spec::RenderSpec> + Send + Sync>>,
 }
 
 /// Session-lifetime escalation state for the REPL.
@@ -136,6 +141,7 @@ impl Default for ReplConfig {
             skills: Arc::new(crate::skills::SkillRegistry::default()),
             visual: crate::config::VisualConfig::default(),
             escalation: None,
+            http_pane: None,
         }
     }
 }
@@ -156,6 +162,11 @@ pub trait ReplOutput: Send + Sync {
     fn error(&self, msg: &str);
     /// An informational line (banners, warnings, meta-command output).
     fn info(&self, msg: &str);
+    /// A proxy-layer event (019 T045): a refusal by the interception proxy, or a rule notice. Its
+    /// wording is distinct from a kernel denial on purpose — the two layers are never conflated.
+    fn proxy_event(&self, ev: &crate::proxy_event::ProxyEvent) {
+        self.info(&render_proxy_event(ev));
+    }
     /// A block the sender declares to be **markdown** — a skill's instructions, say (010). Defaults
     /// to [`ReplOutput::info`], which prints the source verbatim: that is the honest rendering for a
     /// scrolling terminal, and markdown source is meant to be readable as-is. The full-screen TUI
@@ -500,6 +511,12 @@ pub async fn run_exchange(
         }
         let schemas = registry.schemas();
 
+        // Harness notes for this turn (019 US8: "N new passive leads") — bee's own words.
+        for note in sandbox.turn_notes() {
+            output.info(&note);
+            conversation.push(Message::User { text: note });
+        }
+
         let turn_start = Instant::now();
         // Show a "working" indicator from the instant the call is dispatched — this covers the
         // stream-open latency and the wait for the first token, which is the gap that otherwise
@@ -632,6 +649,16 @@ pub async fn run_exchange(
                 }
             }
 
+            // Attribute whatever this call spawns — the call and, after a widening, its one retry —
+            // to this tool call (019 P3): the interception proxy issues a per-call credential from it.
+            sandbox
+                .begin_call(crate::sandbox::CallContext {
+                    call_id: tc.id.clone(),
+                    turn: turns.len() as u32,
+                    origin: crate::sandbox::CallOrigin::Tool,
+                })
+                .await;
+            let mut retried = false;
             let mut result = match tokio::time::timeout(
                 Duration::from_secs(config.tool_timeout_secs),
                 registry.execute(tc, sandbox),
@@ -679,6 +706,7 @@ pub async fn run_exchange(
                                 sandbox.settle().await;
                                 let retry_audit = sandbox.drain_audit();
                                 result = r;
+                                retried = true;
                                 audit = retry_audit;
                             }
                         }
@@ -686,8 +714,70 @@ pub async fn run_exchange(
                 }
             }
 
-            denials += audit.iter().filter(|e| e.decision == "denied").count() as u32;
+            #[cfg_attr(not(feature = "intercept"), allow(unused_mut))]
+            let mut proxy_events = sandbox.end_call().await;
+
+            // 019 US3: a proxy refusal may become a consented target-scope widening (the operator is
+            // asked, and the prompt shows the exact host:port), then the call is retried once —
+            // unless a kernel-denial widening already spent the one retry.
+            #[cfg(feature = "intercept")]
+            if let (false, Some(esc), Some(turn_no)) =
+                (retried, config.escalation.as_ref(), turn_no)
+            {
+                let mut active = esc.active.lock().await;
+                if let Some(out) = crate::grants::escalate::proxy_refusal_step(
+                    &esc.config,
+                    &mut active,
+                    &proxy_events,
+                    tc,
+                    turn_no,
+                    sandbox,
+                    registry,
+                )
+                .await
+                {
+                    let target = proxy_events
+                        .iter()
+                        .find(|e| e.kind.is_refusal())
+                        .map(|e| format!("http target {}:{}", e.host, e.port))
+                        .unwrap_or_default();
+                    report_escalation(output, &target, &out);
+                    if out.is_granted() {
+                        sandbox
+                            .begin_call(crate::sandbox::CallContext {
+                                call_id: tc.id.clone(),
+                                turn: turns.len() as u32,
+                                origin: crate::sandbox::CallOrigin::Tool,
+                            })
+                            .await;
+                        if let Ok(r) = tokio::time::timeout(
+                            Duration::from_secs(config.tool_timeout_secs),
+                            registry.execute(tc, sandbox),
+                        )
+                        .await
+                        {
+                            result = r;
+                        }
+                        sandbox.settle().await;
+                        audit = sandbox.drain_audit();
+                        proxy_events = sandbox.end_call().await;
+                    }
+                }
+            }
+            #[cfg(not(feature = "intercept"))]
+            let _ = retried;
+            // The proxy scope's kernel events, tagged `scope_id = "proxy"`, join the call's audit
+            // only now — after escalation, which they must never drive (019 T047).
+            audit.extend(sandbox.drain_sidecar_audit());
+
+            denials += audit
+                .iter()
+                .filter(|e| e.decision == "denied" && e.scope_id.as_deref() != Some("proxy"))
+                .count() as u32;
             output.tool_result(&result, &audit);
+            for ev in &proxy_events {
+                output.proxy_event(ev);
+            }
             // If the tool produced a visualization (the `render` tool), surface it — routed by its
             // target: inline into chat, or upserted into a named panel (008-grid-tui, FR-008). The
             // model still receives only `result.content` (the text summary), never the art (FR-023).
@@ -715,9 +805,11 @@ pub async fn run_exchange(
                 name: tc.name.clone(),
                 content: result.content.clone(),
                 is_error: result.is_error,
+                provenance: result.provenance.clone(),
             });
             audit_all.extend(audit.iter().cloned());
             recorded.push(RecordedCall {
+                proxy_events,
                 call: tc.clone(),
                 result,
                 audit,
@@ -819,6 +911,7 @@ fn build_transcript(
     usage: Option<Usage>,
 ) -> EpisodeTranscript {
     EpisodeTranscript {
+        http_scope: None,
         scenario_id: "repl".to_string(),
         model_id: model_id.to_string(),
         status: EpisodeStatus::Completed,
@@ -943,6 +1036,22 @@ fn remember(editor: &mut DefaultEditor, path: &Option<PathBuf>, line: &str) {
 /// aware visuals exist and nudges it to use them when a chart/table/status grid reads better than
 /// prose. When `render` is not among the enabled tools, the base prompt is returned unchanged so the
 /// agent is never told about a tool it doesn't have.
+/// `refused by proxy: <host>:<port> (<kind>)` — the one rendering of a proxy event, shared by every
+/// front-end, all of whose text is escaped (the host can come from a target).
+pub fn render_proxy_event(ev: &crate::proxy_event::ProxyEvent) -> String {
+    let what = if ev.kind.is_refusal() {
+        "refused by proxy"
+    } else {
+        "proxy"
+    };
+    format!(
+        "{what}: {}:{} ({})",
+        crate::safe_text::safe_line(&ev.host),
+        ev.port,
+        ev.kind.as_str()
+    )
+}
+
 pub(crate) fn effective_system_prompt(base: &str, registry: &ToolRegistry) -> String {
     let mut prompt = base.to_string();
     if registry.contains("render") {

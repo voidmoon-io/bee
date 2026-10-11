@@ -84,6 +84,7 @@ impl Policy {
         self.check_filesystem(&request.filesystem)?;
         self.check_exec(&request)?;
         self.check_network(&request)?;
+        self.check_http(&request)?;
         // Exfiltration: a child may only *add* sensitive paths / enable detection (narrowing) — no check.
 
         Ok(self.inherit_restrictions(request))
@@ -133,7 +134,81 @@ impl Policy {
             child.network.allow = self.network.allow.clone();
         }
 
+        // Interception scope (019). A child that says nothing about `[policy.http]` is still bound
+        // by the parent's: without it the child's tool scope would compile with no proxy loopback
+        // rule and reach whatever its own network list says — or, empty, everything.
+        if child.http.is_none() {
+            child.http = self.http.clone();
+        }
+
         child
+    }
+
+    /// `[policy.http]` subset rules (data-model.md §Attenuation rules). An absent child section is
+    /// not checked here — it inherits, in [`Policy::inherit_restrictions`].
+    fn check_http(&self, request: &Policy) -> Result<(), AttenuationError> {
+        let Some(child) = &request.http else {
+            return Ok(());
+        };
+        let empty = crate::policy::HttpPolicy::default();
+        let parent = self.http.as_ref().unwrap_or(&empty);
+
+        for t in &child.targets {
+            if !parent.targets.contains(t) {
+                return Err(AttenuationError::new(
+                    format!("http.targets:{t}"),
+                    "target not in parent's [policy.http] targets",
+                ));
+            }
+        }
+        for e in &child.egress {
+            if !parent.egress.contains(e) && !parent.targets.contains(e) {
+                return Err(AttenuationError::new(
+                    format!("http.egress:{e}"),
+                    "egress host not in parent's [policy.http] targets or egress",
+                ));
+            }
+        }
+        for (field, child_pats, parent_pats) in [
+            ("inspect", &child.inspect, &parent.inspect),
+            (
+                "insecure_upstream",
+                &child.insecure_upstream,
+                &parent.insecure_upstream,
+            ),
+        ] {
+            for c in child_pats {
+                // `Some(true)` from some parent pattern, or refuse. `None` (undecidable) is a refusal
+                // exactly as `Some(false)` is: an unprovable subset is not a subset.
+                if !parent_pats.iter().any(|p| p.covers(c) == Some(true)) {
+                    return Err(AttenuationError::new(
+                        format!("http.{field}:{c}"),
+                        "pattern not provably covered by the parent's",
+                    ));
+                }
+            }
+        }
+        let (c, p) = (&child.limits, &parent.limits);
+        for (name, over) in [
+            ("rps", c.rps > p.rps),
+            ("concurrency", c.concurrency > p.concurrency),
+            (
+                "max_requests_per_run",
+                c.max_requests_per_run > p.max_requests_per_run,
+            ),
+            ("max_body_bytes", c.max_body_bytes > p.max_body_bytes),
+            ("store_cap_bytes", c.store_cap_bytes > p.store_cap_bytes),
+        ] {
+            // A parent without `[policy.http]` has no limits to exceed, but it also has no targets,
+            // so a child that reaches here with a target was already refused above.
+            if over && self.http.is_some() {
+                return Err(AttenuationError::new(
+                    format!("http.limits.{name}"),
+                    "limit exceeds the parent's",
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn check_filesystem(&self, child: &BTreeMap<String, Access>) -> Result<(), AttenuationError> {

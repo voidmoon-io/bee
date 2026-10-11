@@ -66,6 +66,9 @@ impl ReplOutput for SessionSink {
     fn info(&self, msg: &str) {
         self.emit(SessionEvent::Info(msg.to_string()));
     }
+    fn proxy_event(&self, ev: &crate::proxy_event::ProxyEvent) {
+        self.emit(SessionEvent::Proxy(ev.clone()));
+    }
     // The following override defaults that would otherwise fold into `info` / no-op / ASCII, so the
     // sink is a *faithful* mirror of the callbacks (not the inline REPL's fallbacks).
     fn footer(&self, msg: &str) {

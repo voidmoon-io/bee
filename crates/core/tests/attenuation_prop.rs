@@ -19,6 +19,7 @@ fn mk(mode: Mode, fs: BTreeMap<String, Access>, exec: Vec<String>, net: Vec<Stri
         exec: ExecPolicy { allow: exec },
         network: NetPolicy { allow: net },
         exfiltration: ExfilPolicy::default(),
+        http: None,
     }
 }
 

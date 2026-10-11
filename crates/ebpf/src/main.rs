@@ -203,7 +203,9 @@ pub fn socket_connect(ctx: LsmContext) -> i32 {
     }
 
     let observe = meta.mode == ScopeMode::Observe as u8;
-    emit_audit(cgid, Op::Connect, observe, -EPERM, None);
+    // Name the destination (019 P5, FR-009): a denial that does not say where it was going can be
+    // neither acted on by the operator nor turned into a grant by reactive escalation.
+    emit_audit_connect(cgid, observe, -EPERM, &key);
     if observe {
         0
     } else {
@@ -548,6 +550,45 @@ fn emit_audit(cgid: u64, op: Op, observe: bool, errno: i32, path: Option<&[u8; P
             _pad: [0; 2],
             errno: if observe { 0 } else { errno },
             target_len: tlen,
+            _pad2: [0; 6],
+            target,
+        };
+        // SAFETY: the reserved slot is sized for AuditRecord.
+        unsafe { core::ptr::write_unaligned(slot.as_mut_ptr(), rec) };
+        slot.submit(0);
+    }
+}
+
+/// Emit a connect audit record whose target is the decoded destination, as a fixed 20-byte binary
+/// encoding: `family: u16 LE`, `port: u16 BE`, then `addr: [u8; 16]` exactly as in `NetKey.addr`
+/// (IPv4 in `addr[0..4]`, the rest zero; IPv6 in all 16). User space formats it as `ip:port`
+/// (`bee_core::AuditEvent::from_record`). Binary rather than text because formatting an address in
+/// the kernel would cost verifier budget for no gain — and the `AuditRecord` layout is unchanged.
+fn emit_audit_connect(cgid: u64, observe: bool, errno: i32, key: &NetKey) {
+    if let Some(mut slot) = AUDIT_RB.reserve::<AuditRecord>(0) {
+        let pidtgid = bpf_get_current_pid_tgid();
+        let mut target = [0u8; TARGET_MAX];
+        let fam = key.family.to_le_bytes();
+        let port = key.port.to_be_bytes();
+        target[0] = fam[0];
+        target[1] = fam[1];
+        target[2] = port[0];
+        target[3] = port[1];
+        let mut i = 0usize;
+        while i < 16 {
+            target[4 + i] = key.addr[i];
+            i += 1;
+        }
+        let rec = AuditRecord {
+            ts_ns: unsafe { bpf_ktime_get_ns() },
+            cgroup_id: cgid,
+            pid: pidtgid as u32,
+            tgid: (pidtgid >> 32) as u32,
+            op: Op::Connect as u8,
+            decision: if observe { Decision::Observed as u8 } else { Decision::Denied as u8 },
+            _pad: [0; 2],
+            errno: if observe { 0 } else { errno },
+            target_len: 20,
             _pad2: [0; 6],
             target,
         };

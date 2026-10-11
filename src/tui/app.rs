@@ -614,6 +614,9 @@ fn handle_session(app: &mut App, ev: SessionEvent) {
         SessionEvent::Info(s) | SessionEvent::Footer(s) | SessionEvent::Steering(s) => {
             app.push_line(Role::System, safe_block(&s).into_owned())
         }
+        SessionEvent::Proxy(ev) => {
+            app.push_line(Role::System, crate::repl::render_proxy_event(&ev))
+        }
         // `/clear` dropped the model's message log; the pane holds the only other copy, so it goes
         // too (010). Panels are agent-owned view state rather than conversation, so they stay — the
         // command says "conversation history", and it means it.

@@ -240,3 +240,66 @@ async fn shipped_example_script_runs() {
         other => panic!("example should render a Grid, got {other:?}"),
     }
 }
+
+// ── 019-http-intercept US9 (T089): the live HTTP history pane ─────────────────────────────────────
+//
+// Pinned as a snapshot. One row carries an ANSI escape and a bidi override from a target-controlled
+// path and host: they must draw as visible, inert text through `safe_text`, never as control.
+#[cfg(feature = "intercept")]
+#[test]
+fn the_http_history_pane_renders_hostile_text_inert() {
+    use bee::intercept::pane::{history_spec, PaneRow};
+    let row = |id: &str, method: &str, host: &str, path: &str, status: &str| PaneRow {
+        id: id.into(),
+        method: method.into(),
+        host: host.into(),
+        path: path.into(),
+        status: status.into(),
+        bytes: "512".into(),
+        ms: "12".into(),
+        origin: "tool".into(),
+    };
+    let spec = history_spec(&[
+        row("Eabc-1", "GET", "app.test", "/search?q=1", "200"),
+        row(
+            "Eabc-2",
+            "POST",
+            "app.test",
+            "/api/\u{1b}[31mred\u{1b}[0m",
+            "500",
+        ),
+        row("Eabc-3", "GET", "evil\u{202e}gpj.exe", "/admin", "403"),
+    ]);
+    let lines = bee::viz::render_to_ansi(&spec, 100, 10);
+    let joined = lines.join("\n");
+    // No raw escape or bidi control survives into the drawn text.
+    let drawn: String = lines
+        .iter()
+        .map(|l| strip_sgr(l))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!drawn.contains('\u{202e}'), "{drawn}");
+    assert!(!drawn.contains("\u{1b}[31m"), "{drawn}");
+    insta::assert_snapshot!("http_history_pane", drawn);
+    assert!(joined.contains("Eabc-2"));
+}
+
+/// The renderer's own SGR styling is fine; strip it so the snapshot shows the text a user reads.
+#[cfg(feature = "intercept")]
+fn strip_sgr(s: &str) -> String {
+    let mut out = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            for d in chars.by_ref() {
+                if d.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}

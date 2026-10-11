@@ -11,6 +11,9 @@ pub mod config;
 // ledger itself.
 #[cfg(feature = "findings")]
 pub mod findings;
+// `bee http` — the operator's view of recorded HTTP traffic (019-http-intercept US9).
+#[cfg(feature = "intercept")]
+pub mod http;
 pub mod metrics;
 pub mod repl;
 pub mod run;

@@ -293,6 +293,11 @@ async fn connect_stdio(
     sandbox: &Sandbox,
     dirty: Arc<AtomicBool>,
 ) -> ConnectedServer {
+    // Under interception the server gets its own proxy credential for its lifetime, issued (and
+    // acknowledged) before it can make a request (019 T042). A no-op without `[policy.http]`.
+    sandbox
+        .begin_side_call(&super::transport::mcp_call(&cfg.name))
+        .await;
     let transport = match spawn_stdio(sandbox, cfg) {
         Ok(t) => t,
         Err(e) => return failed_server(cfg, e),

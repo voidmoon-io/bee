@@ -79,6 +79,11 @@ pub struct ReplArgs {
     /// Required to start an unenforced session — bee will not fall back to one silently.
     #[arg(long, conflicts_with = "policy")]
     pub host: bool,
+    /// Accept `[policy.http]` interception enforced by the proxy alone, when the kernel will not
+    /// block (a policy in `mode = "observe"`). Without it such a session refuses to start.
+    /// Deliberately not settable from any configuration file.
+    #[arg(long)]
+    pub http_scope_advisory: bool,
 }
 
 impl ReplArgs {
@@ -215,6 +220,11 @@ async fn repl(args: ReplArgs) -> ExitCode {
             Box::new(bee::grants::escalate::DenialEscalationHook {
                 enabled: cfg.ceiling.is_some(),
             }),
+            // 019 US3: a proxy refusal asks the operator — showing the exact host:port — whether to
+            // widen the target scope, within the ceiling's `[policy.http]`.
+            Box::new(bee::grants::escalate::ProxyRefusalHook {
+                enabled: cfg.ceiling.is_some(),
+            }),
             Box::new(bee::grants::escalate::SkillEscalationHook::new(
                 skills.clone(),
             )),
@@ -231,14 +241,90 @@ async fn repl(args: ReplArgs) -> ExitCode {
         })
     });
 
-    let (mut sbox, policy_label) =
+    // `[policy.http]` (019): decided before the scope compiles — the proxy port becomes the tool
+    // scope's only network rule — and refused here if nothing would block as the policy says.
+    #[cfg(feature = "intercept")]
+    let http_advisory: Option<String> = match resolved_policy.as_ref() {
+        Some(p) if bee::intercept::session::wants_interception(Some(p)) => {
+            match bee::intercept::session::advisory_reason(p, cfg!(feature = "enforce")) {
+                Some(reason) if !args.http_scope_advisory => {
+                    eprintln!(
+                        "{CMD}: {}",
+                        bee::intercept::session::advisory_refusal(&reason)
+                    );
+                    return ExitCode::from(EX_USAGE);
+                }
+                Some(reason) => {
+                    eprintln!(
+                        "{CMD}: {}",
+                        bee::intercept::session::advisory_banner(&reason)
+                    );
+                    Some(reason)
+                }
+                None => None,
+            }
+        }
+        _ => None,
+    };
+    #[cfg(not(feature = "intercept"))]
+    if resolved_policy
+        .as_ref()
+        .and_then(|p| p.http.as_ref())
+        .is_some_and(|h| h.is_active())
+    {
+        eprintln!(
+            "{CMD}: the policy declares [policy.http] targets, but this bee was built without \
+             --features intercept"
+        );
+        return ExitCode::from(EX_USAGE);
+    }
+
+    #[cfg_attr(not(feature = "intercept"), allow(unused_variables))]
+    let (mut sbox, policy_label, http_prepared) =
         match session::build_sandbox(resolved_policy, cfg.policy_path.as_deref(), strip_env) {
-            Ok(pair) => pair,
+            Ok(t) => t,
             Err(detail) => {
                 eprintln!("{CMD}: {detail}");
                 return ExitCode::from(EX_SOFTWARE);
             }
         };
+
+    #[cfg(feature = "intercept")]
+    let http_session = match http_prepared {
+        Some(prepared) => {
+            let enforcement = match &http_advisory {
+                Some(reason) => bee::intercept::sidecar::Enforcement::Advisory {
+                    reason: reason.clone(),
+                },
+                None => bee::intercept::sidecar::Enforcement::Kernel,
+            };
+            match bee::intercept::session::start(
+                prepared,
+                &mut sbox,
+                &format!("repl-{}", std::process::id()),
+                &cwd,
+                enforcement,
+            )
+            .await
+            {
+                Ok(h) => {
+                    bee::tools::http::configure_http_tools(&mut registry, &h.interceptor);
+                    eprintln!(
+                        "{CMD}: HTTP interception on 127.0.0.1:{} ({} enforcement)",
+                        h.interceptor.port(),
+                        h.interceptor.enforcement().label()
+                    );
+                    Some(h)
+                }
+                Err(detail) => {
+                    let _ = sbox.teardown();
+                    eprintln!("{CMD}: HTTP interception: {detail}");
+                    return ExitCode::from(EX_SOFTWARE);
+                }
+            }
+        }
+        None => None,
+    };
 
     // Connect MCP servers, register their tools alongside the built-ins, and build the per-turn
     // refresh hook (FR-043). The bridge owns the stdio children for the session and is dropped
@@ -276,6 +362,10 @@ async fn repl(args: ReplArgs) -> ExitCode {
         skills: skills.clone(),
         visual: cfg.visual,
         escalation,
+        #[cfg(feature = "intercept")]
+        http_pane: http_session
+            .as_ref()
+            .map(|h| bee::intercept::pane::pane_source(h.interceptor.clone())),
         ..ReplConfig::default()
     };
 
@@ -312,12 +402,33 @@ async fn repl(args: ReplArgs) -> ExitCode {
         drop(config);
         drop(mcp_bridge);
     }
+    // The proxy worker goes first: its sidecar scope is torn down before the tool scope (019 P4).
+    #[cfg(feature = "intercept")]
+    if let Some(h) = &http_session {
+        h.shutdown().await;
+    }
     if let Err(e) = sbox.teardown() {
         eprintln!("{CMD}: WARNING: {e} — a process may have outlived enforcement");
     }
 
+    #[cfg(feature = "intercept")]
+    let http_header = http_session
+        .as_ref()
+        .map(|h| bee::transcript::HttpSessionHeader {
+            enforcement: h.interceptor.enforcement().label().into(),
+            advisory_reason: http_advisory.clone(),
+            advisory_acknowledged: http_advisory.is_some(),
+        });
+    #[cfg(not(feature = "intercept"))]
+    let http_header: Option<bee::transcript::HttpSessionHeader> = None;
     if let Some(path) = &args.save {
-        if let Some(transcript) = session_out.as_ref().and_then(|s| s.transcript.as_ref()) {
+        if let Some(mut transcript) = session_out
+            .as_ref()
+            .and_then(|s| s.transcript.as_ref())
+            .cloned()
+        {
+            transcript.http_scope = http_header;
+            let transcript = &transcript;
             match std::fs::write(path, transcript.to_json()) {
                 Ok(()) => eprintln!("{CMD}: saved transcript to {}", path.display()),
                 Err(e) => {
@@ -424,17 +535,11 @@ fn prompt_consent(request: &bee::skills::GrantRequest<'_>) -> bool {
     // frontmatter, but this prompt is the consent boundary itself and takes a `GrantRequest` from
     // any source, so it escapes what it prints rather than trusting an upstream check: a forged
     // prompt is a granted capability. One line per field, so nothing can smuggle in a second line.
-    let safe = bee::safe_text::safe_line;
-    eprintln!(
-        "\nskill '{}' requests extra capabilities:",
-        safe(request.skill)
-    );
-    if !request.tools.is_empty() {
-        let tools: Vec<_> = request.tools.iter().map(|t| safe(t)).collect();
-        eprintln!("  tools: {}", tools.join(", "));
-    }
-    for (path, access) in request.filesystem {
-        eprintln!("  filesystem: {} = {}", safe(path), safe(access));
+    // `render_lines` escapes every field and covers every one — net and exec included, which this
+    // prompt once silently omitted (019 P2).
+    eprintln!();
+    for line in request.render_lines() {
+        eprintln!("{line}");
     }
     eprint!("grant these (within the ceiling)? [y/N] ");
     let _ = std::io::stderr().flush();

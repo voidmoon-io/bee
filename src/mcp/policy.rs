@@ -8,70 +8,10 @@ use serde::{Deserialize, Serialize};
 
 use super::config::McpServerConfig;
 
-/// A single allow/deny domain rule. Parses from a bare string in TOML:
-/// * `"example.com"`   → [`DomainPattern::Exact`]
-/// * `"*.example.com"` → [`DomainPattern::Wildcard`] (matches subdomains, **not** the bare apex)
-///
-/// A leading bare `*` (or `*foo` without the dot) is rejected at parse time.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
-pub enum DomainPattern {
-    Exact(String),
-    Wildcard(String),
-}
-
-/// Lowercase + strip a trailing dot so matching is case- and FQDN-dot-insensitive.
-fn normalize(host: &str) -> String {
-    host.trim().trim_end_matches('.').to_ascii_lowercase()
-}
-
-impl TryFrom<String> for DomainPattern {
-    type Error = String;
-
-    fn try_from(s: String) -> Result<Self, Self::Error> {
-        let t = s.trim();
-        if t.is_empty() {
-            return Err("empty domain pattern".into());
-        }
-        if let Some(suffix) = t.strip_prefix("*.") {
-            if suffix.is_empty() || suffix.contains('*') {
-                return Err(format!("invalid wildcard domain pattern: {s:?}"));
-            }
-            return Ok(DomainPattern::Wildcard(normalize(suffix)));
-        }
-        if t.contains('*') {
-            return Err(format!(
-                "invalid domain pattern {s:?}: a wildcard must be written as `*.suffix`"
-            ));
-        }
-        Ok(DomainPattern::Exact(normalize(t)))
-    }
-}
-
-impl DomainPattern {
-    /// Whether `host` matches this pattern. Case- and trailing-dot-insensitive. A wildcard matches
-    /// one-or-more subdomain labels but **never** the bare apex or a suffix-substring
-    /// (`*.company.com` matches `a.company.com`, not `company.com` or `evilcompany.com`).
-    pub fn matches(&self, host: &str) -> bool {
-        let h = normalize(host);
-        match self {
-            DomainPattern::Exact(e) => &h == e,
-            // `h` must end with `.{suffix}`: strip the suffix and require a non-empty label + dot.
-            DomainPattern::Wildcard(suffix) => h
-                .strip_suffix(suffix.as_str())
-                .is_some_and(|prefix| prefix.len() > 1 && prefix.ends_with('.')),
-        }
-    }
-}
-
-impl std::fmt::Display for DomainPattern {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            DomainPattern::Exact(h) => write!(f, "{h}"),
-            DomainPattern::Wildcard(s) => write!(f, "*.{s}"),
-        }
-    }
-}
+/// A single allow/deny domain rule: `"example.com"` or `"*.example.com"` (subdomains only, never the
+/// bare apex). The type moved into `bee-core` as [`bee_core::HostPattern`] (019-http-intercept), so
+/// `[policy.http]` attenuation shares exactly these semantics; the MCP name is kept as an alias.
+pub use bee_core::HostPattern as DomainPattern;
 
 /// Extract the hostname from a URL (scheme/userinfo/port/path stripped), for domain gating. Handles
 /// bracketed IPv6 literals. Returns `None` if no host is present.
@@ -88,12 +28,6 @@ pub fn url_host(url: &str) -> Option<&str> {
         host_port.split(':').next().unwrap_or(host_port)
     };
     (!host.is_empty()).then_some(host)
-}
-
-impl From<DomainPattern> for String {
-    fn from(p: DomainPattern) -> String {
-        p.to_string()
-    }
 }
 
 /// The `[mcp]` table. Every field defaults (fail-closed): an absent/partial `[mcp]` is disabled with

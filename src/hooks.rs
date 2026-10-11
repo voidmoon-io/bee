@@ -31,6 +31,13 @@ pub enum StepEvent<'a> {
         target: &'a str,
         call: &'a ToolCall,
     },
+    /// The interception proxy refused this call's request to an out-of-scope `host:port` (019 US3) —
+    /// the trigger for a consented target-scope widening.
+    ProxyRefusal {
+        host: &'a str,
+        port: u16,
+        call: &'a ToolCall,
+    },
     /// After a tool call executed and its audit was drained.
     AfterToolResult {
         call: &'a ToolCall,
@@ -47,6 +54,7 @@ pub enum StepEventKind {
     BeforeModelCall,
     BeforeToolCall,
     KernelDenial,
+    ProxyRefusal,
     AfterToolResult,
 }
 
@@ -58,6 +66,7 @@ impl StepEvent<'_> {
             StepEvent::BeforeModelCall { .. } => StepEventKind::BeforeModelCall,
             StepEvent::BeforeToolCall(_) => StepEventKind::BeforeToolCall,
             StepEvent::KernelDenial { .. } => StepEventKind::KernelDenial,
+            StepEvent::ProxyRefusal { .. } => StepEventKind::ProxyRefusal,
             StepEvent::AfterToolResult { .. } => StepEventKind::AfterToolResult,
         }
     }

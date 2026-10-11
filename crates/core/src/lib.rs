@@ -11,6 +11,7 @@ pub mod attenuation;
 pub mod audit;
 pub mod compiler;
 pub mod error;
+pub mod pattern;
 pub mod policy;
 
 pub use audit::AuditEvent;
@@ -18,4 +19,7 @@ pub use compiler::{
     CompiledExec, CompiledNet, CompiledPolicy, ExecIdentity, FsPrimitive, Resolver,
 };
 pub use error::{AttenuationError, CompileError, PolicyError};
-pub use policy::{Access, ExecPolicy, ExfilPolicy, Mode, NetPolicy, Policy};
+pub use pattern::HostPattern;
+pub use policy::{
+    Access, ExecPolicy, ExfilPolicy, HostPort, HttpLimits, HttpPolicy, Mode, NetPolicy, Policy,
+};

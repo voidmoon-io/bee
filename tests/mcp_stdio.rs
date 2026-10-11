@@ -198,3 +198,78 @@ async fn denied_tools_are_hidden() {
     );
     bridge.teardown();
 }
+
+// ── 019-http-intercept T042: an MCP stdio server is its own attributed caller ────────────────────
+//
+// Runs on the host tier (advisory proxy, no Node needed): the "server" is a shell that records its
+// environment and makes one request through the proxy, then exits. It never completes an MCP
+// handshake — the assertions are about what it was spawned with and how its traffic was recorded.
+#[cfg(feature = "intercept")]
+#[path = "support/harness.rs"]
+mod harness;
+#[cfg(feature = "intercept")]
+#[path = "support/vuln_target.rs"]
+mod vuln_target;
+
+#[cfg(feature = "intercept")]
+mod http_attribution {
+    use super::*;
+
+    #[tokio::test]
+    async fn an_mcp_server_gets_an_mcp_credential_and_its_traffic_is_attributed() {
+        let (http, _, _fx) = vuln_target::start_with(false);
+        let s = harness::Session::start(
+            harness::scope(&format!("targets = [\"127.0.0.1:{}\"]", http.port()), &[]),
+            &[],
+            &[],
+        )
+        .await;
+        let out = s.dir.path().join("mcp-env.txt");
+        let script = format!(
+            "env | grep -i _proxy > {out}; curl -sS -o /dev/null http://127.0.0.1:{port}/search?q=mcp; exit 0",
+            out = out.display(),
+            port = http.port()
+        );
+        let server = McpServerConfig {
+            name: "probe".into(),
+            transport: McpTransport::Stdio,
+            command: Some("sh".into()),
+            args: vec!["-c".into(), script],
+            env: Default::default(),
+            url: None,
+            token_env: None,
+            allowed_tools: None,
+            denied_tools: None,
+        };
+        // The handshake fails (the shell is no MCP server); the bridge reports that and moves on.
+        let _bridge = McpBridge::connect(policy(server), &s.sandbox).await;
+
+        let env = std::fs::read_to_string(&out).expect("the server ran");
+        let line = env
+            .lines()
+            .find(|l| l.starts_with("HTTP_PROXY="))
+            .unwrap_or_else(|| panic!("{env}"));
+        assert!(line.starts_with("HTTP_PROXY=http://mcp%3Aprobe:"), "{line}");
+
+        let mut attributed = 0;
+        for _ in 0..100 {
+            attributed = s.icpt.with_store(|st| {
+                st.conn()
+                    .query_row(
+                        "SELECT COUNT(*) FROM exchanges WHERE call_id = 'mcp:probe'",
+                        [],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .unwrap()
+            });
+            if attributed > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            attributed, 1,
+            "the server's request is recorded under mcp:probe"
+        );
+    }
+}

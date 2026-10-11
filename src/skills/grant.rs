@@ -29,6 +29,50 @@ pub struct GrantRequest<'a> {
     pub tools: &'a [String],
     /// Filesystem grants it wants, as authored (`path -> "read"|"write"|"deny"`).
     pub filesystem: &'a BTreeMap<String, String>,
+    /// Network destinations it wants (`host:port`). Before 019 these were approved without being
+    /// shown (research R13).
+    pub net: &'a [String],
+    /// Binaries it wants to execute.
+    pub exec: &'a [String],
+    /// Interception targets it wants added to the session's target scope (019 US3), `host:port`.
+    pub http_targets: &'a [String],
+}
+
+impl GrantRequest<'_> {
+    /// The request as an operator reads it: a header naming the requester, then one line per granted
+    /// item. Every interactive [`ConsentSink`] renders through this, so none can forget a field —
+    /// a grant field that is not rendered here is approved unseen.
+    ///
+    /// Every value is passed through [`crate::safe_text::safe_line`]: the fields can be skill-
+    /// authored or derived from a kernel audit, and this text *is* the consent boundary, so a value
+    /// must not be able to forge a second line or hide behind terminal escapes.
+    pub fn render_lines(&self) -> Vec<String> {
+        let safe = crate::safe_text::safe_line;
+        let mut lines = vec![format!(
+            "'{}' requests extra capabilities:",
+            safe(self.skill)
+        )];
+        if !self.tools.is_empty() {
+            let tools: Vec<_> = self.tools.iter().map(|t| safe(t)).collect();
+            lines.push(format!("  tools: {}", tools.join(", ")));
+        }
+        for (path, access) in self.filesystem {
+            lines.push(format!("  filesystem: {} = {}", safe(path), safe(access)));
+        }
+        for dest in self.net {
+            lines.push(format!("  network: connect {}", safe(dest)));
+        }
+        for bin in self.exec {
+            lines.push(format!("  exec: {}", safe(bin)));
+        }
+        for target in self.http_targets {
+            lines.push(format!(
+                "  http target: {} (testable through the proxy)",
+                safe(target)
+            ));
+        }
+        lines
+    }
 }
 
 /// The outcome of a consent request. A timeout at the call site maps to [`Decision::Denied`]
@@ -168,6 +212,9 @@ pub async fn resolve_grants(
 
         // 2. Human consent, only for a request that is already within the ceiling.
         let request = GrantRequest {
+            net: &[],
+            exec: &[],
+            http_targets: &[],
             skill: &skill.name,
             tools: &req.tools,
             filesystem: &req.filesystem,
@@ -247,6 +294,7 @@ mod tests {
             exec: Default::default(),
             network: Default::default(),
             exfiltration: Default::default(),
+            http: None,
         };
         for (path, access) in fs {
             p.filesystem.insert(path.to_string(), *access);

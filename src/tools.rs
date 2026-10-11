@@ -31,9 +31,28 @@ pub mod cvss;
 pub mod finding;
 #[cfg(feature = "gitlog")]
 pub mod gitlog;
+#[cfg(feature = "intercept")]
+pub mod http;
+#[cfg(feature = "intercept")]
+pub mod http_fuzz;
+#[cfg(feature = "intercept")]
+pub mod http_get;
+#[cfg(feature = "intercept")]
+pub mod http_history;
+#[cfg(feature = "intercept")]
+pub mod http_intercept;
+#[cfg(feature = "intercept")]
+pub mod http_leads;
+#[cfg(feature = "intercept")]
+pub mod http_replay;
+#[cfg(feature = "intercept")]
+pub mod http_send;
+#[cfg(feature = "intercept")]
+pub mod http_sitemap;
 #[cfg(feature = "scanners")]
 pub mod scanner;
 
+pub use crate::provider::Provenance;
 pub use outcome::{ToolOutcome, UnavailableReason};
 
 use crate::render_spec::{EffectSpec, PanelOp, RenderSpec, RenderTarget};
@@ -81,6 +100,21 @@ pub const SEC_TOOLS: &[&str] = &[
 /// for the specific binary, or the tool refuses with `NotGranted` (FR-008).
 pub const SCANNER_TOOLS: &[&str] = &["scan"];
 
+/// The HTTP(S) interception tools (019-http-intercept). Opt-in like the security tools; they answer
+/// only in a session whose policy declares `[policy.http]`, and refuse with `interceptor_unavailable`
+/// anywhere else. Compiled out (no `intercept` feature) they register as `NotCompiledIn` stubs.
+pub const HTTP_TOOLS: &[&str] = &[
+    "http_scope",
+    "http_send",
+    "http_get",
+    "http_history",
+    "http_replay",
+    "http_sitemap",
+    "http_fuzz",
+    "http_intercept",
+    "http_leads",
+];
+
 /// Every tool name the harness knows how to build. A scenario may only list names from this set
 /// (scenario validation rejects the rest before a run).
 ///
@@ -95,6 +129,8 @@ pub fn is_known_tool(name: &str) -> bool {
         || SKILL_TOOLS.contains(&name)
         || SEC_TOOLS.contains(&name)
         || SCANNER_TOOLS.contains(&name)
+        || HTTP_TOOLS.contains(&name)
+        || (cfg!(feature = "vm-test") && name == "http_debug")
 }
 
 /// The Cargo feature each 016 tool needs, for the `NotCompiledIn` message. Covers only the tools
@@ -107,6 +143,7 @@ pub fn sec_tool_family(name: &str) -> Option<&'static str> {
         "cvss" => Some("cvss"),
         "record_finding" | "list_findings" => Some("findings"),
         "scan" => Some("scanners"),
+        n if HTTP_TOOLS.contains(&n) => Some("intercept"),
         _ => None,
     }
 }
@@ -149,6 +186,11 @@ pub struct ToolResult {
     /// The effect the agent attached to the inline widget via `.effect()` (009 FR-022).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inline_effect: Option<EffectSpec>,
+    /// Where `content` came from, which decides whether it reaches the model inside an
+    /// `<untrusted-data>` envelope (019 P1). Defaults to `Harness`: a tool must opt its output *in* to
+    /// being treated as data, and every path that relays child or remote bytes does.
+    #[serde(default, skip_serializing_if = "Provenance::is_harness")]
+    pub provenance: Provenance,
 }
 
 impl ToolResult {
@@ -165,6 +207,7 @@ impl ToolResult {
             render_target: RenderTarget::Inline,
             panel_ops: Vec::new(),
             inline_effect: None,
+            provenance: Provenance::Harness,
         }
     }
 
@@ -181,6 +224,7 @@ impl ToolResult {
             render_target: RenderTarget::Inline,
             panel_ops: Vec::new(),
             inline_effect: None,
+            provenance: Provenance::Harness,
         }
     }
 
@@ -228,6 +272,11 @@ impl ToolResult {
     /// The FR-016 malformed-arguments result: `"<tool>: invalid arguments: <detail>"`.
     pub fn invalid_args(tool: &str, detail: impl std::fmt::Display) -> Self {
         ToolResult::error(format!("{tool}: invalid arguments: {detail}"))
+    }
+
+    /// This result, with its content marked as coming from `provenance` (019 P1).
+    pub fn with_provenance(self, provenance: Provenance) -> Self {
+        ToolResult { provenance, ..self }
     }
 }
 
@@ -347,6 +396,20 @@ pub fn register_named(r: &mut ToolRegistry, name: &str, flag: Option<&str>) {
         // tool that runs a third-party binary: forgetting to wire it up fails closed.
         #[cfg(feature = "scanners")]
         "scan" => r.insert(Box::<scanner::ScanTool>::default()),
+        // 019: unconfigured until `http::configure_http_tools` hands them the session's proxy; until
+        // then — and in a session without `[policy.http]` — they refuse `interceptor_unavailable`.
+        #[cfg(feature = "vm-test")]
+        "http_debug" => {
+            if let Some(t) = http::unconfigured("http_debug") {
+                r.insert(t);
+            }
+        }
+        #[cfg(feature = "intercept")]
+        name if HTTP_TOOLS.contains(&name) => {
+            if let Some(t) = http::unconfigured(name) {
+                r.insert(t);
+            }
+        }
 
         other => {
             if let Some(family) = sec_tool_family(other) {

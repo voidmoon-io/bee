@@ -499,9 +499,9 @@ async fn send_one(
     };
 
     let scope = worker.scope();
-    let checked = scope
-        .check_testable(&raw.host, raw.port)
-        .and_then(|_| scope.check_host_header(&raw::host_headers(&bytes), &raw.host, raw.port));
+    let checked = scope.check_testable(&raw.host, raw.port).and_then(|_| {
+        scope.check_host_header(&raw::request_authorities(&bytes), &raw.host, raw.port)
+    });
     let addr = match checked {
         Err(r) => {
             refused(&mut rec, r);

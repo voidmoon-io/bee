@@ -143,11 +143,15 @@ impl TryFrom<String> for HostPort {
         let (host, port) = t
             .rsplit_once(':')
             .ok_or_else(|| format!("'{s}' must be host:port"))?;
-        let host = host
-            .strip_prefix('[')
-            .and_then(|h| h.strip_suffix(']'))
-            .unwrap_or(host);
-        let host = crate::pattern::normalize_host(host);
+        let bracketed = host.strip_prefix('[').and_then(|h| h.strip_suffix(']'));
+        // An unbracketed IPv6 literal (`fe80::1`) would otherwise split on its own last colon and
+        // parse silently as a different host and port.
+        if bracketed.is_none() && host.contains(':') {
+            return Err(format!(
+                "'{s}': an IPv6 address must be bracketed, as [addr]:port"
+            ));
+        }
+        let host = crate::pattern::normalize_host(bracketed.unwrap_or(host));
         if host.is_empty() || host.contains('*') || host.contains('/') {
             return Err(format!("'{s}': invalid host"));
         }

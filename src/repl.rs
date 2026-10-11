@@ -768,7 +768,11 @@ pub async fn run_exchange(
             let _ = retried;
             // The proxy scope's kernel events, tagged `scope_id = "proxy"`, join the call's audit
             // only now — after escalation, which they must never drive (019 T047).
-            audit.extend(sandbox.drain_sidecar_audit());
+            let sidecar_audit = sandbox.drain_sidecar_audit();
+            // Tool-scope events that reached the ring since the last drain (the sidecar drain
+            // buffers them) belong to this call, not the next one.
+            audit.extend(sandbox.drain_audit());
+            audit.extend(sidecar_audit);
 
             denials += audit
                 .iter()

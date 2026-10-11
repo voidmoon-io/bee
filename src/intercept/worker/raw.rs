@@ -188,6 +188,9 @@ async fn read_response<S: AsyncRead + Unpin + ?Sized>(
                 }
                 buf.drain(..take);
                 left -= take;
+                if truncated {
+                    break; // inside the chunk too: one huge chunk must not be read to its end
+                }
             }
             if truncated {
                 break; // stop reading: the stored body is already full
@@ -375,6 +378,53 @@ pub fn host_headers(raw: &[u8]) -> Vec<String> {
         .collect()
 }
 
+/// Every authority a raw request names for the upstream to route on: each `Host` header value, plus
+/// the request-target's own authority when it is absolute-form (`GET http://h/ …`) or CONNECT's
+/// authority-form. RFC 7230 §5.4 has a server prefer an absolute-form target over `Host`, so checking
+/// `Host` alone would let one in-scope address front any virtual host behind it.
+pub fn request_authorities(raw: &[u8]) -> Vec<String> {
+    let mut v = host_headers(raw);
+    if let (Some(method), Some(target)) = request_line(raw) {
+        if let Some(a) = target_authority(&method, &target) {
+            v.push(a);
+        }
+    }
+    v
+}
+
+/// The authority named by a request-target, as `host:port` (port defaulted from the scheme).
+/// `None` for origin-form (`/x`) and asterisk-form.
+fn target_authority(method: &str, target: &str) -> Option<String> {
+    if method.eq_ignore_ascii_case("CONNECT") {
+        return Some(target.to_string());
+    }
+    let (scheme, rest) = target.split_once("://")?;
+    // Only a target that *starts* with a scheme is absolute-form; `/r?to=http://x` is origin-form.
+    let is_scheme = |s: &str| {
+        s.starts_with(|c: char| c.is_ascii_alphabetic())
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
+    };
+    if !is_scheme(scheme) {
+        return None;
+    }
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let auth = rest[..end].rsplit('@').next().unwrap_or("");
+    let has_port = match auth.rfind(']') {
+        Some(b) => auth[b..].contains(':'),
+        None => auth.contains(':'),
+    };
+    if has_port {
+        return Some(auth.to_string());
+    }
+    let port = if scheme.eq_ignore_ascii_case("https") || scheme.eq_ignore_ascii_case("wss") {
+        443
+    } else {
+        80
+    };
+    Some(format!("{auth}:{port}"))
+}
+
 /// Split a raw request into head (through the blank line) and body.
 pub fn split_head(raw: &[u8]) -> (&[u8], &[u8]) {
     for i in 0..raw.len() {
@@ -425,6 +475,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn one_huge_chunk_stops_at_max_body() {
+        // A 16 MiB chunk header followed by a few bytes and EOF: reading stops at the cap instead
+        // of waiting out the rest of the chunk (review of #21).
+        let r = parse(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nffffff\r\nabcdefgh",
+            false,
+            4,
+        )
+        .await;
+        assert_eq!(r.body, b"abcd");
+        assert!(r.truncated);
+    }
+
+    #[tokio::test]
     async fn interim_responses_are_skipped() {
         let r = parse(
             b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n",
@@ -471,6 +535,24 @@ mod tests {
         .await;
         assert_eq!(r.body, b"0123");
         assert!(r.truncated);
+    }
+
+    #[test]
+    fn request_authorities_include_an_absolute_form_target() {
+        let r = b"GET http://admin.internal/x HTTP/1.1\r\nHost: app.test\r\n\r\n";
+        assert_eq!(
+            request_authorities(r),
+            vec!["app.test", "admin.internal:80"]
+        );
+        let r = b"GET HTTPS://u:p@[::1]/ HTTP/1.1\r\n\r\n";
+        assert_eq!(request_authorities(r), vec!["[::1]:443"]);
+        let r = b"GET http://h.test:8080?q HTTP/1.1\r\n\r\n";
+        assert_eq!(request_authorities(r), vec!["h.test:8080"]);
+        let r = b"CONNECT evil.test:443 HTTP/1.1\r\n\r\n";
+        assert_eq!(request_authorities(r), vec!["evil.test:443"]);
+        assert!(request_authorities(b"GET /x HTTP/1.1\r\n\r\n").is_empty());
+        let r = b"GET /r?to=http://evil.test/ HTTP/1.1\r\n\r\n";
+        assert!(request_authorities(r).is_empty());
     }
 
     #[test]

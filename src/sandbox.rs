@@ -262,6 +262,10 @@ pub struct EnforcedSandbox {
     /// buffered here until [`Sandbox::drain_sidecar_audit`] collects them.
     sidecar: Option<SidecarScope>,
     sidecar_audit: Vec<AuditEvent>,
+    /// Tool-scope events a sidecar drain pulled off the shared ring, held for the next
+    /// [`Sandbox::drain_audit`] — dropping them would hide denials from the audit trail and from
+    /// reactive escalation.
+    tool_audit: Vec<AuditEvent>,
     /// The session proxy's loopback port, when `[policy.http]` is active (019). Every recompile of
     /// the tool scope — a grant's reload included — re-applies it as the scope's only network rule;
     /// without it the plan refuses to install (`ProxyLoopbackMissing`).
@@ -527,6 +531,7 @@ impl Sandbox {
             env: ChildEnv::new(strip_env),
             sidecar: None,
             sidecar_audit: Vec::new(),
+            tool_audit: Vec::new(),
             proxy_port: None,
             ca_bundle: None,
         }))
@@ -667,7 +672,8 @@ impl Sandbox {
         match self {
             #[cfg(feature = "enforce")]
             Sandbox::Enforced(e) => {
-                e.drain_into_buffers();
+                let tool = e.drain_into_buffers();
+                e.tool_audit.extend(tool);
                 std::mem::take(&mut e.sidecar_audit)
             }
             _ => Vec::new(),
@@ -766,7 +772,11 @@ impl Sandbox {
         match self {
             Sandbox::Host(_) => Vec::new(),
             #[cfg(feature = "enforce")]
-            Sandbox::Enforced(e) => e.drain_into_buffers(),
+            Sandbox::Enforced(e) => {
+                let mut out = std::mem::take(&mut e.tool_audit);
+                out.extend(e.drain_into_buffers());
+                out
+            }
             #[cfg(feature = "concurrent")]
             Sandbox::Concurrent(c) => {
                 // The demux already routes only this scope's events here; re-filter by cgroup_id

@@ -54,6 +54,24 @@ fn an_absent_child_section_inherits_the_parents() {
 }
 
 #[test]
+fn a_child_section_without_targets_cannot_drop_interception() {
+    // Review of #21: a limits-only section used to be kept as-is, inactive, so the child compiled
+    // with no proxy loopback rule and the parent's empty network list — open egress.
+    let parent = policy(Some(parent_http()));
+    let mut h = parent_http();
+    h.targets.clear();
+    assert!(parent.derive(policy(Some(h))).is_err());
+    let limits_only = HttpPolicy {
+        limits: HttpLimits {
+            rps: 1,
+            ..parent_http().limits
+        },
+        ..HttpPolicy::default()
+    };
+    assert!(parent.derive(policy(Some(limits_only))).is_err());
+}
+
+#[test]
 fn a_child_cannot_add_http_under_a_parent_without_it() {
     let parent = policy(None);
     let child = policy(Some(HttpPolicy {
@@ -197,6 +215,8 @@ proptest! {
             (Just(pt), subset_of(&pt2), limits_le(HttpLimits::default()))
         })
     ) {
+        // An empty child list under an active parent would switch interception off; refused by design.
+        prop_assume!(parent_t.is_empty() || !child_t.is_empty());
         let parent = policy(Some(parent_of(parent_t, vec![])));
         let child = policy(Some(HttpPolicy { targets: child_t, limits, ..HttpPolicy::default() }));
         prop_assert!(parent.derive(child).is_ok());
@@ -238,6 +258,8 @@ proptest! {
         };
         if let Ok(d) = parent.derive(child) {
             let h = d.http.expect("a derived child under an http parent always has http");
+            // Interception, once on, stays on: an inactive child compiles with open egress.
+            prop_assert!(!parent_h.is_active() || h.is_active());
             for t in &h.targets {
                 prop_assert!(parent_h.targets.contains(t));
             }

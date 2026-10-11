@@ -211,12 +211,29 @@ impl ActivePolicy {
     /// Attenuation pre-check: would widening by `delta` stay `⊆ ceiling`? Does **not** mutate — used
     /// by [`escalate::escalate`] to refuse a beyond-ceiling request *before* consulting consent.
     pub fn check_widen(&self, delta: &GrantDelta) -> Result<(), String> {
+        self.check_net_enforceable(delta)?;
         let mut candidate = self.active.clone();
         fold_delta(&mut candidate, delta);
         self.ceiling
             .derive(candidate)
             .map(|_| ())
             .map_err(|e| format!("exceeds capability ceiling: {e}"))
+    }
+
+    /// Under an active `[policy.http]` the tool scope's only network rule is the proxy loopback:
+    /// every reload re-applies it over `network.allow` (019), and `compile_http` refuses a policy
+    /// that names both. A direct `net` grant would therefore be approved, recorded and never
+    /// enforced — and break the next recompile. Refused before consent, so nobody is asked.
+    fn check_net_enforceable(&self, delta: &GrantDelta) -> Result<(), String> {
+        let intercepting = self.active.http.as_ref().is_some_and(|h| h.is_active());
+        if intercepting && !delta.net.is_empty() {
+            return Err(format!(
+                "direct network grant {:?} has no effect under [policy.http]: tool traffic goes \
+                 through the proxy; grant an http target instead",
+                delta.net
+            ));
+        }
+        Ok(())
     }
 
     /// The part of `delta` that `active` does not already grant.
@@ -290,6 +307,7 @@ impl ActivePolicy {
         ttl: Ttl,
         turn: u32,
     ) -> Result<GrantId, String> {
+        self.check_net_enforceable(&delta)?;
         let mut candidate = self.active.clone();
         fold_delta(&mut candidate, &delta);
         self.ceiling
@@ -362,6 +380,28 @@ mod tests {
         let mut d = GrantDelta::default();
         d.filesystem.insert(path.to_string(), access);
         d
+    }
+
+    #[test]
+    fn a_direct_net_grant_is_refused_while_intercepting() {
+        // Review of #21: the reload re-applies the proxy loopback over `network.allow`, so the grant
+        // would be approved and never enforced.
+        let mut base = policy("base", &[]);
+        base.http = Some(bee_core::policy::HttpPolicy {
+            targets: vec![bee_core::HostPort::try_from("app.test:443".to_string()).unwrap()],
+            ..Default::default()
+        });
+        let mut ceiling = base.clone();
+        ceiling.network.allow.push("10.0.0.5:443".into());
+        let mut ap = ActivePolicy::new(base, ceiling);
+        let d = GrantDelta {
+            net: vec!["10.0.0.5:443".into()],
+            ..Default::default()
+        };
+        assert!(ap.check_widen(&d).unwrap_err().contains("[policy.http]"));
+        assert!(ap
+            .try_apply(GrantOrigin::Explicit, d, Ttl::Forever, 0)
+            .is_err());
     }
 
     // ── `unmet` — what is left of a delta once what is already held is taken out ────────────────

@@ -153,6 +153,18 @@ impl Policy {
         let empty = crate::policy::HttpPolicy::default();
         let parent = self.http.as_ref().unwrap_or(&empty);
 
+        // A section with no targets is inactive: the child's tool scope would compile with no proxy
+        // loopback rule and fall back to its own network list — under an intercepting parent that
+        // list is empty, which the kernel reads as "everything". Turning interception off is not a
+        // narrowing, so it is refused rather than silently inherited.
+        if parent.is_active() && !child.is_active() {
+            return Err(AttenuationError::new(
+                "http.targets",
+                "an empty targets list would drop the parent's interception scope; \
+                 name a subset of its targets or omit [policy.http] to inherit it",
+            ));
+        }
+
         for t in &child.targets {
             if !parent.targets.contains(t) {
                 return Err(AttenuationError::new(

@@ -1,1 +1,3 @@
-{"feature_directory":"specs/024-session-core"}
+{
+  "feature_directory": "specs/025-long-run-resilience"
+}

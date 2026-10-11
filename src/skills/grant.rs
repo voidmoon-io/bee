@@ -7,124 +7,18 @@
 //!    subset of a **ceiling** policy (`ceiling.derive(candidate)`, [`bee_core`]). Beyond the ceiling
 //!    the grant is *refused* — no prompt can authorize it (Constitution II, III). Absent a distinct
 //!    ceiling, base *is* the ceiling, so nothing widens and skills stay instructions-only.
-//! 2. **Human consent (within the ceiling).** A within-ceiling request is offered to a
-//!    [`ConsentSink`]. The non-interactive default ([`DenyAll`]) refuses every grant, so batch,
-//!    concurrent, and CTF runs stay deny-by-default (Constitution I); only an interactive session
-//!    wires a sink that can approve.
+//! 2. **Consent (within the ceiling).** A within-ceiling request is put to the session's
+//!    [`Operator`] (024): a person for an interactive session, the ceiling file itself for an
+//!    autonomous one. Every decision, including a refusal beyond the ceiling, is recorded there.
 //!
 //! This module is pure and host-testable: it computes the policy to compile and the tools to
 //! register, but neither compiles a scope nor mutates a registry — the caller does that.
 
-use std::collections::BTreeMap;
-
 use bee_core::{Access, Policy};
 
+use crate::grants::GrantOrigin;
+use crate::operator::{ConsentRequest, Operator, Reason};
 use crate::skills::{Skill, SkillRequires};
-
-/// A skill's capability request, surfaced to a [`ConsentSink`] for human review.
-pub struct GrantRequest<'a> {
-    /// The requesting skill's name.
-    pub skill: &'a str,
-    /// Harness tools it wants registered (e.g. `bash`).
-    pub tools: &'a [String],
-    /// Filesystem grants it wants, as authored (`path -> "read"|"write"|"deny"`).
-    pub filesystem: &'a BTreeMap<String, String>,
-    /// Network destinations it wants (`host:port`). Before 019 these were approved without being
-    /// shown (research R13).
-    pub net: &'a [String],
-    /// Binaries it wants to execute.
-    pub exec: &'a [String],
-    /// Interception targets it wants added to the session's target scope (019 US3), `host:port`.
-    pub http_targets: &'a [String],
-}
-
-impl GrantRequest<'_> {
-    /// The request as an operator reads it: a header naming the requester, then one line per granted
-    /// item. Every interactive [`ConsentSink`] renders through this, so none can forget a field —
-    /// a grant field that is not rendered here is approved unseen.
-    ///
-    /// Every value is passed through [`crate::safe_text::safe_line`]: the fields can be skill-
-    /// authored or derived from a kernel audit, and this text *is* the consent boundary, so a value
-    /// must not be able to forge a second line or hide behind terminal escapes.
-    pub fn render_lines(&self) -> Vec<String> {
-        let safe = crate::safe_text::safe_line;
-        let mut lines = vec![format!(
-            "'{}' requests extra capabilities:",
-            safe(self.skill)
-        )];
-        if !self.tools.is_empty() {
-            let tools: Vec<_> = self.tools.iter().map(|t| safe(t)).collect();
-            lines.push(format!("  tools: {}", tools.join(", ")));
-        }
-        for (path, access) in self.filesystem {
-            lines.push(format!("  filesystem: {} = {}", safe(path), safe(access)));
-        }
-        for dest in self.net {
-            lines.push(format!("  network: connect {}", safe(dest)));
-        }
-        for bin in self.exec {
-            lines.push(format!("  exec: {}", safe(bin)));
-        }
-        for target in self.http_targets {
-            lines.push(format!(
-                "  http target: {} (testable through the proxy)",
-                safe(target)
-            ));
-        }
-        lines
-    }
-}
-
-/// The outcome of a consent request. A timeout at the call site maps to [`Decision::Denied`]
-/// (fail-closed, Constitution I).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Decision {
-    Granted,
-    Denied,
-}
-
-/// Decides whether a within-ceiling capability request is approved. Async so a sink may poll an
-/// out-of-band approver (prompt, queue, webhook); implemented for any `Fn(&GrantRequest) -> bool`
-/// so a synchronous closure (a REPL prompt, a test) still works (007-dynamic-grants, contract
-/// `consent.md`).
-#[async_trait::async_trait]
-pub trait ConsentSink: Send + Sync {
-    /// [`Decision::Granted`] to grant, [`Decision::Denied`] to refuse. When in doubt, refuse.
-    async fn confirm(&self, request: &GrantRequest<'_>) -> Decision;
-}
-
-#[async_trait::async_trait]
-impl<F: Fn(&GrantRequest<'_>) -> bool + Send + Sync> ConsentSink for F {
-    async fn confirm(&self, request: &GrantRequest<'_>) -> Decision {
-        if self(request) {
-            Decision::Granted
-        } else {
-            Decision::Denied
-        }
-    }
-}
-
-/// The non-interactive default: refuse every grant. Keeps automated runs deny-by-default.
-pub struct DenyAll;
-
-#[async_trait::async_trait]
-impl ConsentSink for DenyAll {
-    async fn confirm(&self, _request: &GrantRequest<'_>) -> Decision {
-        Decision::Denied
-    }
-}
-
-/// Approve every request — used when the **ceiling policy file** *is* the authorization (batch/CTF
-/// episodes, Constitution IV). Safe because [`resolve_grants`] only consults a sink for a request it
-/// has already proven ⊆ ceiling; with no distinct ceiling, base = ceiling and nothing reaches here.
-pub struct AllowWithinCeiling;
-
-#[async_trait::async_trait]
-impl ConsentSink for AllowWithinCeiling {
-    async fn confirm(&self, _request: &GrantRequest<'_>) -> Decision {
-        Decision::Granted
-    }
-}
 
 /// The result of resolving a set of skills' capability requests.
 pub struct GrantOutcome {
@@ -174,14 +68,14 @@ fn more_permissive(a: Access, b: Access) -> Access {
     }
 }
 
-/// Resolve every skill's capability request against `base` and `ceiling`, gating within-ceiling
-/// requests through `consent`. Skills without a `requires` block are instructions-only and skipped.
+/// Resolve every skill's capability request against `base` and `ceiling`, putting within-ceiling
+/// requests to `operator` and recording a beyond-ceiling one there unasked. Skills without a `requires` block are instructions-only and skipped.
 /// The returned [`GrantOutcome::policy`] is `base` widened by exactly the approved deltas.
 pub async fn resolve_grants(
     skills: &[&Skill],
     base: &Policy,
     ceiling: &Policy,
-    consent: &dyn ConsentSink,
+    operator: &Operator,
 ) -> GrantOutcome {
     let mut policy = base.clone();
     let mut tools: Vec<String> = Vec::new();
@@ -201,8 +95,25 @@ pub async fn resolve_grants(
             }
         };
 
+        // The request is built from the same delta an in-loop `skill` call proposes, so it carries
+        // every capability kind the skill can ask for.
+        let request = match crate::grants::escalate::delta_from_requires(req) {
+            Ok(delta) => ConsentRequest::from_delta(
+                GrantOrigin::Startup {
+                    skill: skill.name.clone(),
+                },
+                &delta,
+                0,
+            ),
+            Err(reason) => {
+                refused.push((skill.name.clone(), reason));
+                continue;
+            }
+        };
+
         // 1. Attenuation ceiling — not overridable by consent. `derive` proves candidate ⊆ ceiling.
         if let Err(e) = ceiling.derive(candidate.clone()) {
+            operator.record_unasked(request, Reason::BeyondCeiling);
             refused.push((
                 skill.name.clone(),
                 format!("exceeds capability ceiling: {e}"),
@@ -210,17 +121,14 @@ pub async fn resolve_grants(
             continue;
         }
 
-        // 2. Human consent, only for a request that is already within the ceiling.
-        let request = GrantRequest {
-            net: &[],
-            exec: &[],
-            http_targets: &[],
-            skill: &skill.name,
-            tools: &req.tools,
-            filesystem: &req.filesystem,
-        };
-        if consent.confirm(&request).await == Decision::Denied {
-            refused.push((skill.name.clone(), "denied by operator".to_string()));
+        // 2. Consent, only for a request that is already within the ceiling.
+        let record = operator.consent(request).await;
+        if record.reason != Reason::Granted {
+            let why = match record.reason {
+                Reason::TimedOut => "consent timed out",
+                _ => "denied by operator",
+            };
+            refused.push((skill.name.clone(), why.to_string()));
             continue;
         }
 
@@ -257,8 +165,19 @@ fn widen(policy: &Policy, req: &SkillRequires) -> Result<Policy, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::operator::{AllowWithinCeiling, DenyAll, OperatorKind, Verdict};
     use crate::skills::{SkillRequires, SkillSource};
+    use std::collections::BTreeMap;
     use std::path::PathBuf;
+    use std::sync::Arc;
+
+    fn deny() -> Operator {
+        Operator::with_consent(OperatorKind::Interactive, Arc::new(DenyAll))
+    }
+
+    fn allow() -> Operator {
+        Operator::with_consent(OperatorKind::Interactive, Arc::new(AllowWithinCeiling))
+    }
 
     /// A `Skill` with a given `requires`, without touching the filesystem.
     fn skill(name: &str, requires: Option<SkillRequires>) -> Skill {
@@ -306,7 +225,7 @@ mod tests {
     async fn instructions_only_skill_is_a_noop() {
         let s = skill("plain", None);
         let base = policy("base", &[]);
-        let out = resolve_grants(&[&s], &base, &base, &DenyAll).await;
+        let out = resolve_grants(&[&s], &base, &base, &deny()).await;
         assert!(out.is_noop());
         assert!(out.granted.is_empty());
         assert!(out.refused.is_empty());
@@ -322,7 +241,7 @@ mod tests {
         let base = policy("base", &[]);
         // Ceiling permits write under /tmp.
         let ceiling = policy("ceiling", &[("/tmp", Access::Write)]);
-        let out = resolve_grants(&[&s], &base, &ceiling, &|_: &GrantRequest<'_>| true).await;
+        let out = resolve_grants(&[&s], &base, &ceiling, &allow()).await;
         assert_eq!(out.granted, vec!["writer".to_string()]);
         assert_eq!(out.tools, vec!["bash".to_string()]);
         assert_eq!(out.policy.filesystem.get("/tmp/work"), Some(&Access::Write));
@@ -337,7 +256,7 @@ mod tests {
         );
         let base = policy("base", &[]);
         let ceiling = policy("ceiling", &[("/tmp", Access::Write)]);
-        let out = resolve_grants(&[&s], &base, &ceiling, &DenyAll).await;
+        let out = resolve_grants(&[&s], &base, &ceiling, &deny()).await;
         assert!(out.granted.is_empty());
         assert!(out.tools.is_empty());
         // Policy is untouched — the base has no /tmp/work grant.
@@ -354,23 +273,40 @@ mod tests {
         let base = policy("base", &[]);
         // Ceiling only permits /tmp — /etc is out of bounds.
         let ceiling = policy("ceiling", &[("/tmp", Access::Write)]);
-        let consent = |_: &GrantRequest<'_>| {
-            PROMPTED.store(true, Ordering::SeqCst);
-            true
-        };
-        let out = resolve_grants(&[&s], &base, &ceiling, &consent).await;
+        struct Spy;
+        #[async_trait::async_trait]
+        impl crate::operator::Consent for Spy {
+            async fn decide(&self, _r: &ConsentRequest) -> crate::operator::Decision {
+                PROMPTED.store(true, Ordering::SeqCst);
+                crate::operator::Decision::Granted
+            }
+        }
+        let operator = Operator::with_consent(OperatorKind::Interactive, Arc::new(Spy));
+        let out = resolve_grants(&[&s], &base, &ceiling, &operator).await;
         assert!(out.granted.is_empty());
         assert!(!out.policy.filesystem.contains_key("/etc"));
         assert!(out.refused[0].1.contains("exceeds capability ceiling"));
-        // The human is never even asked for an unauthorizable request.
+        // The human is never even asked for an unauthorizable request — but the refusal is recorded.
         assert!(!PROMPTED.load(Ordering::SeqCst));
+        let log = operator.take_log();
+        assert_eq!(log.len(), 1);
+        assert_eq!(
+            (log[0].decision, log[0].reason),
+            (Verdict::Refused, Reason::BeyondCeiling)
+        );
+        assert_eq!(
+            log[0].request.origin,
+            GrantOrigin::Startup {
+                skill: "greedy".into()
+            }
+        );
     }
 
     #[tokio::test]
     async fn malformed_access_word_is_refused() {
         let s = skill("typo", Some(requires(&[], &[("/tmp/x", "wrtie")])));
         let base = policy("base", &[("/tmp", Access::Write)]);
-        let out = resolve_grants(&[&s], &base, &base, &|_: &GrantRequest<'_>| true).await;
+        let out = resolve_grants(&[&s], &base, &base, &allow()).await;
         assert!(out.granted.is_empty());
         assert!(out.refused[0].1.contains("invalid access"));
     }
@@ -380,7 +316,7 @@ mod tests {
         // base == ceiling and base grants nothing ⇒ any fs request exceeds the ceiling.
         let s = skill("writer", Some(requires(&[], &[("/tmp/work", "write")])));
         let base = policy("base", &[]);
-        let out = resolve_grants(&[&s], &base, &base, &|_: &GrantRequest<'_>| true).await;
+        let out = resolve_grants(&[&s], &base, &base, &allow()).await;
         assert!(out.granted.is_empty());
         assert!(out.refused[0].1.contains("exceeds capability ceiling"));
     }
@@ -390,7 +326,7 @@ mod tests {
         // A skill wanting only a tool (no fs delta) is within any ceiling; consent alone gates it.
         let s = skill("tooler", Some(requires(&["bash"], &[])));
         let base = policy("base", &[]);
-        let out = resolve_grants(&[&s], &base, &base, &|_: &GrantRequest<'_>| true).await;
+        let out = resolve_grants(&[&s], &base, &base, &allow()).await;
         assert_eq!(out.granted, vec!["tooler".to_string()]);
         assert_eq!(out.tools, vec!["bash".to_string()]);
     }
@@ -400,7 +336,7 @@ mod tests {
         let a = skill("a", Some(requires(&["bash", "read_file"], &[])));
         let b = skill("b", Some(requires(&["bash"], &[])));
         let base = policy("base", &[]);
-        let out = resolve_grants(&[&a, &b], &base, &base, &|_: &GrantRequest<'_>| true).await;
+        let out = resolve_grants(&[&a, &b], &base, &base, &allow()).await;
         assert_eq!(out.tools, vec!["bash".to_string(), "read_file".to_string()]);
         assert_eq!(out.granted.len(), 2);
     }

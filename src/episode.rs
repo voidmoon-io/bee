@@ -528,6 +528,7 @@ pub async fn run_loop(
 
     let ended_at = OffsetDateTime::now_utc();
     EpisodeTranscript {
+        consents: Vec::new(),
         http_scope: None,
         scenario_id: scenario.id.clone(),
         model_id: model.id().to_string(),
@@ -548,6 +549,7 @@ pub async fn run_loop(
 fn infra_error(scenario: &Scenario, model: &dyn Model, detail: String) -> EpisodeTranscript {
     let now = rfc3339(OffsetDateTime::now_utc());
     EpisodeTranscript {
+        consents: Vec::new(),
         http_scope: None,
         scenario_id: scenario.id.clone(),
         model_id: model.id().to_string(),
@@ -707,8 +709,15 @@ pub async fn run_episode_with(
     // (FR-018/FR-041), so an MCP Bearer token never leaks into a sandboxed stdio server's env.
     let mut strip_env = sandbox::key_vars(provider_key_env);
     strip_env.extend(scenario.mcp.token_env_names());
+    // One progress sink, shared by the loop and the operator, which reports each consent decision on
+    // it (024 FR-004).
+    let progress = progress.map(std::sync::Arc::new);
+    let operator = crate::operator::Operator::autonomous(match &progress {
+        Some(p) => std::sync::Arc::new(crate::operator::ProgressOutput(p.clone())),
+        None => std::sync::Arc::new(crate::operator::NullOutput),
+    });
     let mut opts = LoopOptions {
-        progress,
+        progress: progress.map(|p| Box::new(move |line: &str| p(line)) as ProgressSink),
         metrics: Recorder::new(
             "episode",
             format!("episode:{}:{}", scenario.id, std::process::id()),
@@ -724,7 +733,7 @@ pub async fn run_episode_with(
     // The session, built the one way every entry point builds it (024 FR-006): skill grants, the
     // `[policy.http]` advisory, the sandbox, the Interceptor, the tool surface, MCP servers and
     // escalation.
-    let spec = spec_from_scenario(scenario, strip_env, &eopts);
+    let spec = spec_from_scenario(scenario, strip_env, &eopts, operator);
     let mut session = match crate::session::build(spec, &|line| emit(&opts, line)).await {
         Ok(s) => s,
         Err(e) => return infra_error(scenario, model, e.to_string()),
@@ -747,6 +756,7 @@ pub async fn run_episode_with(
     )
     .await;
     transcript.http_scope = session.http_header();
+    transcript.consents = session.operator.take_log();
 
     // MCP servers, then the Interceptor, then the scopes (FR-012). A scope that will not empty means
     // something survived the episode and is about to lose its enforcement when the engine drops.
@@ -772,6 +782,7 @@ pub(crate) fn spec_from_scenario(
     scenario: &Scenario,
     strip_env: Vec<String>,
     eopts: &EpisodeOptions,
+    operator: crate::operator::Operator,
 ) -> crate::session::SessionSpec {
     use bee_core::Policy;
     let policy = Policy::from_path(&scenario.policy_path).ok();
@@ -802,9 +813,8 @@ pub(crate) fn spec_from_scenario(
         strip_env,
         http_scope_advisory: eopts.http_scope_advisory,
         lease_turns: scenario.lease_turns,
-        // Non-interactive: the ceiling file is the operator's reviewable pre-authorization.
-        consent: std::sync::Arc::new(crate::skills::AllowWithinCeiling),
-        consent_timeout: std::time::Duration::from_secs(60),
+        // Autonomous: the ceiling file is the operator's reviewable pre-authorization.
+        operator,
         prebuilt_sandbox: None,
     }
 }

@@ -13,10 +13,9 @@
 mod fixtures;
 
 use std::sync::Arc;
-use std::time::Duration;
 
+use bee::operator::{ChannelConsent, NullOutput, Operator};
 use bee::session::{build, BuildError, Enforcement, EntryPoint, SessionSpec};
-use bee::skills::AllowWithinCeiling;
 use bee_core::Access;
 use fixtures::{http_policy, policy};
 
@@ -44,8 +43,7 @@ fn spec(entry: EntryPoint) -> SessionSpec {
         strip_env: Vec::new(),
         http_scope_advisory: false,
         lease_turns: Some(3),
-        consent: Arc::new(AllowWithinCeiling),
-        consent_timeout: Duration::from_secs(60),
+        operator: Operator::autonomous(Arc::new(NullOutput)),
         prebuilt_sandbox: None,
     }
 }
@@ -94,6 +92,36 @@ async fn the_system_prompt_names_the_render_tool_everywhere() {
         assert!(prompt.starts_with("You are a test agent."), "{entry:?}");
         assert!(prompt.contains("`render` tool"), "{entry:?}: {prompt}");
     }
+}
+
+// SC-001, SC-005: an autonomous and an interactive session differ only in the operator — who
+// decides a grant, and how long they have.
+#[tokio::test]
+async fn interactive_and_autonomous_differ_only_in_the_operator() {
+    let autonomous = snapshot(EntryPoint::Repl).await;
+    let (consent, _rx) = ChannelConsent::new();
+    let mut interactive_spec = spec(EntryPoint::Repl);
+    interactive_spec.operator = Operator::interactive(consent, Arc::new(NullOutput));
+    let mut session = build(interactive_spec, &|_| {}).await.expect("builds");
+    let interactive = serde_json::to_value(session.snapshot()).unwrap();
+    session.shutdown().await.unwrap();
+
+    assert_eq!(autonomous["operator"], "autonomous");
+    assert_eq!(interactive["operator"], "interactive");
+    assert_eq!(
+        (
+            autonomous["consent_timeout_secs"].as_u64(),
+            interactive["consent_timeout_secs"].as_u64()
+        ),
+        (Some(60), Some(120))
+    );
+    let without_operator = |mut v: serde_json::Value| {
+        let o = v.as_object_mut().unwrap();
+        o.remove("operator");
+        o.remove("consent_timeout_secs");
+        v
+    };
+    assert_eq!(without_operator(autonomous), without_operator(interactive));
 }
 
 // FR-008: a concurrent batch refuses, by name and before any scope exists, what it cannot provide.

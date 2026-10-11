@@ -29,10 +29,11 @@ use std::time::Duration;
 
 use bee::grants::escalate::{DenialEscalationHook, LoopEscalation, SkillEscalationHook};
 use bee::grants::Ttl;
+use bee::operator::ConsentRequest;
 use bee::provider::mock_model::MockModel;
 use bee::provider::{Conversation, Model, ToolCall, Turn};
 use bee::repl::{run_exchange, ReplConfig, ReplEscalation, ReplOutput};
-use bee::skills::{GrantRequest, SkillRegistry};
+use bee::skills::SkillRegistry;
 use bee::tools::{ToolRegistry, ToolResult};
 use bee_core::{Access, AuditEvent, Mode, Policy};
 
@@ -89,8 +90,8 @@ struct SpySink {
 }
 
 #[async_trait::async_trait]
-impl bee::skills::ConsentSink for SpySink {
-    async fn confirm(&self, _r: &GrantRequest<'_>) -> bee::skills::Decision {
+impl bee::operator::Consent for SpySink {
+    async fn decide(&self, _r: &ConsentRequest) -> bee::skills::Decision {
         self.asked.fetch_add(1, Ordering::SeqCst);
         if self.answer {
             bee::skills::Decision::Granted
@@ -104,8 +105,8 @@ impl bee::skills::ConsentSink for SpySink {
 struct NeverAnswers;
 
 #[async_trait::async_trait]
-impl bee::skills::ConsentSink for NeverAnswers {
-    async fn confirm(&self, _r: &GrantRequest<'_>) -> bee::skills::Decision {
+impl bee::operator::Consent for NeverAnswers {
+    async fn decide(&self, _r: &ConsentRequest) -> bee::skills::Decision {
         // Far longer than any timeout under test; the timeout must fire, not this.
         tokio::time::sleep(Duration::from_secs(3600)).await;
         bee::skills::Decision::Granted
@@ -170,7 +171,7 @@ fn fixture(
     base: Policy,
     ceiling: Policy,
     requires_yaml: &str,
-    consent: Arc<dyn bee::skills::ConsentSink>,
+    consent: Arc<dyn bee::operator::Consent>,
     timeout: Duration,
     tag: &str,
 ) -> Fixture {
@@ -183,8 +184,11 @@ fn fixture(
         base,
         ceiling,
         hooks,
-        consent,
-        timeout,
+        operator: bee::operator::Operator::with_consent(
+            bee::operator::OperatorKind::Interactive,
+            consent,
+        )
+        .with_timeout(timeout),
         default_ttl: Ttl::Forever,
     });
 
@@ -398,7 +402,7 @@ async fn a_grant_the_operator_denies_withholds_the_tool() {
 
 /// A consent sink that never resolves times out and denies, and the session keeps going (SC-003).
 ///
-/// Fail-closed: the elapse maps to `Denied`, not to a grant and not to a hang. The assertion that
+/// Fail-closed: the elapse refuses, not grants and not hangs, and says it timed out (024 T055). The assertion that
 /// matters as much as the outcome is that the test finishes at all.
 #[tokio::test]
 async fn a_consent_sink_that_never_answers_times_out_and_denies() {
@@ -420,8 +424,8 @@ async fn a_consent_sink_that_never_answers_times_out_and_denies() {
         "the exchange hung waiting on consent ({elapsed:?})"
     );
     assert!(
-        out.contains("denied by operator"),
-        "an elapsed timeout is a denial: {}",
+        out.contains("consent timed out"),
+        "an elapsed timeout is a refusal, reported as a timeout and not as the operator's no: {}",
         out.dump()
     );
     assert!(
@@ -449,8 +453,8 @@ struct RenderingSink {
 }
 
 #[async_trait::async_trait]
-impl bee::skills::ConsentSink for RenderingSink {
-    async fn confirm(&self, r: &GrantRequest<'_>) -> bee::skills::Decision {
+impl bee::operator::Consent for RenderingSink {
+    async fn decide(&self, r: &ConsentRequest) -> bee::skills::Decision {
         self.seen.lock().unwrap().push(r.render_lines().join("\n"));
         bee::skills::Decision::Granted
     }
@@ -473,15 +477,18 @@ async fn shown_for(delta: GrantDelta) -> String {
     let mut ap = ActivePolicy::new(policy("base", &[]), wide_ceiling());
     let mut reg = ToolRegistry::new();
     let mut sb = Sandbox::host(Vec::new());
-    let sink = RenderingSink::default();
+    let sink = Arc::new(RenderingSink::default());
+    let operator = bee::operator::Operator::with_consent(
+        bee::operator::OperatorKind::Interactive,
+        sink.clone(),
+    );
     let out = escalate(
         &mut ap,
         GrantOrigin::Explicit,
         delta,
         Ttl::Turns(1),
         0,
-        &sink,
-        Duration::from_secs(5),
+        &operator,
         &mut sb,
         &mut reg,
     )

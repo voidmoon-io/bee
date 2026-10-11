@@ -95,8 +95,11 @@ fn escalation(case: &Case, consent: Arc<RecordingConsent>) -> LoopEscalation {
         base: case.base.clone(),
         ceiling: case.ceiling.clone(),
         hooks: hooks(),
-        consent,
-        timeout: Duration::from_secs(5),
+        operator: bee::operator::Operator::with_consent(
+            bee::operator::OperatorKind::Autonomous,
+            consent,
+        )
+        .with_timeout(Duration::from_secs(5)),
         default_ttl: Ttl::Forever,
     }
 }

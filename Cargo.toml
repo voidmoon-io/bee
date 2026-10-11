@@ -390,6 +390,11 @@ path = "tests/call_lifecycle.rs"
 required-features = ["test-support"]
 
 [[test]]
+name = "operator"
+path = "tests/operator.rs"
+required-features = ["test-support"]
+
+[[test]]
 name = "call_characterization"
 path = "tests/call_characterization.rs"
 required-features = ["test-support"]

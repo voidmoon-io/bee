@@ -19,9 +19,8 @@ use serde::Deserialize;
 
 pub mod grant;
 
-pub use grant::{
-    resolve_grants, AllowWithinCeiling, ConsentSink, Decision, DenyAll, GrantOutcome, GrantRequest,
-};
+pub use crate::operator::{AllowWithinCeiling, Consent, ConsentRequest, Decision, DenyAll};
+pub use grant::{resolve_grants, GrantOutcome};
 
 /// Where a skill was discovered. Earlier roots win a name clash, so `Project` shadows `User`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

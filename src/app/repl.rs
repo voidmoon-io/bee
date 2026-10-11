@@ -2,15 +2,16 @@
 //!
 //! Built on the same session construction as `bee run`, so the enforcement path for a headless and
 //! an interactive session is one piece of code rather than two that happen to agree. What stays
-//! here is what genuinely belongs to an interactive session: the consent prompt, the startup
-//! banner, the front-end choice, and the transcript on exit.
+//! here is what genuinely belongs to an interactive session: its Operator — consent asked of the
+//! person at the terminal, through the front-end's own reader — the startup banner, the front-end
+//! choice, and the transcript on exit.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Args;
 
-use bee::repl::{run_repl, ReplConfig};
+use bee::repl::{run_repl, ReplConfig, ReplTerminal};
 
 use crate::app::config::{self, Flags};
 use crate::app::session::{self, EX_IOERR, EX_SOFTWARE, EX_USAGE};
@@ -195,11 +196,39 @@ async fn repl(args: ReplArgs) -> ExitCode {
     let mut strip_env = session::strip_vars(session.key_env.as_deref());
     strip_env.extend(mcp.token_env_names());
 
-    // The session, built the one way every entry point builds it (024 FR-006). Consent here is the
-    // interactive prompt: the operator is sitting in front of this session, so a capability asked for
-    // is a question, not a pre-authorization.
+    // The operator is sitting in front of this session, so a capability asked for is a question, not
+    // a pre-authorization (024 FR-001). The inline REPL opens its terminal first: the questions asked
+    // while the session is built and those asked while it runs share its one line reader.
+    let use_tui = choose_frontend(&args);
+    let (consent, consent_rx) = bee::operator::ChannelConsent::new();
+    let (operator, mut terminal, mut tui_consent) = if use_tui {
+        // The TUI asks in a modal; the operator reports into each turn's chat once it runs.
+        (
+            bee::operator::Operator::interactive(
+                consent,
+                std::sync::Arc::new(bee::operator::NullOutput),
+            ),
+            None,
+            Some(consent_rx),
+        )
+    } else {
+        // Off a terminal there is nobody to ask: the channel's far end is dropped, so every request
+        // is refused, and `run_repl` reports why the session cannot start.
+        let terminal = ReplTerminal::open().map(|t| t.with_consent(consent_rx));
+        let output: std::sync::Arc<dyn bee::operator::SessionOutput> = match &terminal {
+            Ok(t) => t.output(),
+            Err(_) => std::sync::Arc::new(bee::operator::NullOutput),
+        };
+        (
+            bee::operator::Operator::interactive(consent, output),
+            Some(terminal),
+            None,
+        )
+    };
+
+    // The session, built the one way every entry point builds it (024 FR-006).
     let spec = bee::session::SessionSpec {
-        entry: if choose_frontend(&args) {
+        entry: if use_tui {
             bee::session::EntryPoint::Tui
         } else {
             bee::session::EntryPoint::Repl
@@ -225,12 +254,18 @@ async fn repl(args: ReplArgs) -> ExitCode {
         strip_env,
         http_scope_advisory: args.http_scope_advisory,
         lease_turns: None,
-        consent: std::sync::Arc::new(prompt_consent as fn(&bee::skills::GrantRequest<'_>) -> bool),
-        consent_timeout: std::time::Duration::from_secs(120),
+        operator,
         prebuilt_sandbox: None,
     };
-    let use_tui = spec.entry == bee::session::EntryPoint::Tui;
-    let mut built = match bee::session::build(spec, &|line| eprintln!("{CMD}: {line}")).await {
+    let report = |line: &str| eprintln!("{CMD}: {line}");
+    let building = bee::session::build(spec, &report);
+    let built = match (terminal.as_mut(), tui_consent.as_mut()) {
+        (Some(Ok(t)), _) => t.serve_startup(building).await,
+        #[cfg(feature = "tui")]
+        (_, Some(rx)) => bee::tui::serve_startup(building, rx).await,
+        _ => building.await,
+    };
+    let mut built = match built {
         Ok(s) => s,
         Err(e) => {
             eprintln!("{CMD}: {e}");
@@ -284,6 +319,7 @@ async fn repl(args: ReplArgs) -> ExitCode {
                     &mut built.registry,
                     &mut built.sandbox,
                     &config,
+                    tui_consent.take(),
                 )
                 .await
                 {
@@ -293,6 +329,9 @@ async fn repl(args: ReplArgs) -> ExitCode {
             } else {
                 Some(
                     run_repl(
+                        terminal
+                            .take()
+                            .expect("the inline REPL opened its terminal"),
                         session.model.as_ref(),
                         &mut built.registry,
                         &mut built.sandbox,
@@ -304,11 +343,11 @@ async fn repl(args: ReplArgs) -> ExitCode {
         }
         #[cfg(not(feature = "tui"))]
         {
-            if use_tui {
-                eprintln!("{CMD}: --tui requires building with --features tui; running inline");
-            }
             Some(
                 run_repl(
+                    terminal
+                        .take()
+                        .expect("the inline REPL opened its terminal"),
                     session.model.as_ref(),
                     &mut built.registry,
                     &mut built.sandbox,
@@ -410,7 +449,10 @@ fn choose_frontend(args: &ReplArgs) -> bool {
     }
     #[cfg(not(feature = "tui"))]
     {
-        args.tui && !args.no_tui
+        if args.tui && !args.no_tui {
+            eprintln!("{CMD}: --tui requires building with --features tui; running inline");
+        }
+        false
     }
 }
 
@@ -437,29 +479,4 @@ fn terminal_rows() -> Option<u16> {
         }
     }
     None
-}
-
-/// Interactive skill-grant consent: prompt on stderr, read a y/N line from stdin. Any non-`y`
-/// answer — including end-of-input — refuses, so the default is deny.
-///
-/// A plain function rather than a trait impl: `ConsentSink` is blanket-implemented for any
-/// `Fn(&GrantRequest) -> bool`, which is exactly what a prompt is. This is the interactive
-/// session's whole contribution to the otherwise-shared grant path.
-fn prompt_consent(request: &bee::skills::GrantRequest<'_>) -> bool {
-    use std::io::Write;
-    // Every field here is skill-authored. Skill loading already refuses control characters in
-    // frontmatter, but this prompt is the consent boundary itself and takes a `GrantRequest` from
-    // any source, so it escapes what it prints rather than trusting an upstream check: a forged
-    // prompt is a granted capability. One line per field, so nothing can smuggle in a second line.
-    // `render_lines` escapes every field and covers every one — net and exec included, which this
-    // prompt once silently omitted (019 P2).
-    eprintln!();
-    for line in request.render_lines() {
-        eprintln!("{line}");
-    }
-    eprint!("grant these (within the ceiling)? [y/N] ");
-    let _ = std::io::stderr().flush();
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line).is_ok()
-        && matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }

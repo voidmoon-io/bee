@@ -338,8 +338,7 @@ async fn widen(
         delta,
         e.config.default_ttl,
         e.lease_turn,
-        e.config.consent.as_ref(),
-        e.config.timeout,
+        &e.config.operator,
         sandbox,
         registry,
     )

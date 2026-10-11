@@ -16,10 +16,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use bee::operator::{Consent, ConsentRequest, Decision};
 use bee::provider::ToolSchema;
 use bee::proxy_event::{ProxyEvent, ProxyEventKind};
 use bee::sandbox::{CallContext, CallHooks, HttpScopeHook, Sandbox, ScriptedAudit};
-use bee::skills::{ConsentSink, Decision, GrantRequest};
 use bee::tools::{Tool, ToolResult};
 use bee_core::AuditEvent;
 use futures_util::future::BoxFuture;
@@ -279,19 +279,19 @@ impl RecordingConsent {
 }
 
 #[async_trait::async_trait]
-impl ConsentSink for RecordingConsent {
-    async fn confirm(&self, r: &GrantRequest<'_>) -> Decision {
+impl Consent for RecordingConsent {
+    async fn decide(&self, r: &ConsentRequest) -> Decision {
         self.log.lock().unwrap().push(Asked {
-            skill: r.skill.to_string(),
-            tools: r.tools.to_vec(),
+            skill: r.requester().to_string(),
+            tools: r.tools.clone(),
             filesystem: r
                 .filesystem
                 .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
+                .map(|(k, v)| (k.clone(), bee::operator::access_word(*v).to_string()))
                 .collect(),
-            net: r.net.to_vec(),
-            exec: r.exec.to_vec(),
-            http_targets: r.http_targets.to_vec(),
+            net: r.net.clone(),
+            exec: r.exec.clone(),
+            http_targets: r.http_targets.clone(),
         });
         if self.answer {
             Decision::Granted

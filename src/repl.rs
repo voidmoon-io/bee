@@ -42,6 +42,7 @@ use crate::transcript::{
     EpisodeStatus, EpisodeTranscript, HarnessNote, NoteKind, RecordedCall, Timing, TranscriptTurn,
 };
 
+pub mod consent_input;
 pub mod terminal;
 
 pub use terminal::TerminalOutput;
@@ -964,6 +965,7 @@ fn build_transcript(
     usage: Option<Usage>,
 ) -> EpisodeTranscript {
     EpisodeTranscript {
+        consents: Vec::new(),
         http_scope: None,
         scenario_id: "repl".to_string(),
         model_id: model_id.to_string(),
@@ -1061,6 +1063,115 @@ fn history_path() -> Option<PathBuf> {
     Some(dir.join("repl_history"))
 }
 
+/// The inline REPL's terminal: its one line reader, the printer that writes above it, and the end of
+/// the operator's consent channel it answers (024 R3). Opened before the session is built, so the
+/// start-up consent questions are asked through the same reader the session then uses — never a raw
+/// `stdin` read, never a second reader.
+pub struct ReplTerminal {
+    /// The editor, when no read is outstanding.
+    editor: Option<DefaultEditor>,
+    /// A read still outstanding when start-up ended, handed to the session as its first read.
+    pending: Option<ReadHandle>,
+    hist_path: Option<PathBuf>,
+    output: Arc<TerminalOutput>,
+    consent_rx: Option<crate::operator::ConsentReceiver>,
+}
+
+impl ReplTerminal {
+    /// Open the terminal: the line editor with its history, and its printer.
+    pub fn open() -> Result<Self, String> {
+        let mut editor =
+            DefaultEditor::new().map_err(|e| format!("could not initialize readline: {e}"))?;
+        let hist_path = history_path();
+        if let Some(p) = &hist_path {
+            let _ = editor.load_history(p);
+        }
+        let printer = editor
+            .create_external_printer()
+            .map_err(|e| format!("could not initialize terminal output: {e}"))?;
+        Ok(ReplTerminal {
+            editor: Some(editor),
+            pending: None,
+            hist_path,
+            output: Arc::new(TerminalOutput::new(Box::new(printer))),
+            consent_rx: None,
+        })
+    }
+
+    /// Answer consent from `rx`: the operator's questions come here, start-up and in-loop alike.
+    pub fn with_consent(mut self, rx: crate::operator::ConsentReceiver) -> Self {
+        self.consent_rx = Some(rx);
+        self
+    }
+
+    /// Where the session's lines go before the session runs.
+    pub fn output(&self) -> Arc<dyn crate::operator::SessionOutput> {
+        self.output.clone()
+    }
+
+    /// Drive `fut` — the session being built — to completion, answering the start-up consent
+    /// questions it asks from this terminal's reader. An answer that is not `y`/`n` repeats the
+    /// question; end of input or Ctrl-C refuses. A read still open when `fut` finishes (the operator
+    /// stopped waiting) becomes the session's first read.
+    pub async fn serve_startup<F: std::future::Future>(&mut self, fut: F) -> F::Output {
+        tokio::pin!(fut);
+        let mut asking: Option<consent_input::Pending> = None;
+        let mut rx = self.consent_rx.take();
+        let output = self.output.clone();
+        let result = loop {
+            if asking.is_some() && self.pending.is_none() {
+                if let Some(editor) = self.editor.take() {
+                    self.pending = Some(issue_read(editor, "> ".to_string()));
+                }
+            }
+            tokio::select! {
+                r = &mut fut => break r,
+                Some(ask) = next_ask(&mut rx) => {
+                    let question = consent_input::Pending::new(ask);
+                    question.show(&*output);
+                    asking = Some(question);
+                }
+                joined = async { self.pending.as_mut().expect("guarded").await },
+                    if self.pending.is_some() =>
+                {
+                    self.pending = None;
+                    let (editor, line) = joined.expect("readline task panicked");
+                    self.editor = Some(editor);
+                    match line {
+                        Ok(line) => match consent_input::route(&mut asking, &line) {
+                            consent_input::Routed::Answered => {}
+                            consent_input::Routed::TooLate => output.info(consent_input::TOO_LATE),
+                            consent_input::Routed::Steering => {
+                                if let Some(q) = &asking {
+                                    q.show(&*output);
+                                }
+                            }
+                        },
+                        // End of input or Ctrl-C: refuse what is being asked.
+                        Err(_) => {
+                            if let Some(q) = asking.take() {
+                                q.refuse();
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        self.consent_rx = rx;
+        result
+    }
+}
+
+/// The next consent question, or never when there is no channel.
+async fn next_ask(
+    rx: &mut Option<crate::operator::ConsentReceiver>,
+) -> Option<crate::operator::ConsentAsk> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
 /// The type of the outstanding readline: an editor moved onto a blocking thread that returns it (so
 /// its history survives) alongside the line it read.
 type ReadHandle = tokio::task::JoinHandle<(DefaultEditor, Result<String, ReadlineError>)>;
@@ -1142,6 +1253,7 @@ pub(crate) fn effective_system_prompt(base: &str, registry: &ToolRegistry) -> St
 /// `/history`, `/retry`, `/save`, `/audit`, `/clear`, `/quit`) are handled inline. Returns the
 /// [`ReplSession`] record when the user quits or EOF is reached.
 pub async fn run_repl(
+    terminal: Result<ReplTerminal, String>,
     model: &dyn Model,
     registry: &mut ToolRegistry,
     sandbox: &mut Sandbox,
@@ -1163,12 +1275,10 @@ pub async fn run_repl(
     let mut message_log: Vec<String> = Vec::new();
     let mut last_user_message: Option<String> = None;
 
-    // Build the editor and take an external printer from it *before* moving it onto the read thread;
-    // the printer keeps working across every subsequent readline.
-    let mut editor = match DefaultEditor::new() {
-        Ok(e) => e,
+    let terminal = match terminal {
+        Ok(t) => t,
         Err(e) => {
-            eprintln!("bee-repl: could not initialize readline: {e}");
+            eprintln!("bee-repl: {e}");
             let transcript = build_transcript(
                 model.id(),
                 started_at,
@@ -1186,32 +1296,20 @@ pub async fn run_repl(
             };
         }
     };
-    let hist_path = history_path();
-    if let Some(p) = &hist_path {
-        let _ = editor.load_history(p);
+    let ReplTerminal {
+        editor,
+        pending: startup_read,
+        hist_path,
+        output: output_arc,
+        consent_rx,
+    } = terminal;
+    let mut consent_rx = consent_rx;
+    let output: &TerminalOutput = &output_arc;
+    // The operator's own lines (each consent decision) go to this terminal too.
+    let operator = config.escalation.as_ref().map(|e| &e.config.operator);
+    if let Some(op) = operator {
+        op.set_output(output_arc.clone());
     }
-    let printer = match editor.create_external_printer() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("bee-repl: could not initialize terminal output: {e}");
-            let transcript = build_transcript(
-                model.id(),
-                started_at,
-                start,
-                &turns,
-                &audit_trail,
-                usage_total,
-            );
-            return ReplSession {
-                conversation,
-                exchanges,
-                total_tool_calls,
-                total_denials,
-                transcript: Some(transcript),
-            };
-        }
-    };
-    let output = TerminalOutput::new(Box::new(printer));
 
     // Publish the drawable width so the render tool can reject widgets this terminal can't show
     // (008-grid-tui). Height is unbounded here — the inline REPL scrolls — and off a tty (piped
@@ -1252,8 +1350,14 @@ pub async fn run_repl(
 
     let steering: SteeringQueue = Arc::new(Mutex::new(VecDeque::new()));
     let prompt = "bee> ".to_string();
-    // Exactly one readline is outstanding at all times.
-    let mut pending = issue_read(editor, prompt.clone());
+    // Exactly one readline is outstanding at all times. A read left over from start-up consent is
+    // that read: the operator stopped waiting while it was open, so an answer typed into it is late.
+    let mut late_startup_answer = startup_read.is_some();
+    let mut pending = match (startup_read, editor) {
+        (Some(read), _) => read,
+        (None, Some(editor)) => issue_read(editor, prompt.clone()),
+        (None, None) => unreachable!("a terminal always holds its editor or its read"),
+    };
 
     loop {
         // Idle: wait for the next full line.
@@ -1272,6 +1376,11 @@ pub async fn run_repl(
             }
         };
         let line = line.trim().to_string();
+        if std::mem::take(&mut late_startup_answer) && consent_input::parse(&line).is_ok() {
+            output.info(consent_input::TOO_LATE);
+            pending = issue_read(editor, prompt.clone());
+            continue;
+        }
         if line.is_empty() {
             pending = issue_read(editor, prompt.clone());
             continue;
@@ -1337,7 +1446,7 @@ pub async fn run_repl(
                 }
                 MetaCommand::Save(path) => {
                     let path = path.unwrap_or_else(|| "bee-repl-session.json".to_string());
-                    let transcript = build_transcript(
+                    let mut transcript = build_transcript(
                         model.id(),
                         started_at,
                         start,
@@ -1345,6 +1454,7 @@ pub async fn run_repl(
                         &audit_trail,
                         usage_total,
                     );
+                    transcript.consents = operator.map(|op| op.log()).unwrap_or_default();
                     match std::fs::write(&path, transcript.to_json()) {
                         Ok(()) => output.info(&format!("saved transcript to {path}")),
                         Err(e) => output.error(&format!("could not write {path}: {e}")),
@@ -1383,23 +1493,41 @@ pub async fn run_repl(
                 registry,
                 sandbox,
                 config,
-                &output,
+                output,
                 &steering,
                 recorder.as_ref(),
             );
             tokio::pin!(fut);
+            // A consent question from the operator, waiting on this terminal's one reader.
+            let mut asking: Option<consent_input::Pending> = None;
             loop {
                 tokio::select! {
                     r = &mut fut => break r,
+                    Some(ask) = next_ask(&mut consent_rx) => {
+                        let question = consent_input::Pending::new(ask);
+                        question.show(output);
+                        asking = Some(question);
+                    }
                     joined = &mut pending => {
                         let (mut editor, line_res) = joined.expect("readline task panicked");
                         match line_res {
                             Ok(l) => {
                                 let l = l.trim().to_string();
-                                if !l.is_empty() {
-                                    remember(&mut editor, &hist_path, &l);
-                                    output.steering(&format!("↳ queued: {l}"));
-                                    steering.lock().expect("steering queue").push_back(l);
+                                match consent_input::route(&mut asking, &l) {
+                                    consent_input::Routed::Answered => {}
+                                    consent_input::Routed::TooLate => {
+                                        output.info(consent_input::TOO_LATE);
+                                    }
+                                    consent_input::Routed::Steering => {
+                                        if !l.is_empty() {
+                                            remember(&mut editor, &hist_path, &l);
+                                            output.steering(&format!("↳ queued: {l}"));
+                                            steering.lock().expect("steering queue").push_back(l);
+                                        }
+                                        if let Some(q) = &asking {
+                                            q.show(output);
+                                        }
+                                    }
                                 }
                             }
                             // Ctrl-D mid-exchange: quit once this exchange finishes.
@@ -1440,7 +1568,7 @@ pub async fn run_repl(
         plural(total_denials, "denial")
     ));
 
-    let transcript = build_transcript(
+    let mut transcript = build_transcript(
         model.id(),
         started_at,
         start,
@@ -1448,6 +1576,7 @@ pub async fn run_repl(
         &audit_trail,
         usage_total,
     );
+    transcript.consents = operator.map(|op| op.log()).unwrap_or_default();
     ReplSession {
         conversation,
         exchanges,

@@ -207,6 +207,7 @@ fn score_report_counts_techniques() {
         call("echo hello", vec![]),                           // no denial → not a technique
     ];
     let transcript = EpisodeTranscript {
+        consents: Vec::new(),
         http_scope: None,
         scenario_id: "s".into(),
         model_id: "mock/x".into(),

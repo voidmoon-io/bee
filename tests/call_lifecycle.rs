@@ -95,8 +95,11 @@ async fn run(case: &Case, timeout: TimeoutPolicy) -> Ran {
             Box::new(DenialEscalationHook { enabled: true }),
             Box::new(ProxyRefusalHook { enabled: true }),
         ],
-        consent: consent.clone(),
-        timeout: Duration::from_secs(5),
+        operator: bee::operator::Operator::with_consent(
+            bee::operator::OperatorKind::Autonomous,
+            consent.clone(),
+        )
+        .with_timeout(Duration::from_secs(5)),
         default_ttl: Ttl::Forever,
     };
     let mut active = ActivePolicy::new(case.base.clone(), case.ceiling.clone());

@@ -32,12 +32,14 @@ use crossterm::event::EventStream;
 use futures_util::StreamExt;
 
 use crate::metrics::Recorder;
+use crate::operator::{ConsentAsk, ConsentReceiver, Decision};
 use crate::provider::{Conversation, Model};
 use crate::render_spec::RenderSpec;
 use crate::repl::{effective_system_prompt, run_exchange, ReplConfig, SteeringQueue};
 use crate::sandbox::Sandbox;
 use crate::tools::ToolRegistry;
 use crate::tui::events::SessionSink;
+use tokio::sync::oneshot;
 
 use app::{update, App};
 use chat::{ChatMessage, Role};
@@ -61,6 +63,7 @@ pub async fn run(
     registry: &mut ToolRegistry,
     sandbox: &mut Sandbox,
     config: &ReplConfig,
+    mut consent: Option<ConsentReceiver>,
 ) -> io::Result<()> {
     // Shared conversation core, identical to the inline REPL's setup (session/mod.rs).
     let mut conversation = Conversation {
@@ -131,6 +134,7 @@ pub async fn run(
                 config,
                 &steering,
                 recorder.as_ref(),
+                &mut consent,
             )
             .await?;
             continue;
@@ -228,8 +232,15 @@ async fn run_turn(
     config: &ReplConfig,
     steering: &SteeringQueue,
     recorder: Option<&Recorder>,
+    consent: &mut Option<ConsentReceiver>,
 ) -> io::Result<()> {
     let (sink, mut rx) = SessionSink::new();
+    // The operator reports its decisions into this turn's chat.
+    if let Some(esc) = &config.escalation {
+        esc.config.operator.set_output(Arc::new(sink.clone()));
+    }
+    // The reply to the question on screen, if one is.
+    let mut asking: Option<oneshot::Sender<Decision>> = None;
     let exchange = run_exchange(
         text,
         model,
@@ -249,6 +260,7 @@ async fn run_turn(
     let mut turn_done = false;
 
     loop {
+        settle_consent(app, &mut asking);
         let now = std::time::Instant::now();
         app.panels.prune(now);
         app.advance_overlay(now);
@@ -273,6 +285,10 @@ async fn run_turn(
                 }
             }
             Some(ev) = rx.recv() => update(app, Message::session(ev)),
+            Some(ask) = next_ask(consent) => {
+                app.ask_consent(ask.request.render_lines());
+                asking = Some(ask.reply);
+            }
             maybe = events.next() => match maybe {
                 Some(Ok(ev)) => {
                     if let Some(msg) = message_from_event(ev) {
@@ -296,6 +312,79 @@ async fn run_turn(
     }
 }
 
+/// Send the operator's answer to the question it answers, and take a question off screen once the
+/// operator has stopped waiting for it (024 T059). An answer with nowhere to go is reported, never
+/// applied.
+fn settle_consent(app: &mut App, asking: &mut Option<oneshot::Sender<Decision>>) {
+    if let Some(decision) = app.take_consent_answer() {
+        let sent = asking.take().map(|reply| reply.send(decision).is_ok());
+        if sent != Some(true) {
+            app.system_line(crate::repl::consent_input::TOO_LATE);
+        }
+    }
+    if asking.as_ref().is_some_and(|r| r.is_closed()) {
+        asking.take();
+        app.close_consent();
+    }
+}
+
+/// The next consent question, or never when there is no channel.
+async fn next_ask(rx: &mut Option<ConsentReceiver>) -> Option<ConsentAsk> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Drive `fut` — the session being built — to completion, asking its start-up consent questions as
+/// modals (024 T060). The full screen is entered only when the first question arrives, and left
+/// before returning, so `run` starts from a clean terminal and no reader outlives this call.
+pub async fn serve_startup<F: std::future::Future>(fut: F, rx: &mut ConsentReceiver) -> F::Output {
+    tokio::pin!(fut);
+    let mut screen: Option<(Tui, term::RestoreGuard, App, EventStream)> = None;
+    let mut asking: Option<oneshot::Sender<Decision>> = None;
+    let output = loop {
+        if let Some((terminal, _, app, _)) = screen.as_mut() {
+            settle_consent(app, &mut asking);
+            // A quit here refuses the question; the session itself starts, and quits from there.
+            app.should_quit = false;
+            let _ = terminal.draw(|f| view::view(app, f));
+        }
+        tokio::select! {
+            out = &mut fut => break out,
+            Some(ask) = rx.recv() => {
+                let (_, _, app, _) = screen.get_or_insert_with(|| {
+                    let terminal = term::init();
+                    let guard = term::RestoreGuard::terminal();
+                    let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+                    let mut app = App::new(cols, rows);
+                    app.system_line("starting the session — a skill asks for capabilities");
+                    (terminal, guard, app, EventStream::new())
+                });
+                app.ask_consent(ask.request.render_lines());
+                asking = Some(ask.reply);
+            }
+            Some(ev) = async { screen.as_mut().expect("guarded").3.next().await },
+                if screen.is_some() =>
+            {
+                if let (Ok(ev), Some((_, _, app, _))) = (ev, screen.as_mut()) {
+                    if let Some(msg) = message_from_event(ev) {
+                        update(app, msg);
+                    }
+                }
+            }
+            // Wake to notice a question the operator stopped waiting for.
+            _ = tokio::time::sleep(SPINNER_TICK), if asking.is_some() => {}
+        }
+    };
+    if let Some((_, mut guard, _, events)) = screen.take() {
+        drop(events);
+        term::restore();
+        guard.disarm();
+    }
+    output
+}
+
 /// Upsert the live HTTP history pane when new exchanges have arrived (019 US9). A no-op in a session
 /// without `[policy.http]`, and between arrivals.
 fn refresh_http_pane(app: &mut App, config: &ReplConfig) {
@@ -303,6 +392,47 @@ fn refresh_http_pane(app: &mut App, config: &ReplConfig) {
         if let Some(spec) = source() {
             app.panels.upsert("http", spec);
         }
+    }
+}
+
+#[cfg(test)]
+mod consent_tests {
+    use super::*;
+
+    #[test]
+    fn an_answer_reaches_the_question_it_answers() {
+        let mut app = App::new(120, 40);
+        let (reply, mut rx) = oneshot::channel();
+        let mut asking = Some(reply);
+        app.ask_consent(vec!["x".into()]);
+        app.consent_answer = Some(Decision::Granted);
+        app.consent = None;
+        settle_consent(&mut app, &mut asking);
+        assert_eq!(rx.try_recv(), Ok(Decision::Granted));
+        assert!(asking.is_none());
+    }
+
+    #[test]
+    fn a_question_nobody_waits_for_leaves_the_screen() {
+        let mut app = App::new(120, 40);
+        let (reply, rx) = oneshot::channel::<Decision>();
+        let mut asking = Some(reply);
+        app.ask_consent(vec!["x".into()]);
+        drop(rx); // the operator's timeout fired
+        settle_consent(&mut app, &mut asking);
+        assert!(app.consent.is_none() && asking.is_none());
+    }
+
+    #[test]
+    fn a_late_answer_is_reported_and_dropped() {
+        let mut app = App::new(120, 40);
+        let (reply, rx) = oneshot::channel::<Decision>();
+        drop(rx);
+        let mut asking = Some(reply);
+        app.consent_answer = Some(Decision::Granted);
+        let before = app.chat.len();
+        settle_consent(&mut app, &mut asking);
+        assert_eq!(app.chat.len(), before + 1, "the operator is told");
     }
 }
 

@@ -14,10 +14,16 @@
 //!
 //! ## Attribution (024 FR-027)
 //! A stdio server runs in the session's tool scope for its whole lifetime. Its own process's kernel
-//! events are told apart by `tgid`, recorded at spawn and exposed by [`McpBridge::server_tgids`]; the
-//! session routes them to a per-server record instead of the open tool call's audit. **Processes a
-//! server spawns are not attributed**: their events stay in the tool scope's stream, and land in
-//! whichever call is open, until MCP servers run in their own scope (018-subagent-scopes).
+//! events are told apart by `tgid`, recorded at spawn and exposed by [`McpBridge::server_tgids`]. A
+//! call made to the server keeps them in its audit, so its denials are fed back and can escalate;
+//! otherwise the session records them under the server, never in an unrelated open call's audit.
+//! Limits, until MCP servers run in their own scope (018-subagent-scopes):
+//! - **processes a server spawns are not attributed**: their events stay in the tool scope's stream,
+//!   and land in whichever call is open;
+//! - the `tgid` is the pid in bee's own PID namespace. Inside a separate one (bee in a container) it
+//!   does not match the kernel's, and server events fall back to the open call;
+//! - a server that exits keeps its `tgid` entry, so a process that later reuses the pid is filed
+//!   under the server.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};

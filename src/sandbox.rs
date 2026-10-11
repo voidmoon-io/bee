@@ -161,8 +161,14 @@ struct ChildEnv {
 
 /// MCP servers run in the tool scope for their whole lifetime, so the cgroup cannot tell their
 /// events from a tool call's. Each server's own process can be told apart by `tgid`, recorded at
-/// spawn (research R8). Processes a server spawns cannot, and stay in the tool scope's stream until
-/// MCP servers get scopes of their own (018-subagent-scopes).
+/// spawn (research R8): its events belong to a call made *to* that server, and are recorded under the
+/// server otherwise — never in an unrelated open call (FR-027).
+///
+/// Limitations, until MCP servers get scopes of their own (018-subagent-scopes):
+/// - processes a server spawns are not tracked by `tgid`, and stay in the tool scope's stream;
+/// - the `tgid` is the server's pid as bee sees it. In a separate PID namespace (bee in a container)
+///   it does not match the kernel's, nothing is routed, and server events fall back to the open call;
+/// - a server that exits keeps its entry, so a later process that reuses its pid is filed under it.
 #[derive(Default)]
 struct McpAttribution {
     /// Server process `tgid` → server name.
@@ -172,16 +178,19 @@ struct McpAttribution {
 }
 
 impl McpAttribution {
-    /// Keep the events of no MCP server; record the others under their server.
-    fn route(&mut self, events: Vec<AuditEvent>) -> Vec<AuditEvent> {
+    /// Keep the events of no MCP server and those of `call_server` — the server the open call is
+    /// made to, if any; record the others under their server.
+    fn route(&mut self, events: Vec<AuditEvent>, call_server: Option<&str>) -> Vec<AuditEvent> {
         if self.servers.is_empty() {
             return events;
         }
         let mut tool = Vec::with_capacity(events.len());
         for ev in events {
             match ev.tgid.and_then(|t| self.servers.get(&t)) {
-                Some(server) => self.audit.entry(server.clone()).or_default().push(ev),
-                None => tool.push(ev),
+                Some(server) if Some(server.as_str()) != call_server => {
+                    self.audit.entry(server.clone()).or_default().push(ev)
+                }
+                _ => tool.push(ev),
             }
         }
         tool
@@ -872,11 +881,12 @@ impl Sandbox {
     /// Non-blocking (research H5): the records are already buffered in the ring (sync) or channel
     /// (async).
     ///
-    /// Events from an MCP server's own process are not returned: they are recorded under that server
-    /// (see [`Sandbox::set_mcp_servers`], 024 FR-027).
-    pub fn drain_audit(&mut self) -> Vec<AuditEvent> {
+    /// `call_server` is the MCP server the call being drained is made to, if any. Events from that
+    /// server's own process are returned — they are the call's. Those of any other MCP server are not:
+    /// they are recorded under that server (see [`Sandbox::set_mcp_servers`], 024 FR-027).
+    pub fn drain_audit(&mut self, call_server: Option<&str>) -> Vec<AuditEvent> {
         let events = self.drain_scope_audit();
-        self.child_env_mut().mcp.route(events)
+        self.child_env_mut().mcp.route(events, call_server)
     }
 
     /// The MCP servers running in the tool scope, as `(name, tgid)`. From now on, drained events of
@@ -885,9 +895,39 @@ impl Sandbox {
         self.child_env_mut().mcp.servers = servers.into_iter().map(|(n, t)| (t, n)).collect();
     }
 
+    /// The MCP servers registered with [`Sandbox::set_mcp_servers`], as `(name, tgid)` by name.
+    pub fn mcp_servers(&self) -> Vec<(String, u32)> {
+        let mut v: Vec<(String, u32)> = self
+            .child_env()
+            .mcp
+            .servers
+            .iter()
+            .map(|(t, n)| (n.clone(), *t))
+            .collect();
+        v.sort();
+        v
+    }
+
     /// The kernel events each MCP server's own process produced since the last take, by server.
     pub fn take_mcp_audit(&mut self) -> std::collections::BTreeMap<String, Vec<AuditEvent>> {
         std::mem::take(&mut self.child_env_mut().mcp.audit)
+    }
+
+    /// The kernel events each MCP server's own process produced so far, as recorded by the drains
+    /// of the calls made since the last take.
+    pub fn mcp_audit(&self) -> &std::collections::BTreeMap<String, Vec<AuditEvent>> {
+        &self.child_env().mcp.audit
+    }
+
+    /// At the end of a session: drain the scope once more, so what the servers did after the last
+    /// call is recorded too, then take the record. Tool-scope events of no server that arrive after
+    /// the last call belong to no call, and are not returned.
+    pub async fn finish_mcp_audit(
+        &mut self,
+    ) -> std::collections::BTreeMap<String, Vec<AuditEvent>> {
+        self.settle().await;
+        let _ = self.drain_audit(None);
+        self.take_mcp_audit()
     }
 
     fn drain_scope_audit(&mut self) -> Vec<AuditEvent> {

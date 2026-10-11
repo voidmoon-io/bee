@@ -109,6 +109,8 @@ pub struct ScriptedTool {
     attempts: Mutex<VecDeque<Attempt>>,
     audit: Arc<ScriptedAudit>,
     calls: Arc<AtomicU32>,
+    name: &'static str,
+    server: Option<&'static str>,
 }
 
 impl ScriptedTool {
@@ -117,7 +119,16 @@ impl ScriptedTool {
             attempts: Mutex::new(attempts.into()),
             audit,
             calls: Arc::new(AtomicU32::new(0)),
+            name: SCRIPTED,
+            server: None,
         }
+    }
+
+    /// The same tool, standing in for MCP server `server`'s tool `name` (`mcp__<server>__<tool>`).
+    pub fn of_mcp_server(mut self, server: &'static str, name: &'static str) -> Self {
+        self.server = Some(server);
+        self.name = name;
+        self
     }
 
     /// A handle on the attempt counter that outlives the tool's move into a registry.
@@ -129,12 +140,16 @@ impl ScriptedTool {
 #[async_trait::async_trait]
 impl Tool for ScriptedTool {
     fn name(&self) -> &'static str {
-        SCRIPTED
+        self.name
+    }
+
+    fn mcp_server(&self) -> Option<&str> {
+        self.server
     }
 
     fn schema(&self) -> ToolSchema {
         ToolSchema {
-            name: SCRIPTED.into(),
+            name: self.name.into(),
             description: "a scripted test tool".into(),
             parameters: serde_json::json!({ "type": "object" }),
         }

@@ -983,17 +983,6 @@ fn build_transcript(
     }
 }
 
-/// Move the MCP servers' events recorded since the last call into `seen`, and return all of them.
-fn collect_mcp_audit(
-    seen: &mut std::collections::BTreeMap<String, Vec<AuditEvent>>,
-    sandbox: &mut Sandbox,
-) -> std::collections::BTreeMap<String, Vec<AuditEvent>> {
-    for (server, events) in sandbox.take_mcp_audit() {
-        seen.entry(server).or_default().extend(events);
-    }
-    seen.clone()
-}
-
 /// Summarize the audit events seen so far: total denials and a per-op breakdown.
 fn audit_summary(audit: &[AuditEvent]) -> String {
     if audit.is_empty() {
@@ -1280,8 +1269,6 @@ pub async fn run_repl(
     };
     let mut turns: Vec<TranscriptTurn> = Vec::new();
     let mut audit_trail: Vec<AuditEvent> = Vec::new();
-    // Each MCP server's own kernel events, collected from the sandbox for the transcript (024 FR-027).
-    let mut mcp_audit: std::collections::BTreeMap<String, Vec<AuditEvent>> = Default::default();
     let mut usage_total: Option<Usage> = None;
     let mut exchanges = 0u32;
     let mut total_tool_calls = 0u32;
@@ -1469,7 +1456,8 @@ pub async fn run_repl(
                         usage_total,
                     );
                     transcript.consents = operator.map(|op| op.log()).unwrap_or_default();
-                    transcript.mcp_audit = collect_mcp_audit(&mut mcp_audit, sandbox);
+                    // Each MCP server's own kernel events so far (024 FR-027).
+                    transcript.mcp_audit = sandbox.mcp_audit().clone();
                     match std::fs::write(&path, transcript.to_json()) {
                         Ok(()) => output.info(&format!("saved transcript to {path}")),
                         Err(e) => output.error(&format!("could not write {path}: {e}")),
@@ -1592,7 +1580,7 @@ pub async fn run_repl(
         usage_total,
     );
     transcript.consents = operator.map(|op| op.log()).unwrap_or_default();
-    transcript.mcp_audit = collect_mcp_audit(&mut mcp_audit, sandbox);
+    transcript.mcp_audit = sandbox.finish_mcp_audit().await;
     ReplSession {
         conversation,
         exchanges,

@@ -204,11 +204,14 @@ pub async fn run_call(
     }
 
     // 2–3. Open the call — attributing what it spawns, and any retry, to it — run it, collect.
+    //    A call to an MCP tool owns the events of that server's own process (FR-027).
+    let server = registry.mcp_server(&tc.name).map(str::to_string);
+    let server = server.as_deref();
     sandbox.begin_call(ctx.clone()).await;
     let (mut result, mut timed_out) =
         attempt(tc, &*sandbox, &*registry, deadline, &timeout_message).await;
     sandbox.settle().await;
-    let mut audit = sandbox.drain_audit();
+    let mut audit = sandbox.drain_audit(server);
     let mut denied_attempt_audit = Vec::new();
     let mut retried = false;
 
@@ -221,7 +224,7 @@ pub async fn run_call(
             if granted && !left(deadline).is_zero() {
                 let (r, t) = attempt(tc, &*sandbox, &*registry, deadline, &timeout_message).await;
                 sandbox.settle().await;
-                let retry_audit = sandbox.drain_audit();
+                let retry_audit = sandbox.drain_audit(server);
                 if t {
                     // FR-025: the abandoned retry does not replace the attempt that stands. Its
                     // kernel events are still this call's.
@@ -255,7 +258,7 @@ pub async fn run_call(
                     let (r, t) =
                         attempt(tc, &*sandbox, &*registry, deadline, &timeout_message).await;
                     sandbox.settle().await;
-                    let retry_audit = sandbox.drain_audit();
+                    let retry_audit = sandbox.drain_audit(server);
                     let retry_proxy = sandbox.end_call().await;
                     if t {
                         // FR-025: as for a kernel retry, the attempt before stands; the abandoned
@@ -279,7 +282,7 @@ pub async fn run_call(
     //    then tool-scope events that reached the ring since the last drain, which belong here, not to
     //    the next call (FR-022, FR-023).
     let proxy_audit = sandbox.drain_sidecar_audit();
-    audit.extend(sandbox.drain_audit());
+    audit.extend(sandbox.drain_audit(server));
 
     CallOutcome {
         result,

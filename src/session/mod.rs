@@ -8,10 +8,11 @@
 //! dropped without it.
 //!
 //! MCP servers run in the tool scope. Each server's own process is attributed by `tgid`: its kernel
-//! events go to a per-server record ([`crate::sandbox::Sandbox::take_mcp_audit`]), never to the open
-//! tool call (FR-027). **Processes an MCP server spawns are not attributed** — their events stay in
-//! the tool scope's stream, in whichever call is open — until MCP servers get their own scope
-//! (018-subagent-scopes).
+//! events belong to a call made to that server, and otherwise go to a per-server record
+//! ([`crate::sandbox::Sandbox::take_mcp_audit`]) — never to an unrelated open call (FR-027).
+//! **Processes an MCP server spawns are not attributed** — their events stay in the tool scope's
+//! stream, in whichever call is open — until MCP servers get their own scope (018-subagent-scopes).
+//! The `tgid` is matched in bee's PID namespace; see the sandbox's `McpAttribution` for the limits.
 //!
 //! The loops (`run_loop`, `run_exchange`) still take the session's parts — its registry, sandbox and
 //! escalation — rather than the session itself; routing them through `Session` would rewrite both

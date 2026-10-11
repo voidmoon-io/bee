@@ -300,3 +300,95 @@ async fn an_mcp_servers_own_events_are_its_not_the_open_calls() {
     assert_eq!(out.audit, [server_denial, tool_event]);
     assert!(record.is_empty());
 }
+
+// FR-027, the other half: a server's events are never an *unrelated* call's, but they are the
+// events of a call made to that server. A denial the `fs` server hits while answering the model's
+// `mcp__fs__*` call stays in that call's audit, so it is fed back and escalates (007), and the
+// retry runs; nothing of it lands in the server's record.
+#[tokio::test]
+async fn an_mcp_calls_own_server_denial_is_the_calls_and_escalates() {
+    use bee::call::{run_call, CallInput, Escalation, TimeoutPolicy};
+    use bee::grants::ActivePolicy;
+    use bee::provider::ToolCall;
+    use bee::sandbox::{CallOrigin, Sandbox, ScriptedAudit};
+    use scripted::{ev, Attempt, ScriptedTool};
+
+    const SERVER_TGID: u32 = 4242;
+    let mut denial = ev("file_open", "/tmp/other/notes.txt", "denied", None);
+    denial.tgid = Some(SERVER_TGID);
+
+    let audit = Arc::new(ScriptedAudit::default());
+    let mut s = spec(EntryPoint::Headless);
+    s.prebuilt_sandbox = Some(Sandbox::host_scripted(Vec::new(), audit.clone()));
+    let mut session = build(s, &|_| {}).await.expect("builds");
+    session
+        .sandbox
+        .set_mcp_servers([("fs".to_string(), SERVER_TGID)]);
+    session.registry.insert(Box::new(
+        ScriptedTool::new(
+            audit,
+            vec![
+                Attempt::error("permission denied").with_audit(vec![denial.clone()]),
+                Attempt::ok("the notes"),
+            ],
+        )
+        .of_mcp_server("fs", "mcp__fs__read_file"),
+    ));
+    let esc = session.escalation.take().unwrap();
+    let mut active = ActivePolicy::new(esc.base.clone(), esc.ceiling.clone());
+    let call = ToolCall {
+        id: "c1".into(),
+        name: "mcp__fs__read_file".into(),
+        arguments: serde_json::json!({}),
+    };
+    let out = run_call(
+        CallInput {
+            call: &call,
+            turn: 1,
+            origin: CallOrigin::Tool,
+            timeout: TimeoutPolicy::PerCall(std::time::Duration::from_secs(5)),
+        },
+        &mut session.sandbox,
+        &mut session.registry,
+        Some(Escalation {
+            config: &esc,
+            active: &mut active,
+            lease_turn: 1,
+        }),
+    )
+    .await;
+    let record = session.sandbox.take_mcp_audit();
+    session.shutdown().await.unwrap();
+
+    assert_eq!(out.denied_attempt_audit, [denial], "the call's own denial");
+    assert_eq!(out.escalations.len(), 1, "{:?}", out.escalations);
+    assert!(out.escalations[0].outcome.is_granted());
+    assert!(out.retried);
+    assert_eq!(out.result.content, "the notes");
+    assert!(record.is_empty(), "{record:?}");
+}
+
+// FR-027: a server keeps working after the model's last call. What its own process does then is
+// still recorded: the record is finished with one last drain, not just taken.
+#[tokio::test]
+async fn a_servers_events_after_the_last_call_are_still_recorded() {
+    use bee::sandbox::{Sandbox, ScriptedAudit};
+    use scripted::ev;
+
+    let mut late = ev("file_open", "/etc/shadow", "denied", None);
+    late.tgid = Some(4242);
+    let audit = Arc::new(ScriptedAudit::default());
+    let mut s = spec(EntryPoint::Headless);
+    s.prebuilt_sandbox = Some(Sandbox::host_scripted(Vec::new(), audit.clone()));
+    let mut session = build(s, &|_| {}).await.expect("builds");
+    session.sandbox.set_mcp_servers([("fs".to_string(), 4242)]);
+    audit.push_tool(vec![late.clone()]);
+
+    assert!(
+        session.sandbox.mcp_audit().is_empty(),
+        "nothing drained yet"
+    );
+    let record = session.sandbox.finish_mcp_audit().await;
+    session.shutdown().await.unwrap();
+    assert_eq!(record["fs"], [late]);
+}

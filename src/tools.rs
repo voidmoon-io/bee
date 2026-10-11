@@ -295,6 +295,12 @@ pub trait Tool: Send + Sync {
     /// The JSON-Schema-bearing schema advertised to the model.
     fn schema(&self) -> ToolSchema;
 
+    /// The MCP server this tool forwards to, if it is one. A call to it owns the kernel events of
+    /// that server's own process (024 FR-027).
+    fn mcp_server(&self) -> Option<&str> {
+        None
+    }
+
     /// Execute inside `sandbox`. MUST NOT panic on bad `arguments` — return an error result.
     async fn call(&self, arguments: serde_json::Value, sandbox: &Sandbox) -> ToolResult;
 }
@@ -493,6 +499,11 @@ impl ToolRegistry {
     /// True if a tool with `name` is registered.
     pub fn contains(&self, name: &str) -> bool {
         self.tools.contains_key(name)
+    }
+
+    /// The MCP server tool `name` forwards to, if it is an MCP tool (024 FR-027).
+    pub fn mcp_server(&self, name: &str) -> Option<&str> {
+        self.tools.get(name).and_then(|t| t.mcp_server())
     }
 
     /// The schemas for all registered tools, in stable name order.

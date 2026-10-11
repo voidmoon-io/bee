@@ -273,3 +273,62 @@ mod http_attribution {
         );
     }
 }
+
+/// 024 FR-027: the builder hands each connected stdio server's own process to the sandbox, so its
+/// kernel events can be told from a tool call's. Host tier: the fixture server needs only Node.
+#[tokio::test]
+async fn the_builder_registers_each_servers_process_with_the_sandbox() {
+    use bee::operator::{NullOutput, Operator};
+    use bee::session::{build, Enforcement, EntryPoint, SessionSpec};
+
+    let script = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/notify_server.mjs"
+    );
+    let cfg = McpServerConfig {
+        name: "nf".into(),
+        transport: McpTransport::Stdio,
+        command: Some("node".into()),
+        args: vec![script.into()],
+        env: Default::default(),
+        url: None,
+        token_env: None,
+        allowed_tools: None,
+        denied_tools: None,
+    };
+    let spec = SessionSpec {
+        entry: EntryPoint::Headless,
+        label: "mcp-wiring".into(),
+        policy: None,
+        ceiling: None,
+        enforcement: Enforcement::Host,
+        tools: Vec::new(),
+        ctf_flag: None,
+        skill_roots: Vec::new(),
+        mcp: policy(cfg),
+        security: Default::default(),
+        workdir: std::env::temp_dir(),
+        system_prompt: "test".into(),
+        strip_env: Vec::new(),
+        http_scope_advisory: false,
+        lease_turns: None,
+        operator: Operator::autonomous(std::sync::Arc::new(NullOutput)),
+        prebuilt_sandbox: None,
+    };
+    let mut session = build(spec, &|_| {}).await.expect("builds");
+    let bridge = session.mcp.clone().expect("an MCP bridge");
+    let tgids = bridge.server_tgids();
+    let registered = session.sandbox.mcp_servers();
+    session.shutdown().await.unwrap();
+
+    assert_eq!(
+        tgids.len(),
+        1,
+        "the fixture connects (needs `node` on PATH)"
+    );
+    assert_eq!(tgids[0].0, "nf");
+    assert_eq!(
+        registered, tgids,
+        "the builder registers what the bridge reports"
+    );
+}

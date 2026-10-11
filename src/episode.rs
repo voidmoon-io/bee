@@ -759,7 +759,7 @@ pub async fn run_episode_with(
     .await;
     transcript.http_scope = session.http_header();
     transcript.consents = session.operator.take_log();
-    transcript.mcp_audit = session.sandbox.take_mcp_audit();
+    transcript.mcp_audit = session.sandbox.finish_mcp_audit().await;
 
     // MCP servers, then the Interceptor, then the scopes (FR-012). A scope that will not empty means
     // something survived the episode and is about to lose its enforcement when the engine drops.

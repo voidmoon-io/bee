@@ -529,13 +529,31 @@ drift cases behave as specified.
   - A dropped session now deletes its CA bundle (`HttpSession::remove_ca_bundle`), as `shutdown`
     already did.
 - **T049:** `spawn_stdio` returns the child's `tgid`; `McpBridge::server_tgids()` lists connected
-  stdio servers; the builder hands them to `Sandbox::set_mcp_servers`. `Sandbox::drain_audit` — the
-  one drain `run_call` uses — moves events whose `tgid` is a server's into a per-server record
-  (`Sandbox::take_mcp_audit`), so they never reach a call's audit or drive its escalation. Transcripts
-  carry it as `mcp_audit` (omitted when empty; episode and REPL). The limitation is stated in the
-  `session`, `mcp::bridge` and `sandbox` docs. Host test:
-  `session_parity::an_mcp_servers_own_events_are_its_not_the_open_calls`. VM verification of a real
-  server's tgid under enforcement is pending.
+  stdio servers; the builder hands them to `Sandbox::set_mcp_servers`.
+  - **Routing.** `Sandbox::drain_audit(call_server)` is the one drain `run_call` uses. `run_call` asks
+    the registry once which MCP server the called tool forwards to (`Tool::mcp_server`, set by
+    `McpToolProxy`), and passes it to every drain of the call. That server's events stay in the
+    call's audit, so a call to the server still sees its denials, is fed them back, and escalates and
+    retries (the 007 flow). Any other server's events go to its per-server record
+    (`Sandbox::take_mcp_audit`), never into an unrelated call's audit or its escalation.
+  - **Record.** Transcripts carry the record as `mcp_audit`, omitted when empty, in both the episode
+    and the REPL. At the end of a session, `Sandbox::finish_mcp_audit` drains once more, so what a
+    server does after the last call is recorded too. The REPL's `/save` reads the record in place
+    (`Sandbox::mcp_audit`) and keeps no second copy.
+  - **CTF scoring.** `ScoreReport` counts the record's denied targets toward coverage, and adds one
+    technique, `mcp:<server>`, per server that was denied.
+  - **Limits.** Stated in the `session`, `mcp::bridge` and `sandbox` docs: processes a server spawns
+    are not attributed; the `tgid` is matched in bee's PID namespace, so inside another one nothing is
+    routed and events fall back to the open call; and an exited server's pid can be reused.
+  - **Host tests:**
+    - `session_parity::an_mcp_servers_own_events_are_its_not_the_open_calls`;
+    - `session_parity::an_mcp_calls_own_server_denial_is_the_calls_and_escalates`;
+    - `session_parity::a_servers_events_after_the_last_call_are_still_recorded`;
+    - `mcp_stdio::the_builder_registers_each_servers_process_with_the_sandbox`, through the builder
+      with the Node fixture server;
+    - `ctf::score_report_counts_techniques`.
+  - **CI.** The `test-support` step now also runs `session_parity` and the 019 `intercept_*` suites.
+  - **Pending:** VM verification of a real server's `tgid` under enforcement.
 
 **Checkpoint**: there is one builder. Constitution V's violation is closed.
 

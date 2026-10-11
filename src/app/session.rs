@@ -147,7 +147,8 @@ pub async fn resolve_grants(
         eprintln!("{command}: skill '{name}' refused — {reason}");
     }
     for tool in &outcome.tools {
-        bee::tools::register_named(registry, tool, None);
+        // An unknown name was refused at validation; nothing to register.
+        let _ = registry.register(tool);
     }
     // Readable-scope: each discovered skill directory becomes readable so bundled resources
     // resolve. Read, never write — a skill's own files are inputs.

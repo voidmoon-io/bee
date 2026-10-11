@@ -143,9 +143,18 @@ pub async fn escalate(
         }
     }
 
-    // 5. Register granted tools (Layer 1 membership).
+    // 5. Register granted tools (Layer 1 membership), built by the one constructor with the
+    //    session's dependencies, so a tool granted now is configured exactly as one present from the
+    //    start (024 FR-014). The widened policy may grant a scanner, so scanner grants are recomputed
+    //    first — rebuilding a `scan` already present, too.
+    #[cfg(feature = "scanners")]
+    {
+        let deps = (**registry.deps()).clone().with_policy(active.active());
+        registry.set_deps(std::sync::Arc::new(deps));
+    }
     for tool in &tools {
-        crate::tools::register_named(registry, tool, None);
+        // An unknown name was refused at validation; nothing to register.
+        let _ = registry.register(tool);
     }
     EscalateOutcome::Granted(id)
 }

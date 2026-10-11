@@ -216,20 +216,30 @@ async fn repl(args: ReplArgs) -> ExitCode {
     )
     .await;
 
-    // The model-facing `skill` tool; `/skill` reads the same registry regardless.
-    if skills.model_facing().next().is_some() {
-        registry.insert(Box::new(bee::tools::skill::SkillTool::new(skills.clone())));
+    // The session's tool dependencies (024 FR-013): its skills, and the ledger and scanner grants
+    // (016) of the grant-widened policy. After grant resolution, so a scanner a skill widened the
+    // policy to include is visible; before the policy is moved into the scope, which is the last point
+    // it can be read. `set_deps` rebuilds every tool registered so far, so each holds them; the
+    // Interceptor joins once it is running.
+    // The struct update supplies the feature-gated fields, which a slim build does not have.
+    #[allow(clippy::needless_update)]
+    let deps = bee::tools::ToolDeps {
+        // Only model-facing skills make a `skill` tool worth offering; `/skill` reads the registry
+        // regardless.
+        skills: skills
+            .model_facing()
+            .next()
+            .is_some()
+            .then(|| skills.clone()),
+        ..bee::tools::ToolDeps::default()
     }
-
-    // Give the security tools the session's ledger and scanner grants (016-native-tools). After
-    // grant resolution, so a scanner a skill widened the policy to include is visible; before the
-    // policy is moved into the scope, which is the last point it can be read.
-    bee::tools::configure_security_tools(
-        &mut registry,
+    .with_security(
         &cfg.security,
         resolved_policy.as_ref(),
         &format!("repl-{}", std::process::id()),
     );
+    registry.set_deps(std::sync::Arc::new(deps));
+    let _ = registry.register("skill");
 
     // Dynamic capability grants (007-dynamic-grants). The floor is the resolved policy — the one the
     // scope is about to compile — so escalation can only ever widen what is actually enforced. The
@@ -332,7 +342,10 @@ async fn repl(args: ReplArgs) -> ExitCode {
             .await
             {
                 Ok(h) => {
-                    bee::tools::http::configure_http_tools(&mut registry, &h.interceptor);
+                    let deps = (**registry.deps())
+                        .clone()
+                        .with_interceptor(h.interceptor.clone());
+                    registry.set_deps(std::sync::Arc::new(deps));
                     eprintln!(
                         "{CMD}: HTTP interception on 127.0.0.1:{} ({} enforcement)",
                         h.interceptor.port(),

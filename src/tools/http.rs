@@ -11,34 +11,15 @@ use serde_json::{json, Value};
 use crate::intercept::sidecar::Interceptor;
 use crate::provider::ToolSchema;
 use crate::sandbox::Sandbox;
-use crate::tools::{Tool, ToolOutcome, ToolRegistry, ToolResult, UnavailableReason, HTTP_TOOLS};
+use crate::tools::{Tool, ToolOutcome, ToolResult, UnavailableReason};
 
 /// Per-tool output bounds (contracts/http-tools.md).
 pub const SCOPE_BOUND: usize = 8 * 1024;
 
-/// An unconfigured tool for `name` — it refuses until [`configure_http_tools`] replaces it.
-pub fn unconfigured(name: &str) -> Option<Box<dyn Tool>> {
-    tool(name, None)
-}
-
-/// Re-register every HTTP tool present in `registry` with the session's proxy (last wins).
-pub fn configure_http_tools(registry: &mut ToolRegistry, icpt: &Interceptor) {
-    #[cfg(feature = "vm-test")]
-    if registry.contains("http_debug") {
-        registry.insert(Box::new(HttpDebug {
-            icpt: Some(icpt.clone()),
-        }));
-    }
-    for name in HTTP_TOOLS {
-        if registry.contains(name) {
-            if let Some(t) = tool(name, Some(icpt.clone())) {
-                registry.insert(t);
-            }
-        }
-    }
-}
-
-fn tool(name: &str, icpt: Option<Interceptor>) -> Option<Box<dyn Tool>> {
+/// Build the HTTP tool `name` around `icpt` — the session's proxy, or `None`, in which case it refuses
+/// `interceptor_unavailable`. Called only by [`crate::tools::ToolRegistry::register`], the one tool
+/// constructor (024 FR-013).
+pub(crate) fn tool(name: &str, icpt: Option<Interceptor>) -> Option<Box<dyn Tool>> {
     Some(match name {
         "http_scope" => Box::new(HttpScope { icpt }),
         "http_send" => Box::new(super::http_send::HttpSend { icpt }),

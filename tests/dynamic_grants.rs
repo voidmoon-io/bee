@@ -295,7 +295,7 @@ async fn an_already_held_capability_is_never_asked_for_again() {
         "held",
     );
     // Pre-register the tool: this session already has the capability the skill will ask for.
-    bee::tools::register_named(&mut f.registry, "bash", None);
+    f.registry.register("bash").unwrap();
 
     let model = MockModel::scripted(vec![
         Turn::calls(vec![skill_call("1")]),

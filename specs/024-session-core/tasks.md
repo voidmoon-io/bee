@@ -374,8 +374,10 @@ beats Escalate.
   as before). Without it, no `bee run` lease could expire, so the VM case could not exist.
 - **VM tier (T028e)**: `lease-expiry` is written. `lease-release` is listed as `PENDING`: a release
   hook cannot be configured from the `bee` binary, and it shares expiry's narrowing path.
-  `test/vm/matrix.sh` accepts `PENDING` without failing the run. **Neither has run — no BPF-LSM VM is
-  available — so per FR-042, phase 6 waits for `lease-expiry` to pass.**
+  `test/vm/matrix.sh` accepts `PENDING` without failing the run. **`lease-expiry` PASSED on the rebuilt
+  VM (kernel 6.8.0-142, 2026-10-11): FR-042's gate for phase 6 is cleared.** The full matrix is 49/49,
+  after four test-script fixes to the never-before-run 019 HTTP cases (exec allowlist `dash`, unjudged
+  cases now FAIL, `calls` read defensively, no `seq` or `>/dev/null` in scaffolding).
 
 **Checkpoint**: the hook interface offers nothing it ignores (SC-007).
 

@@ -404,6 +404,49 @@ name = "episode_progress_strings"
 path = "tests/episode_progress_strings.rs"
 required-features = ["test-support"]
 
+# 024 T048: the 019 intercept suites run over a session built by `session::build_with`, whose
+# test-only proxy-worker binary and host names need `test-support`.
+
+[[test]]
+name = "intercept_tools"
+path = "tests/intercept_tools.rs"
+required-features = ["intercept", "test-support"]
+
+[[test]]
+name = "intercept_replay"
+path = "tests/intercept_replay.rs"
+required-features = ["intercept", "test-support"]
+
+[[test]]
+name = "intercept_fuzz"
+path = "tests/intercept_fuzz.rs"
+required-features = ["intercept", "test-support"]
+
+[[test]]
+name = "intercept_rules"
+path = "tests/intercept_rules.rs"
+required-features = ["intercept", "test-support"]
+
+[[test]]
+name = "intercept_leads"
+path = "tests/intercept_leads.rs"
+required-features = ["intercept", "test-support"]
+
+[[test]]
+name = "intercept_escalation"
+path = "tests/intercept_escalation.rs"
+required-features = ["intercept", "test-support"]
+
+[[test]]
+name = "intercept_har"
+path = "tests/intercept_har.rs"
+required-features = ["intercept", "test-support"]
+
+[[test]]
+name = "intercept_tls"
+path = "tests/intercept_tls.rs"
+required-features = ["intercept", "test-support"]
+
 # 019 SC-007. Gated in the VM matrix (`http-latency`), compiled-only on host CI.
 [[bench]]
 name = "intercept_latency"

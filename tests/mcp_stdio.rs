@@ -204,14 +204,14 @@ async fn denied_tools_are_hidden() {
 // Runs on the host tier (advisory proxy, no Node needed): the "server" is a shell that records its
 // environment and makes one request through the proxy, then exits. It never completes an MCP
 // handshake — the assertions are about what it was spawned with and how its traffic was recorded.
-#[cfg(feature = "intercept")]
+#[cfg(all(feature = "intercept", feature = "test-support"))]
 #[path = "support/harness.rs"]
 mod harness;
-#[cfg(feature = "intercept")]
+#[cfg(all(feature = "intercept", feature = "test-support"))]
 #[path = "support/vuln_target.rs"]
 mod vuln_target;
 
-#[cfg(feature = "intercept")]
+#[cfg(all(feature = "intercept", feature = "test-support"))]
 mod http_attribution {
     use super::*;
 
@@ -242,7 +242,7 @@ mod http_attribution {
             denied_tools: None,
         };
         // The handshake fails (the shell is no MCP server); the bridge reports that and moves on.
-        let _bridge = McpBridge::connect(policy(server), &s.sandbox).await;
+        let _bridge = McpBridge::connect(policy(server), &s.session.sandbox).await;
 
         let env = std::fs::read_to_string(&out).expect("the server ran");
         let line = env

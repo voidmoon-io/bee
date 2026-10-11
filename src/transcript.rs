@@ -201,6 +201,11 @@ pub struct EpisodeTranscript {
     /// were none, so a transcript without grants is unchanged.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub consents: Vec<crate::operator::ConsentRecord>,
+    /// Kernel events of each MCP server's own process, by server (024 FR-027): attributed to the
+    /// server, not to any tool call, so they are in neither `audit_trail` nor a call's `audit`.
+    /// Processes a server spawns are not attributed and stay in the calls' audit.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub mcp_audit: std::collections::BTreeMap<String, Vec<AuditEvent>>,
 }
 
 impl EpisodeTranscript {
@@ -285,6 +290,7 @@ impl EpisodeTranscript {
             .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
         EpisodeTranscript {
             consents: Vec::new(),
+            mcp_audit: Default::default(),
             http_scope: None,
             scenario_id,
             model_id,

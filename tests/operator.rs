@@ -280,6 +280,7 @@ fn transcript() -> EpisodeTranscript {
         score: None,
         http_scope: None,
         consents: Vec::new(),
+        mcp_audit: Default::default(),
     }
 }
 

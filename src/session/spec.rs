@@ -72,6 +72,23 @@ pub struct SessionSpec {
     pub prebuilt_sandbox: Option<crate::sandbox::Sandbox>,
 }
 
+/// What the builder otherwise takes from the running system. Every entry point uses the defaults;
+/// only a host test replaces them, through `build_with` (`test-support`, 024 T048).
+#[derive(Default)]
+#[cfg_attr(not(feature = "intercept"), allow(dead_code))]
+pub(crate) struct SystemParts {
+    /// The binary run as `bee proxy-worker`. `None`: this process's own — which a test binary is not.
+    pub(crate) worker_exe: Option<PathBuf>,
+    /// Host names `[policy.http]` and the proxy worker resolve before asking the system.
+    pub(crate) hosts: Vec<(String, std::net::IpAddr)>,
+}
+
+impl SystemParts {
+    pub(crate) fn is_default(&self) -> bool {
+        self.worker_exe.is_none() && self.hosts.is_empty()
+    }
+}
+
 /// Why a session could not be built. Every refusal happens before a scope exists or a child runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildError(pub String);

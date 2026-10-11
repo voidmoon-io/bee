@@ -1,6 +1,7 @@
-//! Shared harness for 019 intercept tests: compile a `[policy.http]` scope against fixed names, run
-//! the real `bee proxy-worker` (advisory: the host tier has no kernel scope) under the real harness
-//! side, and drive tools through a registry the way a session does.
+//! Shared harness for 019 intercept tests: a session built the way every entry point builds one
+//! (`bee::session::build`, 024 T048) — host enforcement with `[policy.http]`, so the real `bee
+//! proxy-worker` runs advisory (the host tier has no kernel scope) — and tools driven through its
+//! registry the way a session does.
 
 #![allow(dead_code)]
 
@@ -9,12 +10,11 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use bee::intercept::creds::ProxyCredentials;
-use bee::intercept::sidecar::{Enforcement, HarnessResolver, Interceptor, InterceptorConfig};
+use bee::intercept::sidecar::{HarnessResolver, Interceptor};
 use bee::provider::ToolCall;
-use bee::sandbox::{CallContext, CallOrigin, Sandbox};
-use bee::tools::{ToolRegistry, ToolResult};
-use bee_core::compiler::HttpScope;
+use bee::sandbox::{CallContext, CallOrigin};
+use bee::session::{Enforcement, EntryPoint, SessionSpec};
+use bee::tools::ToolResult;
 use bee_core::{CompileError, ExecIdentity, Policy, Resolver};
 
 pub struct Names(pub HashMap<String, Vec<IpAddr>>);
@@ -43,8 +43,8 @@ impl Resolver for Names {
     }
 }
 
-/// Compile a `[policy.http]` body against fixed names.
-pub fn scope(body: &str, names: &[(&str, &str)]) -> HttpScope {
+/// A policy with a `[policy.http]` body, checked to compile against fixed names.
+pub fn scope(body: &str, names: &[(&str, &str)]) -> Policy {
     let p = Policy::from_toml(&format!("[policy]\nname = \"t\"\n[policy.http]\n{body}\n")).unwrap();
     let n = Names(
         names
@@ -54,8 +54,8 @@ pub fn scope(body: &str, names: &[(&str, &str)]) -> HttpScope {
     );
     p.compile_http(&n, Path::new("/bin/true"))
         .unwrap()
-        .unwrap()
-        .http_scope
+        .expect("[policy.http] is active");
+    p
 }
 
 pub fn resolver(names: &[(&str, &str)]) -> HarnessResolver {
@@ -66,58 +66,74 @@ pub fn resolver(names: &[(&str, &str)]) -> HarnessResolver {
     Arc::new(move |h: &str| m.get(h).cloned().ok_or_else(|| format!("no such host {h}")))
 }
 
-/// A running proxy, a sandbox wired to it, and a registry of the given tools.
+/// A built session, its running proxy, and a project directory of its own.
 pub struct Session {
+    pub session: bee::session::Session,
     pub icpt: Interceptor,
-    pub sandbox: Sandbox,
-    pub registry: ToolRegistry,
     pub dir: tempfile::TempDir,
     turn: u32,
 }
 
 impl Session {
-    pub async fn start(scope: HttpScope, names: &[(&str, &str)], tools: &[&str]) -> Session {
+    pub async fn start(policy: Policy, names: &[(&str, &str)], tools: &[&str]) -> Session {
+        Session::start_with(policy, names, tools, |_| {}).await
+    }
+
+    /// [`Session::start`], with `edit` applied to the spec before it is built — a ceiling, an
+    /// operator.
+    pub async fn start_with(
+        policy: Policy,
+        names: &[(&str, &str)],
+        tools: &[&str],
+        edit: impl FnOnce(&mut SessionSpec),
+    ) -> Session {
         let dir = tempfile::tempdir().unwrap();
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let session = format!("test-{}-{}", std::process::id(), rand_suffix());
-        let sid = session.clone();
-        let spawn = Box::new(move || {
-            let mut c = std::process::Command::new(env!("CARGO_BIN_EXE_bee"));
-            c.args(["proxy-worker", "--session", &sid]);
-            Ok(c)
-        });
-        let icpt = Interceptor::start(
-            InterceptorConfig {
-                session_id: session,
-                project_root: dir.path().to_path_buf(),
-                http_scope: scope,
-                enforcement: Enforcement::Advisory {
-                    reason: "host test".into(),
-                },
-                resolver: resolver(names),
-            },
-            listener,
-            spawn,
+        let mut spec = SessionSpec {
+            entry: EntryPoint::Headless,
+            // The proxy's session id is `<label>-<pid>`: unique per test session.
+            label: format!("test-{}", rand_suffix()),
+            policy: Some(policy),
+            ceiling: None,
+            enforcement: Enforcement::Host,
+            tools: tools.iter().map(|t| t.to_string()).collect(),
+            ctf_flag: None,
+            skill_roots: Vec::new(),
+            mcp: Default::default(),
+            security: Default::default(),
+            workdir: dir.path().to_path_buf(),
+            system_prompt: String::new(),
+            strip_env: bee::sandbox::key_vars(None),
+            // Host mode: the proxy alone enforces the scope.
+            http_scope_advisory: true,
+            lease_turns: None,
+            operator: bee::operator::Operator::autonomous(Arc::new(bee::operator::NullOutput)),
+            prebuilt_sandbox: None,
+        };
+        edit(&mut spec);
+        let hosts = names
+            .iter()
+            .map(|(h, a)| (h.to_string(), a.parse().unwrap()))
+            .collect();
+        let session = bee::session::build_with(
+            spec,
+            &|_| {},
+            PathBuf::from(env!("CARGO_BIN_EXE_bee")),
+            hosts,
         )
         .await
-        .expect("proxy starts");
-        let mut sandbox = Sandbox::host(bee::sandbox::key_vars(None));
-        ProxyCredentials::new(icpt.clone(), None).install(&mut sandbox);
-        sandbox.set_http_scope_hook(bee::intercept::session::scope_hook(
-            icpt.clone(),
-            PathBuf::from("/bin/true"),
-        ));
-        // The Interceptor is running before any tool is named, so every tool is built holding it
-        // (024 FR-013).
-        let deps = bee::tools::ToolDeps::default().with_interceptor(icpt.clone());
-        let mut registry = bee::tools::ToolRegistry::with_deps(std::sync::Arc::new(deps));
+        .expect("session builds");
         for name in tools {
-            registry.register(name).expect("a known tool");
+            assert!(session.registry.contains(name), "a known tool: {name}");
         }
+        let icpt = session
+            .http
+            .as_ref()
+            .expect("[policy.http] starts the proxy")
+            .interceptor
+            .clone();
         Session {
+            session,
             icpt,
-            sandbox,
-            registry,
             dir,
             turn: 0,
         }
@@ -138,7 +154,8 @@ impl Session {
     ) -> (ToolResult, String, Vec<bee::proxy_event::ProxyEvent>) {
         self.turn += 1;
         let id = format!("call_{}_{}", self.turn, rand_suffix());
-        self.sandbox
+        self.session
+            .sandbox
             .begin_call(CallContext {
                 call_id: id.clone(),
                 turn: self.turn,
@@ -146,6 +163,7 @@ impl Session {
             })
             .await;
         let r = self
+            .session
             .registry
             .execute(
                 &ToolCall {
@@ -153,10 +171,10 @@ impl Session {
                     name: tool.into(),
                     arguments: args,
                 },
-                &self.sandbox,
+                &self.session.sandbox,
             )
             .await;
-        let events = self.sandbox.end_call().await;
+        let events = self.session.sandbox.end_call().await;
         (r, id, events)
     }
 

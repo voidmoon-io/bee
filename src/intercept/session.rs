@@ -21,7 +21,7 @@ use bee_core::compiler::CompiledHttp;
 use bee_core::{Mode, Policy, Resolver};
 
 use super::creds::ProxyCredentials;
-use super::sidecar::{system_resolver, Enforcement, Interceptor, InterceptorConfig, SpawnFn};
+use super::sidecar::{Enforcement, HarnessResolver, Interceptor, InterceptorConfig, SpawnFn};
 use crate::sandbox::Sandbox;
 
 /// The operator flag that accepts proxy-only enforcement. Not readable from any configuration file.
@@ -93,6 +93,15 @@ pub fn prepare(policy: &Policy, resolver: &dyn Resolver) -> Result<Option<Prepar
     let worker_exe = std::env::current_exe()
         .and_then(|p| p.canonicalize())
         .map_err(|e| format!("cannot resolve the bee binary for the proxy worker: {e}"))?;
+    prepare_for(policy, resolver, worker_exe)
+}
+
+/// [`prepare`], with `worker_exe` run as `bee proxy-worker` instead of this process's binary.
+pub fn prepare_for(
+    policy: &Policy,
+    resolver: &dyn Resolver,
+    worker_exe: PathBuf,
+) -> Result<Option<Prepared>, String> {
     let Some(compiled) = policy
         .compile_http(resolver, &worker_exe)
         .map_err(|e| format!("[policy.http]: {e}"))?
@@ -133,6 +142,11 @@ impl HttpSession {
     /// scope goes first).
     pub async fn shutdown(&self) {
         self.interceptor.shutdown().await;
+        self.remove_ca_bundle();
+    }
+
+    /// Delete the CA bundle and its private directory. Synchronous, so a dropped session can too.
+    pub fn remove_ca_bundle(&self) {
         if let Some(b) = &self.ca_bundle {
             let _ = std::fs::remove_file(b);
             if let Some(dir) = b.parent() {
@@ -199,14 +213,68 @@ pub fn write_ca_bundle(path: &Path, ca_pem: &str) -> Result<(), String> {
     std::fs::rename(&tmp, path).map_err(|e| format!("CA bundle: {e}"))
 }
 
+/// The system resolver, with `hosts` answered first. Only a test names hosts (024 T048).
+pub(crate) struct WithHosts<'a> {
+    pub system: bee_userspace::SystemResolver,
+    pub hosts: &'a [(String, std::net::IpAddr)],
+}
+
+impl Resolver for WithHosts<'_> {
+    fn project_root(&self) -> &str {
+        self.system.project_root()
+    }
+    fn home(&self) -> &str {
+        self.system.home()
+    }
+    fn resolve_exec(&self, name: &str) -> Result<PathBuf, bee_core::CompileError> {
+        self.system.resolve_exec(name)
+    }
+    fn resolve_exec_identity(
+        &self,
+        path: &Path,
+    ) -> Result<bee_core::ExecIdentity, bee_core::CompileError> {
+        self.system.resolve_exec_identity(path)
+    }
+    fn resolve_host(&self, host: &str) -> Result<Vec<std::net::IpAddr>, bee_core::CompileError> {
+        match named(self.hosts, host) {
+            Some(addrs) => Ok(addrs),
+            None => self.system.resolve_host(host),
+        }
+    }
+}
+
+/// The worker's resolver: [`super::sidecar::system_resolver`], with `hosts` answered first.
+pub(crate) fn worker_resolver(hosts: Vec<(String, std::net::IpAddr)>) -> HarnessResolver {
+    let system = super::sidecar::system_resolver();
+    if hosts.is_empty() {
+        return system;
+    }
+    Arc::new(move |host: &str| match named(&hosts, host) {
+        Some(addrs) => Ok(addrs),
+        None => system(host),
+    })
+}
+
+/// The addresses `hosts` gives `host`, if it names it.
+fn named(hosts: &[(String, std::net::IpAddr)], host: &str) -> Option<Vec<std::net::IpAddr>> {
+    let addrs: Vec<_> = hosts
+        .iter()
+        .filter(|(h, _)| h == host)
+        .map(|(_, a)| *a)
+        .collect();
+    (!addrs.is_empty()).then_some(addrs)
+}
+
 /// Spawn the worker and wire it into `sandbox`. Under enforcement the sandbox must already carry the
 /// sidecar scope; the worker joins it. In advisory mode the worker is a hardened child with no scope.
+/// `resolver` is how the worker resolves names ([`super::sidecar::system_resolver`] outside tests).
 pub async fn start(
     prepared: Prepared,
     sandbox: &mut Sandbox,
     session_id: &str,
     project_root: &Path,
     enforcement: Enforcement,
+    resolver: HarnessResolver,
 ) -> Result<HttpSession, String> {
     let spawn = spawn_fn(sandbox, &prepared.worker_exe, session_id, &enforcement)?;
     let prepared_exe = prepared.worker_exe.clone();
@@ -218,7 +286,7 @@ pub async fn start(
             project_root: project_root.to_path_buf(),
             http_scope: prepared.compiled.http_scope,
             enforcement,
-            resolver: system_resolver(),
+            resolver,
         },
         prepared.listener,
         spawn,

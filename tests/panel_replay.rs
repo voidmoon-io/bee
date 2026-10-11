@@ -52,6 +52,7 @@ fn turn(index: u32, calls: Vec<RecordedCall>) -> TranscriptTurn {
 fn transcript(turns: Vec<TranscriptTurn>) -> EpisodeTranscript {
     EpisodeTranscript {
         consents: Vec::new(),
+        mcp_audit: Default::default(),
         http_scope: None,
         scenario_id: "s".into(),
         model_id: "mock/x".into(),

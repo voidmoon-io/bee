@@ -29,10 +29,10 @@ async fn a_reflected_parameter_becomes_a_lead_announced_once_and_listed_once() {
     assert!(!r.is_error, "{}", r.content);
 
     // The next turn's harness note announces it — once.
-    let notes = s.sandbox.turn_notes();
+    let notes = s.session.sandbox.turn_notes();
     assert_eq!(notes.len(), 1, "{notes:?}");
     assert!(notes[0].contains("new passive lead"), "{notes:?}");
-    assert!(s.sandbox.turn_notes().is_empty(), "announced once");
+    assert!(s.session.sandbox.turn_notes().is_empty(), "announced once");
 
     let (r, _) = s.call("http_leads", json!({ "only_new": true })).await;
     let v = Session::json(&r);

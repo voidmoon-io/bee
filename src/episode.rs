@@ -529,6 +529,7 @@ pub async fn run_loop(
     let ended_at = OffsetDateTime::now_utc();
     EpisodeTranscript {
         consents: Vec::new(),
+        mcp_audit: Default::default(),
         http_scope: None,
         scenario_id: scenario.id.clone(),
         model_id: model.id().to_string(),
@@ -550,6 +551,7 @@ fn infra_error(scenario: &Scenario, model: &dyn Model, detail: String) -> Episod
     let now = rfc3339(OffsetDateTime::now_utc());
     EpisodeTranscript {
         consents: Vec::new(),
+        mcp_audit: Default::default(),
         http_scope: None,
         scenario_id: scenario.id.clone(),
         model_id: model.id().to_string(),
@@ -757,6 +759,7 @@ pub async fn run_episode_with(
     .await;
     transcript.http_scope = session.http_header();
     transcript.consents = session.operator.take_log();
+    transcript.mcp_audit = session.sandbox.take_mcp_audit();
 
     // MCP servers, then the Interceptor, then the scopes (FR-012). A scope that will not empty means
     // something survived the episode and is about to lose its enforcement when the engine drops.
@@ -927,7 +930,7 @@ mod mcp_cgroup_spike {
 
         // The real question: does the rmcp TokioChildProcess path preserve the cgroup-join pre_exec?
         {
-            let proc = crate::mcp::transport::spawn_stdio(&sandbox, &cfg)
+            let (proc, _) = crate::mcp::transport::spawn_stdio(&sandbox, &cfg)
                 .expect("spawn_stdio via TokioChildProcess");
             let pid = proc.id().expect("rmcp child pid");
             assert_eq!(

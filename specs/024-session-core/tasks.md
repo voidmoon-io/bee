@@ -463,11 +463,11 @@ drift cases behave as specified.
   sandbox constructor through a `SandboxSource::Shared(..)` option on the spec. Delete the silent
   `scenario.mcp` drop and the `[policy.http]` special case at `:39`, which the builder's refusal now
   covers.
-- [ ] T048 [US1] Rewrite `tests/support/harness.rs::Session::start` (`:79-120`) to call `session::build`
+- [X] T048 [US1] Rewrite `tests/support/harness.rs::Session::start` (`:79-120`) to call `session::build`
   with `Enforcement::Host` and `[policy.http]`, deleting its hand copy of the Interceptor start-up. Update
   `tests/intercept_escalation.rs:67` (the hand-built `LoopEscalation`) to use the built session's
   escalation.
-- [ ] T049 [US1] Implement MCP attribution (research R8):
+- [X] T049 [US1] Implement MCP attribution (research R8):
   - record each MCP server child's `tgid` at spawn in `src/mcp/transport.rs`;
   - expose `McpBridge::server_tgids()`;
   - in the session's drain path, route tool-scope events whose `tgid` belongs to an MCP server into a
@@ -512,6 +512,30 @@ drift cases behave as specified.
 - **Deferred to a follow-up PR:** MCP tgid attribution (T049), which changes the audit drain path, and
   the harness on the builder (T048), which needs a test-only way to start the Interceptor with an
   injected resolver and in-process worker.
+
+**As built — PR 5c (T048, T049):**
+- **T048:** the harness builds its session with `session::build_with(spec, report, worker_exe,
+  hosts)` (`test-support`): host enforcement, `[policy.http]`, `--http-scope-advisory`. The seam is
+  the two things a test cannot take from the running system — the binary run as `bee proxy-worker`
+  (a test binary is not `bee`) and extra host names, answered before the system resolver for both
+  `[policy.http]` compilation and the worker. Every other entry point builds with the defaults
+  (`SystemParts`, crate-private); a kernel session with the seam set is refused. The worker is the
+  real `bee proxy-worker`, spawned through the builder's hardened advisory path, not in-process.
+  `intercept_escalation` takes the built session's escalation (its ceiling and operator set on the
+  spec) instead of a hand-built `LoopEscalation`. The harness exposes the built `bee::session::Session`
+  as `s.session`.
+  - The 019 suites that use the harness now need `--features intercept,test-support` (Cargo.toml
+    `required-features`); `--features intercept` alone skips them. T072's command needs the same.
+  - A dropped session now deletes its CA bundle (`HttpSession::remove_ca_bundle`), as `shutdown`
+    already did.
+- **T049:** `spawn_stdio` returns the child's `tgid`; `McpBridge::server_tgids()` lists connected
+  stdio servers; the builder hands them to `Sandbox::set_mcp_servers`. `Sandbox::drain_audit` — the
+  one drain `run_call` uses — moves events whose `tgid` is a server's into a per-server record
+  (`Sandbox::take_mcp_audit`), so they never reach a call's audit or drive its escalation. Transcripts
+  carry it as `mcp_audit` (omitted when empty; episode and REPL). The limitation is stated in the
+  `session`, `mcp::bridge` and `sandbox` docs. Host test:
+  `session_parity::an_mcp_servers_own_events_are_its_not_the_open_calls`. VM verification of a real
+  server's tgid under enforcement is pending.
 
 **Checkpoint**: there is one builder. Constitution V's violation is closed.
 

@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bee::call::{run_call, CallInput, CallOutcome, Escalation, TimeoutPolicy, Trigger};
-use bee::grants::escalate::{escalate, LoopEscalation, ProxyRefusalHook};
+use bee::grants::escalate::{escalate, LoopEscalation};
 use bee::grants::{ActivePolicy, GrantDelta, GrantOrigin, Ttl};
 use bee::operator::{Consent, ConsentRequest, Decision};
 use bee::provider::ToolCall;
@@ -59,27 +59,6 @@ fn policy_with(targets: &[String]) -> Policy {
     p
 }
 
-fn esc(answer: Option<bool>) -> (LoopEscalation, Arc<Recording>) {
-    let sink = Arc::new(Recording {
-        seen: Mutex::new(Vec::new()),
-        answer,
-    });
-    (
-        LoopEscalation {
-            base: policy_with(&[]),
-            ceiling: policy_with(&[]),
-            hooks: vec![Box::new(ProxyRefusalHook { enabled: true })],
-            operator: bee::operator::Operator::with_consent(
-                bee::operator::OperatorKind::Autonomous,
-                sink.clone(),
-            )
-            .with_timeout(Duration::from_millis(300)),
-            default_ttl: Ttl::Forever,
-        },
-        sink,
-    )
-}
-
 fn send_call(hostport: &str) -> ToolCall {
     ToolCall {
         id: "c1".into(),
@@ -104,8 +83,8 @@ async fn send_escalating(
             origin: bee::sandbox::CallOrigin::Tool,
             timeout: TimeoutPolicy::PerCall(Duration::from_secs(30)),
         },
-        &mut s.sandbox,
-        &mut s.registry,
+        &mut s.session.sandbox,
+        &mut s.session.registry,
         Some(Escalation {
             config: e,
             active,
@@ -127,25 +106,60 @@ fn proxy_escalation(out: &CallOutcome) -> &bee::grants::escalate::EscalateOutcom
 
 struct Fixture {
     s: Session,
-    a: String,
+    /// The session's escalation: its floor is the policy (`a` in scope), its ceiling the fixture's.
+    e: LoopEscalation,
+    sink: Arc<Recording>,
+    /// Outside the policy's target scope.
     b: String,
     _fx: (vuln_target::ShutdownHandle, vuln_target::ShutdownHandle),
 }
 
-/// Two fixture servers: `a` in scope, `b` not — but within the ceiling.
-async fn fixture() -> Fixture {
+impl Fixture {
+    /// The session's active policy, from its escalation floor and ceiling.
+    fn active(&self) -> ActivePolicy {
+        ActivePolicy::new(self.e.base.clone(), self.e.ceiling.clone())
+    }
+}
+
+/// Two fixture servers: `a` in scope, `b` not. The ceiling is `ceiling(a, b)`; the operator answers
+/// with `answer` (`None` = never answers) within 300 ms.
+async fn fixture(answer: Option<bool>, ceiling: impl FnOnce(&str, &str) -> Vec<String>) -> Fixture {
     let (a, _, fa) = vuln_target::start_with(false);
     let (b, _, fb) = vuln_target::start_with(false);
-    let s = Session::start(
-        scope(&format!("targets = [\"127.0.0.1:{}\"]", a.port()), &[]),
+    let (a, b) = (
+        format!("127.0.0.1:{}", a.port()),
+        format!("127.0.0.1:{}", b.port()),
+    );
+    let sink = Arc::new(Recording {
+        seen: Mutex::new(Vec::new()),
+        answer,
+    });
+    let ceiling = policy_with(&ceiling(&a, &b));
+    let operator = bee::operator::Operator::with_consent(
+        bee::operator::OperatorKind::Autonomous,
+        sink.clone(),
+    )
+    .with_timeout(Duration::from_millis(300));
+    let mut s = Session::start_with(
+        scope(&format!("targets = [\"{a}\"]"), &[]),
         &[],
         &["http_send"],
+        |spec| {
+            spec.ceiling = Some(ceiling);
+            spec.operator = operator;
+        },
     )
     .await;
+    let e = s
+        .session
+        .escalation
+        .take()
+        .expect("a session has escalation");
     Fixture {
         s,
-        a: format!("127.0.0.1:{}", a.port()),
-        b: format!("127.0.0.1:{}", b.port()),
+        e,
+        sink,
+        b,
         _fx: (fa, fb),
     }
 }
@@ -162,14 +176,12 @@ async fn send_to(s: &mut Session, hostport: &str) -> (bool, Vec<bee::proxy_event
 
 #[tokio::test]
 async fn an_approved_widening_asks_for_exactly_the_refused_target_then_works() {
-    let mut f = fixture().await;
-    let (mut e, sink) = esc(Some(true));
-    e.ceiling = policy_with(&[f.a.clone(), f.b.clone()]);
-    let mut active = ActivePolicy::new(policy_with(&[f.a.clone()]), e.ceiling.clone());
+    let mut f = fixture(Some(true), |a, b| vec![a.into(), b.into()]).await;
+    let mut active = f.active();
 
-    let out = send_escalating(&mut f.s, &e, &mut active, &f.b).await;
+    let out = send_escalating(&mut f.s, &f.e, &mut active, &f.b).await;
     assert!(proxy_escalation(&out).is_granted(), "{out:?}");
-    assert_eq!(*sink.seen.lock().unwrap(), vec![vec![f.b.clone()]]);
+    assert_eq!(*f.sink.seen.lock().unwrap(), vec![vec![f.b.clone()]]);
     // The lease records why it exists.
     assert!(matches!(
         &active.leases()[0].origin,
@@ -189,17 +201,19 @@ async fn an_approved_widening_asks_for_exactly_the_refused_target_then_works() {
 #[tokio::test]
 async fn a_declined_or_unanswered_widening_changes_nothing() {
     for answer in [Some(false), None] {
-        let mut f = fixture().await;
-        let (mut e, sink) = esc(answer);
-        e.ceiling = policy_with(&[f.a.clone(), f.b.clone()]);
-        let mut active = ActivePolicy::new(policy_with(&[f.a.clone()]), e.ceiling.clone());
-        let out = send_escalating(&mut f.s, &e, &mut active, &f.b).await;
+        let mut f = fixture(answer, |a, b| vec![a.into(), b.into()]).await;
+        let mut active = f.active();
+        let out = send_escalating(&mut f.s, &f.e, &mut active, &f.b).await;
         assert!(!proxy_escalation(&out).is_granted(), "{answer:?}: {out:?}");
         assert!(
             !out.retried && out.result.is_error,
             "{answer:?}: not retried"
         );
-        assert_eq!(sink.seen.lock().unwrap().len(), 1, "the operator was asked");
+        assert_eq!(
+            f.sink.seen.lock().unwrap().len(),
+            1,
+            "the operator was asked"
+        );
         assert!(active.leases().is_empty());
         let (ok, _) = send_to(&mut f.s, &f.b).await;
         assert!(!ok, "{answer:?}: still refused");
@@ -208,24 +222,20 @@ async fn a_declined_or_unanswered_widening_changes_nothing() {
 
 #[tokio::test]
 async fn a_beyond_ceiling_target_is_refused_without_asking() {
-    let mut f = fixture().await;
-    let (mut e, sink) = esc(Some(true));
-    e.ceiling = policy_with(&[f.a.clone()]); // b is not in the ceiling
-    let mut active = ActivePolicy::new(policy_with(&[f.a.clone()]), e.ceiling.clone());
-    let out = send_escalating(&mut f.s, &e, &mut active, &f.b).await;
+    let mut f = fixture(Some(true), |a, _| vec![a.into()]).await; // b is not in the ceiling
+    let mut active = f.active();
+    let out = send_escalating(&mut f.s, &f.e, &mut active, &f.b).await;
     assert!(!proxy_escalation(&out).is_granted());
     assert!(
-        sink.seen.lock().unwrap().is_empty(),
+        f.sink.seen.lock().unwrap().is_empty(),
         "never prompted beyond the ceiling"
     );
 }
 
 #[tokio::test]
 async fn a_worker_that_cannot_take_the_scope_rolls_the_grant_back() {
-    let mut f = fixture().await;
-    let (mut e, _sink) = esc(Some(true));
-    e.ceiling = policy_with(&[f.a.clone(), f.b.clone()]);
-    let mut active = ActivePolicy::new(policy_with(&[f.a.clone()]), e.ceiling.clone());
+    let mut f = fixture(Some(true), |a, b| vec![a.into(), b.into()]).await;
+    let mut active = f.active();
     // Kill the worker twice: the first death is restarted, the second leaves it gone.
     for _ in 0..2 {
         f.s.icpt.kill_worker_for_test().await;
@@ -246,8 +256,8 @@ async fn a_worker_that_cannot_take_the_scope_rolls_the_grant_back() {
         },
         Ttl::Forever,
         1,
-        &e.operator,
-        &mut f.s.sandbox,
+        &f.e.operator,
+        &mut f.s.session.sandbox,
         &mut reg,
     )
     .await;

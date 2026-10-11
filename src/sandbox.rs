@@ -154,6 +154,38 @@ struct ChildEnv {
     provider: Option<EnvProvider>,
     hooks: Option<std::sync::Arc<dyn CallHooks>>,
     http_scope: Option<std::sync::Arc<dyn HttpScopeHook>>,
+    /// Which tool-scope processes are MCP servers, and what they did (024 FR-027). Not part of the
+    /// environment; it lives here because every variant carries a `ChildEnv`.
+    mcp: McpAttribution,
+}
+
+/// MCP servers run in the tool scope for their whole lifetime, so the cgroup cannot tell their
+/// events from a tool call's. Each server's own process can be told apart by `tgid`, recorded at
+/// spawn (research R8). Processes a server spawns cannot, and stay in the tool scope's stream until
+/// MCP servers get scopes of their own (018-subagent-scopes).
+#[derive(Default)]
+struct McpAttribution {
+    /// Server process `tgid` → server name.
+    servers: std::collections::BTreeMap<u32, String>,
+    /// Each server's kernel events, routed out of the tool scope's drains.
+    audit: std::collections::BTreeMap<String, Vec<AuditEvent>>,
+}
+
+impl McpAttribution {
+    /// Keep the events of no MCP server; record the others under their server.
+    fn route(&mut self, events: Vec<AuditEvent>) -> Vec<AuditEvent> {
+        if self.servers.is_empty() {
+            return events;
+        }
+        let mut tool = Vec::with_capacity(events.len());
+        for ev in events {
+            match ev.tgid.and_then(|t| self.servers.get(&t)) {
+                Some(server) => self.audit.entry(server.clone()).or_default().push(ev),
+                None => tool.push(ev),
+            }
+        }
+        tool
+    }
 }
 
 impl ChildEnv {
@@ -839,7 +871,26 @@ impl Sandbox {
     /// Drain and return the audit events for this scope since the last drain (empty for `Host`).
     /// Non-blocking (research H5): the records are already buffered in the ring (sync) or channel
     /// (async).
+    ///
+    /// Events from an MCP server's own process are not returned: they are recorded under that server
+    /// (see [`Sandbox::set_mcp_servers`], 024 FR-027).
     pub fn drain_audit(&mut self) -> Vec<AuditEvent> {
+        let events = self.drain_scope_audit();
+        self.child_env_mut().mcp.route(events)
+    }
+
+    /// The MCP servers running in the tool scope, as `(name, tgid)`. From now on, drained events of
+    /// those processes are recorded under their server instead of the open call (024 FR-027).
+    pub fn set_mcp_servers(&mut self, servers: impl IntoIterator<Item = (String, u32)>) {
+        self.child_env_mut().mcp.servers = servers.into_iter().map(|(n, t)| (t, n)).collect();
+    }
+
+    /// The kernel events each MCP server's own process produced since the last take, by server.
+    pub fn take_mcp_audit(&mut self) -> std::collections::BTreeMap<String, Vec<AuditEvent>> {
+        std::mem::take(&mut self.child_env_mut().mcp.audit)
+    }
+
+    fn drain_scope_audit(&mut self) -> Vec<AuditEvent> {
         match self {
             #[cfg(feature = "test-support")]
             Sandbox::Host(HostSandbox {

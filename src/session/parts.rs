@@ -3,7 +3,7 @@
 
 use bee_core::{Access, Policy};
 
-use super::spec::{BuildError, Enforcement, SessionSpec};
+use super::spec::{BuildError, Enforcement, SessionSpec, SystemParts};
 use crate::sandbox::Sandbox;
 use crate::skills::{Skill, SkillRegistry};
 
@@ -151,16 +151,23 @@ pub(super) fn build_sandbox(
     spec: &SessionSpec,
     policy: &Policy,
     scope_id: &str,
+    #[cfg_attr(not(feature = "intercept"), allow(unused_variables))] system: &SystemParts,
 ) -> Result<(Sandbox, HttpPrepared), String> {
     match spec.enforcement {
         Enforcement::Kernel => kernel_sandbox(policy, scope_id, spec.strip_env.clone()),
         Enforcement::Host => {
             #[cfg(feature = "intercept")]
             let prepared = if policy.http.as_ref().is_some_and(|h| h.is_active()) {
-                crate::intercept::session::prepare(
-                    policy,
-                    &bee_userspace::SystemResolver::current(),
-                )?
+                let resolver = crate::intercept::session::WithHosts {
+                    system: bee_userspace::SystemResolver::current(),
+                    hosts: &system.hosts,
+                };
+                match &system.worker_exe {
+                    Some(exe) => {
+                        crate::intercept::session::prepare_for(policy, &resolver, exe.clone())?
+                    }
+                    None => crate::intercept::session::prepare(policy, &resolver)?,
+                }
             } else {
                 None
             };

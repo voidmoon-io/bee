@@ -208,6 +208,7 @@ fn score_report_counts_techniques() {
     ];
     let transcript = EpisodeTranscript {
         consents: Vec::new(),
+        mcp_audit: Default::default(),
         http_scope: None,
         scenario_id: "s".into(),
         model_id: "mock/x".into(),

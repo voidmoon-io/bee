@@ -24,6 +24,7 @@ use crate::tools::ToolResult;
 /// A [`ReplOutput`] that turns the shared turn loop into a stream of [`SessionEvent`]s (008-grid-tui,
 /// T005). Drop the sink (or the receiver) to end the stream. `send` never blocks — the queue is
 /// unbounded — so it is safe to call from `run_exchange`'s synchronous output callbacks.
+#[derive(Clone)]
 pub struct SessionSink {
     tx: UnboundedSender<SessionEvent>,
 }

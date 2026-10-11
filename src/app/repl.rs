@@ -2,8 +2,9 @@
 //!
 //! Built on the same session construction as `bee run`, so the enforcement path for a headless and
 //! an interactive session is one piece of code rather than two that happen to agree. What stays
-//! here is what genuinely belongs to an interactive session: the consent prompt, the startup
-//! banner, the front-end choice, and the transcript on exit.
+//! here is what genuinely belongs to an interactive session: its Operator — consent asked of the
+//! person at the terminal, through the front-end's own reader — the startup banner, the front-end
+//! choice, and the transcript on exit.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -199,19 +200,20 @@ async fn repl(args: ReplArgs) -> ExitCode {
     // a pre-authorization (024 FR-001). The inline REPL opens its terminal first: the questions asked
     // while the session is built and those asked while it runs share its one line reader.
     let use_tui = choose_frontend(&args);
-    let (operator, mut terminal) = if use_tui {
+    let (consent, consent_rx) = bee::operator::ChannelConsent::new();
+    let (operator, mut terminal, mut tui_consent) = if use_tui {
+        // The TUI asks in a modal; the operator reports into each turn's chat once it runs.
         (
-            bee::operator::Operator::with_consent(
-                bee::operator::OperatorKind::Interactive,
-                std::sync::Arc::new(PromptConsent),
-            )
-            .with_timeout(std::time::Duration::from_secs(120)),
+            bee::operator::Operator::interactive(
+                consent,
+                std::sync::Arc::new(bee::operator::NullOutput),
+            ),
             None,
+            Some(consent_rx),
         )
     } else {
         // Off a terminal there is nobody to ask: the channel's far end is dropped, so every request
         // is refused, and `run_repl` reports why the session cannot start.
-        let (consent, consent_rx) = bee::operator::ChannelConsent::new();
         let terminal = ReplTerminal::open().map(|t| t.with_consent(consent_rx));
         let output: std::sync::Arc<dyn bee::operator::SessionOutput> = match &terminal {
             Ok(t) => t.output(),
@@ -220,6 +222,7 @@ async fn repl(args: ReplArgs) -> ExitCode {
         (
             bee::operator::Operator::interactive(consent, output),
             Some(terminal),
+            None,
         )
     };
 
@@ -256,8 +259,10 @@ async fn repl(args: ReplArgs) -> ExitCode {
     };
     let report = |line: &str| eprintln!("{CMD}: {line}");
     let building = bee::session::build(spec, &report);
-    let built = match terminal.as_mut() {
-        Some(Ok(t)) => t.serve_startup(building).await,
+    let built = match (terminal.as_mut(), tui_consent.as_mut()) {
+        (Some(Ok(t)), _) => t.serve_startup(building).await,
+        #[cfg(feature = "tui")]
+        (_, Some(rx)) => bee::tui::serve_startup(building, rx).await,
         _ => building.await,
     };
     let mut built = match built {
@@ -314,6 +319,7 @@ async fn repl(args: ReplArgs) -> ExitCode {
                     &mut built.registry,
                     &mut built.sandbox,
                     &config,
+                    tui_consent.take(),
                 )
                 .await
                 {
@@ -473,38 +479,4 @@ fn terminal_rows() -> Option<u16> {
         }
     }
     None
-}
-
-/// Interactive skill-grant consent: prompt on stderr, read a y/N line from stdin. Any non-`y`
-/// answer — including end-of-input — refuses, so the default is deny.
-struct PromptConsent;
-
-#[async_trait::async_trait]
-impl bee::operator::Consent for PromptConsent {
-    async fn decide(&self, request: &bee::operator::ConsentRequest) -> bee::operator::Decision {
-        let lines = request.render_lines();
-        let granted = tokio::task::spawn_blocking(move || prompt_consent(&lines))
-            .await
-            .unwrap_or(false);
-        if granted {
-            bee::operator::Decision::Granted
-        } else {
-            bee::operator::Decision::Denied
-        }
-    }
-}
-
-fn prompt_consent(lines: &[String]) -> bool {
-    use std::io::Write;
-    // `render_lines` escapes every field and covers every one — net and exec included, which this
-    // prompt once silently omitted (019 P2) — one line per field, so nothing can smuggle in another.
-    eprintln!();
-    for line in lines {
-        eprintln!("{line}");
-    }
-    eprint!("grant these (within the ceiling)? [y/N] ");
-    let _ = std::io::stderr().flush();
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line).is_ok()
-        && matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }

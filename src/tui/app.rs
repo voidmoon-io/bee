@@ -122,6 +122,17 @@ pub struct App {
     /// indicator takes its animation phase from this, so it moves exactly when data is flowing and
     /// holds still when the turn has stalled — motion as a report, not as decoration.
     pub activity: u64,
+    /// A consent question on screen (024 T059). It swallows input until answered.
+    pub consent: Option<ConsentModal>,
+    /// The operator's answer to [`App::consent`], for the event loop to send (drained via
+    /// [`App::take_consent_answer`]) — data, so the reducer stays pure.
+    pub consent_answer: Option<crate::operator::Decision>,
+}
+
+/// A consent question: the request as the operator reads it, every capability on its own line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsentModal {
+    pub lines: Vec<String>,
 }
 
 impl App {
@@ -158,7 +169,30 @@ impl App {
             model_id: String::new(),
             panel_sel: 0,
             activity: 0,
+            consent: None,
+            consent_answer: None,
         }
+    }
+
+    /// Put a consent question on screen.
+    pub fn ask_consent(&mut self, lines: Vec<String>) {
+        self.consent = Some(ConsentModal { lines });
+        self.consent_answer = None;
+    }
+
+    /// Take the operator's answer, if they gave one since the last call.
+    pub fn take_consent_answer(&mut self) -> Option<crate::operator::Decision> {
+        self.consent_answer.take()
+    }
+
+    /// Take the question off screen unanswered — the operator stopped waiting.
+    pub fn close_consent(&mut self) {
+        self.consent = None;
+    }
+
+    /// A line from bee itself in the chat.
+    pub fn system_line(&mut self, s: impl Into<String>) {
+        self.push_line(Role::System, s);
     }
 
     /// The same session with the model's id in the header (008 header context).
@@ -346,6 +380,26 @@ pub fn update(app: &mut App, msg: Message) {
 }
 
 fn handle_key(app: &mut App, key: KeyEvent) {
+    // A consent question outranks everything: `y` grants, `n` or Esc refuses, Ctrl-C still quits
+    // (which refuses), and every other key is swallowed, so the input buffer is left as it was.
+    if app.consent.is_some() {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let answer = match key.code {
+            KeyCode::Char('c') if ctrl => {
+                app.should_quit = true;
+                Some(crate::operator::Decision::Denied)
+            }
+            KeyCode::Char('y' | 'Y') if !ctrl => Some(crate::operator::Decision::Granted),
+            KeyCode::Char('n' | 'N') if !ctrl => Some(crate::operator::Decision::Denied),
+            KeyCode::Esc => Some(crate::operator::Decision::Denied),
+            _ => None,
+        };
+        if let Some(a) = answer {
+            app.consent = None;
+            app.consent_answer = Some(a);
+        }
+        return;
+    }
     // The help overlay swallows input; `?` or Esc closes it.
     if app.help_open {
         if matches!(key.code, KeyCode::Char('?') | KeyCode::Esc) {
@@ -652,6 +706,65 @@ mod tests {
         for c in s.chars() {
             update(a, Message::char(c));
         }
+    }
+
+    // ── 024 T059: the consent modal ─────────────────────────────────────────────────────────────
+
+    use crate::operator::Decision;
+
+    #[test]
+    fn y_grants_and_closes_the_question() {
+        let mut a = app();
+        a.ask_consent(vec!["'w' requests extra capabilities:".into()]);
+        update(&mut a, Message::char('y'));
+        assert!(a.consent.is_none());
+        assert_eq!(a.take_consent_answer(), Some(Decision::Granted));
+        assert_eq!(a.take_consent_answer(), None, "an answer is taken once");
+    }
+
+    #[test]
+    fn n_and_esc_refuse() {
+        for msg in [
+            Message::char('n'),
+            Message::char('N'),
+            Message::key(KeyCode::Esc),
+        ] {
+            let mut a = app();
+            a.ask_consent(vec!["x".into()]);
+            update(&mut a, msg);
+            assert_eq!(a.take_consent_answer(), Some(Decision::Denied));
+        }
+    }
+
+    #[test]
+    fn the_question_swallows_other_keys_and_leaves_the_input_alone() {
+        let mut a = app();
+        type_str(&mut a, "half a thought");
+        let before = a.input.text();
+        a.ask_consent(vec!["x".into()]);
+        for msg in [
+            Message::char('q'),
+            Message::char('x'),
+            Message::key(KeyCode::Enter),
+            Message::key(KeyCode::Backspace),
+            Message::char('?'),
+        ] {
+            update(&mut a, msg);
+        }
+        assert!(a.consent.is_some(), "still asking");
+        assert!(!a.should_quit && !a.help_open);
+        assert_eq!(a.take_consent_answer(), None);
+        assert_eq!(a.input.text(), before);
+        assert!(a.outbox.is_none(), "Enter sent nothing");
+    }
+
+    #[test]
+    fn ctrl_c_quits_and_refuses() {
+        let mut a = app();
+        a.ask_consent(vec!["x".into()]);
+        update(&mut a, Message::char_mods('c', KeyModifiers::CONTROL));
+        assert!(a.should_quit);
+        assert_eq!(a.take_consent_answer(), Some(Decision::Denied));
     }
 
     #[test]

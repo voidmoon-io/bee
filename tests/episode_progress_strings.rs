@@ -13,6 +13,8 @@
 //! Gated on `test-support`: a `DENIED` result needs a kernel denial, and on host only the scripted
 //! audit source can produce one.
 
+#[path = "support/fixtures.rs"]
+mod fixtures;
 #[path = "support/scripted.rs"]
 mod scripted;
 
@@ -24,60 +26,12 @@ use bee::grants::escalate::{DenialEscalationHook, LoopEscalation};
 use bee::grants::{GrantDelta, Ttl};
 use bee::hooks::{Flow, LoopHook, StepEvent, StepEventKind};
 use bee::provider::mock_model::MockModel;
-use bee::provider::{StopReason, ToolCall, Turn};
+use bee::provider::Turn;
 use bee::sandbox::{Sandbox, ScriptedAudit};
-use bee::scenario::Scenario;
 use bee::tools::{ToolRegistry, ToolResult};
-use bee_core::{Access, Mode, Policy};
+use bee_core::{Access, Policy};
+use fixtures::*;
 use scripted::*;
-
-fn policy(fs: &[(&str, Access)]) -> Policy {
-    let mut p = Policy {
-        name: "p".into(),
-        description: None,
-        mode: Mode::Enforce,
-        filesystem: Default::default(),
-        exec: Default::default(),
-        network: Default::default(),
-        exfiltration: Default::default(),
-        http: None,
-    };
-    for (path, a) in fs {
-        p.filesystem.insert(path.to_string(), *a);
-    }
-    p
-}
-
-fn scenario() -> Scenario {
-    Scenario {
-        id: "progress".into(),
-        policy_path: "/dev/null".into(),
-        system_prompt: "test".into(),
-        task: "go".into(),
-        turn_limit: 10,
-        timeout_secs: 30,
-        tools: vec![SCRIPTED.into(), "bash".into()],
-        mode: Default::default(),
-        workdir: Default::default(),
-        mcp: Default::default(),
-        skills: Vec::new(),
-        ceiling_policy_path: None,
-        security: Default::default(),
-    }
-}
-
-fn turn(text: Option<&str>, id: &str) -> Turn {
-    Turn {
-        text: text.map(str::to_string),
-        tool_calls: vec![ToolCall {
-            id: id.into(),
-            name: SCRIPTED.into(),
-            arguments: serde_json::json!({}),
-        }],
-        stop: StopReason::ToolUse,
-        usage: None,
-    }
-}
 
 /// Proposes write access to `/tmp/y` before the call with id `on`: a stand-in for a skill's
 /// `requires`, so the proactive line is exercised without a skills root.
@@ -140,7 +94,7 @@ async fn progress(
     turns.push(text_turn("all done"));
     run_loop(
         &MockModel::scripted(turns),
-        &scenario(),
+        &scenario("progress", &[SCRIPTED, "bash"], 10, 30),
         &mut registry,
         &mut sb,
         &opts,
@@ -164,11 +118,14 @@ async fn every_loop_line_is_byte_identical() {
     err_with_exit.exit_code = Some(2);
     let lines = progress(
         vec![
-            turn(Some("\n  Looking around.\nnot this line"), "c1"),
-            turn(None, "c2"),
-            turn(None, "c3"),
-            turn(None, "c4"),
-            turn(None, "c5"),
+            tool_turn(
+                Some("\n  Looking around.\nnot this line"),
+                &[("c1", SCRIPTED)],
+            ),
+            tool_turn(None, &[("c2", SCRIPTED)]),
+            tool_turn(None, &[("c3", SCRIPTED)]),
+            tool_turn(None, &[("c4", SCRIPTED)]),
+            tool_turn(None, &[("c5", SCRIPTED)]),
         ],
         vec![
             Attempt::ok("fine\nmore"),
@@ -238,24 +195,13 @@ async fn every_loop_line_is_byte_identical() {
 #[cfg(feature = "intercept")]
 #[tokio::test]
 async fn the_proxy_escalation_line() {
-    fn http(targets: &[&str]) -> Policy {
-        let mut p = policy(&[]);
-        p.http = Some(bee_core::HttpPolicy {
-            targets: targets
-                .iter()
-                .map(|t| bee_core::HostPort::try_from(t.to_string()).unwrap())
-                .collect(),
-            ..Default::default()
-        });
-        p
-    }
     let lines = progress(
-        vec![turn(None, "c1")],
+        vec![tool_turn(None, &[("c1", SCRIPTED)])],
         vec![Attempt::error("refused"), Attempt::ok("200 OK")],
         vec![Box::new(bee::grants::escalate::ProxyRefusalHook {
             enabled: true,
         })],
-        http(&["10.0.0.9:80"]),
+        http_policy(&["10.0.0.9:80"]),
         |sb, hooks| {
             hooks.push("c1", vec![refusal("c1", "10.0.0.9", 80)]);
             sb.set_http_scope_hook(Arc::new(FakeHttpScope::default()));

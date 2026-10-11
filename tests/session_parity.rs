@@ -17,11 +17,13 @@
 //! exposes them today: the episode keeps both local to `run_episode_with`, and the harness has no
 //! escalation. They are `None` until `Session::snapshot()` exists (T043).
 
+#[path = "support/fixtures.rs"]
+mod fixtures;
+
 use std::sync::Mutex;
 use std::time::Duration;
 
 use bee::provider::{Conversation, Model, ModelError, StopReason, ToolSchema, Turn};
-use bee::scenario::Scenario;
 
 /// What two sessions must agree on.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -68,30 +70,12 @@ impl Model for Recorder {
     }
 }
 
-fn scenario(tools: &[&str]) -> Scenario {
-    Scenario {
-        id: "parity".into(),
-        policy_path: "/dev/null".into(),
-        system_prompt: "You are a test agent.".into(),
-        task: "go".into(),
-        turn_limit: 1,
-        timeout_secs: 30,
-        tools: tools.iter().map(|t| t.to_string()).collect(),
-        mode: Default::default(),
-        workdir: Default::default(),
-        mcp: Default::default(),
-        skills: Vec::new(),
-        ceiling_policy_path: None,
-        security: Default::default(),
-    }
-}
-
 /// The session `bee run --scenario` builds, as far as it is observable from outside.
 async fn episode_snapshot(tools: &[&str]) -> Snapshot {
     let model = Recorder::default();
     bee::episode::run_episode_with(
         &model,
-        &scenario(tools),
+        &fixtures::scenario("parity", tools, 1, 30),
         None,
         None,
         bee::episode::EpisodeOptions::default(),

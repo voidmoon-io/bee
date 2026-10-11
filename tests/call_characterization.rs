@@ -14,6 +14,8 @@
 //! through `FakeCallHooks`, Target-scope widening through `FakeHttpScope`, consent through
 //! `RecordingConsent`.
 
+#[path = "support/fixtures.rs"]
+mod fixtures;
 #[path = "support/scripted.rs"]
 mod scripted;
 
@@ -27,13 +29,13 @@ use bee::grants::escalate::{DenialEscalationHook, LoopEscalation, ProxyRefusalHo
 use bee::grants::Ttl;
 use bee::hooks::LoopHook;
 use bee::provider::mock_model::MockModel;
-use bee::provider::{Conversation, StopReason, ToolCall, Turn};
+use bee::provider::{Conversation, Turn};
 use bee::proxy_event::ProxyEvent;
 use bee::repl::{run_exchange, ReplConfig, ReplEscalation, ReplOutput};
 use bee::sandbox::{Sandbox, ScriptedAudit};
-use bee::scenario::Scenario;
 use bee::tools::{ToolRegistry, ToolResult};
-use bee_core::{Access, AuditEvent, Mode, Policy};
+use bee_core::{Access, AuditEvent, Policy};
+use fixtures::*;
 use scripted::*;
 
 // ── The script ──────────────────────────────────────────────────────────────────────────────────
@@ -72,23 +74,6 @@ impl Case {
             turns: vec![call_turn("c1", SCRIPTED)],
         }
     }
-}
-
-fn policy(fs: &[(&str, Access)]) -> Policy {
-    let mut p = Policy {
-        name: "p".into(),
-        description: None,
-        mode: Mode::Enforce,
-        filesystem: Default::default(),
-        exec: Default::default(),
-        network: Default::default(),
-        exfiltration: Default::default(),
-        http: None,
-    };
-    for (path, a) in fs {
-        p.filesystem.insert(path.to_string(), *a);
-    }
-    p
 }
 
 fn denial(target: &str) -> AuditEvent {
@@ -194,24 +179,6 @@ fn calls_of(turns: &[bee::transcript::TranscriptTurn]) -> Vec<Call> {
         .collect()
 }
 
-fn scenario(budget_secs: u64) -> Scenario {
-    Scenario {
-        id: "characterize".into(),
-        policy_path: "/dev/null".into(),
-        system_prompt: "test".into(),
-        task: "go".into(),
-        turn_limit: 5,
-        timeout_secs: budget_secs,
-        tools: vec![SCRIPTED.into()],
-        mode: Default::default(),
-        workdir: Default::default(),
-        mcp: Default::default(),
-        skills: Vec::new(),
-        ceiling_policy_path: None,
-        security: Default::default(),
-    }
-}
-
 async fn episode(case: &Case) -> Run {
     let (mut sb, tool, http) = sandbox_for(case);
     let attempts = tool.counter();
@@ -229,7 +196,7 @@ async fn episode(case: &Case) -> Run {
     };
     let t = run_loop(
         &model(case),
-        &scenario(case.budget_secs),
+        &scenario("characterize", &[SCRIPTED], 5, case.budget_secs),
         &mut registry,
         &mut sb,
         &opts,
@@ -360,10 +327,10 @@ async fn s2_kernel_denial_granted_and_retried() {
 
 #[tokio::test]
 async fn s3_kernel_denial_beyond_ceiling() {
-    let mut case = Case::new(vec![
+    // The default ceiling grants `/tmp` only.
+    let case = Case::new(vec![
         Attempt::error("EACCES").with_audit(vec![denial("/etc/shadow")])
     ]);
-    case.ceiling = policy(&[("/tmp", Access::Write)]);
     let (e, r) = (episode(&case).await, repl(&case).await);
     assert_same_calls(&e, &r);
     assert_eq!(
@@ -393,19 +360,6 @@ async fn s4_kernel_denial_already_held() {
 }
 
 // ── 5. Proxy refusal → granted → retry ──────────────────────────────────────────────────────────
-
-#[cfg(feature = "intercept")]
-fn http_policy(targets: &[&str]) -> Policy {
-    let mut p = policy(&[]);
-    p.http = Some(bee_core::HttpPolicy {
-        targets: targets
-            .iter()
-            .map(|t| bee_core::HostPort::try_from(t.to_string()).unwrap())
-            .collect(),
-        ..Default::default()
-    });
-    p
-}
 
 #[cfg(feature = "intercept")]
 #[tokio::test]
@@ -443,16 +397,21 @@ async fn s6a_kernel_retry_outlasts_the_budget() {
 /// 6b. Each attempt fits the budget on its own, the two together do not. Real clock: the episode
 /// measures its deadline with `std::time::Instant`, which a paused tokio clock does not advance, so a
 /// paused run would hand the episode's retry a full budget and hide the difference.
+///
+/// Budget 2 s, attempts 1.4 s each: the episode's retry gets ~0.6 s and misses by ~0.8 s; the REPL's
+/// gets a fresh 2 s and finishes with ~0.6 s to spare. Both margins are far above scheduler noise, and
+/// the two loops run concurrently, so the test takes ~2.8 s rather than twice that.
 #[tokio::test]
 async fn s6b_kernel_retry_after_the_first_attempt_used_the_budget() {
+    let attempt = Duration::from_millis(1400);
     let mut case = Case::new(vec![
         Attempt::error("EACCES")
             .with_audit(vec![denial("/tmp/x")])
-            .taking(Duration::from_millis(600)),
-        Attempt::ok("written").taking(Duration::from_millis(600)),
+            .taking(attempt),
+        Attempt::ok("written").taking(attempt),
     ]);
-    case.budget_secs = 1;
-    let (e, r) = (episode(&case).await, repl(&case).await);
+    case.budget_secs = 2;
+    let (e, r) = tokio::join!(episode(&case), repl(&case));
     assert_eq!((e.attempts, r.attempts), (2, 2));
 
     // DRIFT FR-024: the retry's time budget. The episode gives it only what is left of the deadline,
@@ -542,23 +501,7 @@ async fn s8_late_tool_batch_on_the_sidecar_drain() {
 /// `run_loop`, so only the REPL's value can be observed from here.
 #[tokio::test]
 async fn lease_turn_counts() {
-    let two_calls = Turn {
-        text: None,
-        tool_calls: vec![
-            ToolCall {
-                id: "c0".into(),
-                name: SCRIPTED.into(),
-                arguments: serde_json::json!({}),
-            },
-            ToolCall {
-                id: "c1".into(),
-                name: SCRIPTED.into(),
-                arguments: serde_json::json!({}),
-            },
-        ],
-        stop: StopReason::ToolUse,
-        usage: None,
-    };
+    let two_calls = tool_turn(None, &[("c0", SCRIPTED), ("c1", SCRIPTED)]);
     let mut case = Case::new(vec![
         Attempt::ok("first"),
         Attempt::error("EACCES").with_audit(vec![denial("/tmp/x")]),

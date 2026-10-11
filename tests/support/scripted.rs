@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bee::provider::{StopReason, ToolCall, ToolSchema, Turn};
+use bee::provider::ToolSchema;
 use bee::proxy_event::{ProxyEvent, ProxyEventKind};
 use bee::sandbox::{CallContext, CallHooks, HttpScopeHook, Sandbox, ScriptedAudit};
 use bee::skills::{ConsentSink, Decision, GrantRequest};
@@ -54,30 +54,6 @@ pub fn refusal(call_id: &str, host: &str, port: u16) -> ProxyEvent {
         host: host.into(),
         port,
         detail: serde_json::Value::Null,
-    }
-}
-
-/// A model turn calling `tool` once with `{}` arguments.
-pub fn call_turn(id: &str, tool: &str) -> Turn {
-    Turn {
-        text: None,
-        tool_calls: vec![ToolCall {
-            id: id.into(),
-            name: tool.into(),
-            arguments: serde_json::json!({}),
-        }],
-        stop: StopReason::ToolUse,
-        usage: None,
-    }
-}
-
-/// A text-only model turn, which ends an episode or an exchange.
-pub fn text_turn(text: &str) -> Turn {
-    Turn {
-        text: Some(text.into()),
-        tool_calls: Vec::new(),
-        stop: StopReason::EndTurn,
-        usage: None,
     }
 }
 

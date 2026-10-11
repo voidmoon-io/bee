@@ -373,7 +373,7 @@ insta = "1"
 name = "vuln_target"
 required-features = ["intercept"]
 
-# 019 SC-007. Gated in the VM matrix (`http-latency`), compiled-only on host CI.
+# 024 R1: host orchestration tests that drive the scripted audit source.
 [[test]]
 name = "call_characterization"
 path = "tests/call_characterization.rs"
@@ -384,6 +384,7 @@ name = "episode_progress_strings"
 path = "tests/episode_progress_strings.rs"
 required-features = ["test-support"]
 
+# 019 SC-007. Gated in the VM matrix (`http-latency`), compiled-only on host CI.
 [[bench]]
 name = "intercept_latency"
 harness = false

@@ -192,8 +192,18 @@ pub struct HostSandbox {
 ///
 /// Each [`Sandbox::drain_audit`] pops one batch from `tool`, and each
 /// [`Sandbox::drain_sidecar_audit`] one from `proxy`; an empty queue drains nothing, as a real host
-/// sandbox does. A host sandbox enforces nothing, so a scripted batch only adds audit — it cannot
-/// weaken a kernel decision.
+/// sandbox does.
+///
+/// **Dangerous outside tests.** A host sandbox has no kernel to override, but a scripted denial is
+/// read exactly like a kernel one: it drives reactive escalation, which grants within the ceiling,
+/// reloads the policy and retries the call. Fabricated audit is fabricated authority, which is why
+/// this compiles only under `test-support` and never ships.
+///
+/// **A simplification of the real drains.** A kernel drain returns everything buffered, and the
+/// enforced sidecar drain also moves pending tool-scope events aside for the next tool drain. Here
+/// each drain returns exactly one queued batch, so a test controls *which* drain sees an event (how
+/// the late-event cases are written). A batch queued beyond the drains a call makes is not lost: it
+/// is returned to the next call's first drain.
 #[cfg(feature = "test-support")]
 #[derive(Default)]
 pub struct ScriptedAudit {

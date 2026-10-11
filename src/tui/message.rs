@@ -6,7 +6,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::session::SessionEvent;
+use crate::tui::events::SessionEvent;
 
 /// One thing that can change the model.
 #[derive(Debug, Clone)]

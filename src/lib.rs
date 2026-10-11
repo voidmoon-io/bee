@@ -28,6 +28,8 @@ pub mod batch;
 #[cfg(feature = "concurrent")]
 pub mod concurrent;
 pub mod config;
+// Context budget and compaction for long runs (025-long-run-resilience).
+pub mod context;
 pub mod episode;
 // The finding ledger (016-native-tools US2). Gated: it is the substrate the security tools write
 // into, and a build that selects none of them has nothing to record.

@@ -214,6 +214,7 @@ fn enforcement_trace_extracts_audit() {
         model_id: "mock/x".into(),
         status: EpisodeStatus::Completed,
         turns: vec![TranscriptTurn {
+            notes: Vec::new(),
             index: 0,
             assistant_text: None,
             calls: vec![call],

@@ -71,7 +71,15 @@ pub struct FileConfig {
     /// [`FileConfig::user_only_sections`].
     #[serde(default)]
     pub security: Option<SecuritySection>,
+    /// The context budget and compaction (025). Not operator-only: a project may tune its own budget,
+    /// and nothing here widens what the agent may do.
+    #[serde(default)]
+    pub context: Option<ContextSection>,
 }
+
+/// The `[context]` table (025 contracts/config.md). The shape lives in the library, which also reads
+/// it from a scenario file; every key is optional, and layers merge key by key.
+pub use bee::context::ContextConfig as ContextSection;
 
 /// The `[security]` table — where findings are recorded and how a granted scanner is configured.
 ///

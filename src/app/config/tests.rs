@@ -349,3 +349,39 @@ fn an_unreadable_policy_names_the_file() {
     assert!(text.contains("policy"), "{text}");
     assert!(text.contains("nope.toml"), "{text}");
 }
+
+// --- [context] (025) ----------------------------------------------------------------------------
+
+#[test]
+fn context_merges_key_by_key_across_layers() {
+    let f = Fixture::new();
+    f.provider("p.toml");
+    let user = f.layer(
+        "user.toml",
+        Origin::User,
+        "[provider]\npath = \"p.toml\"\n[context]\nwindow_tokens = 100000\nsoft = 0.5\n",
+    );
+    let project = f.layer(
+        "project.toml",
+        Origin::Project,
+        "[context]\nwindow_tokens = 32000\n",
+    );
+    let cfg = resolve_from_layers(&[user, project], &Flags::default()).unwrap();
+    assert_eq!(cfg.context.window_tokens, Some(32_000), "the project wins");
+    assert_eq!(cfg.context.soft, Some(0.5), "the user's other keys survive");
+}
+
+#[test]
+fn context_defaults_to_unset() {
+    let f = Fixture::new();
+    let provider = f.provider("p.toml");
+    let cfg = resolve_from_layers(&[], &flags_with_provider(&provider)).unwrap();
+    assert_eq!(cfg.context, bee::context::ContextConfig::default());
+}
+
+#[test]
+fn an_unknown_context_key_is_refused() {
+    let f = Fixture::new();
+    let path = f.write("user.toml", "[context]\nwindow = 1000\n");
+    assert!(load(&path, Origin::User).is_err());
+}

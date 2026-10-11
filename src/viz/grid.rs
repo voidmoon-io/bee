@@ -24,7 +24,8 @@ impl Status {
             EpisodeStatus::Timeout
             | EpisodeStatus::ApiError { .. }
             | EpisodeStatus::InfraError { .. }
-            | EpisodeStatus::NotCaptured => Status::Fail,
+            | EpisodeStatus::NotCaptured
+            | EpisodeStatus::ContextExhausted { .. } => Status::Fail,
         }
     }
 }

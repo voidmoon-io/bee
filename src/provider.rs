@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub mod framing;
+pub mod limits;
 pub mod mock_model;
 pub mod rig_model;
 

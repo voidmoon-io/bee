@@ -279,6 +279,7 @@ mod tests {
 
     fn scenario(id: &str, policy_path: PathBuf) -> Scenario {
         Scenario {
+            context: Default::default(),
             id: id.into(),
             policy_path,
             system_prompt: "test".into(),
@@ -297,6 +298,7 @@ mod tests {
 
     fn provider() -> ProviderConfig {
         ProviderConfig {
+            context_window: None,
             provider: ProviderType::Mock,
             base_url: None,
             model: String::new(),

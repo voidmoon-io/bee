@@ -18,14 +18,22 @@ pub fn truncate(content: String, cap: usize) -> (String, bool, Option<usize>) {
         return (content, false, None);
     }
     let original = content.len();
-    // Back off to a char boundary so we never split a multi-byte sequence.
-    let mut end = cap;
-    while end > 0 && !content.is_char_boundary(end) {
-        end -= 1;
-    }
+    let end = char_floor(&content, cap);
     let mut out = content[..end].to_string();
     out.push_str(&format!("\n[truncated: {original} bytes, showing {end}]"));
     (out, true, Some(original))
+}
+
+/// The largest char boundary of `s` at or below `n` — a cut there never splits a multi-byte sequence.
+pub(crate) fn char_floor(s: &str, n: usize) -> usize {
+    if n >= s.len() {
+        return s.len();
+    }
+    let mut end = n;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
 }
 
 /// How an episode ended (research H10). US3 adds `Captured`/`NotCaptured`.
@@ -47,6 +55,9 @@ pub enum EpisodeStatus {
     Captured { turn: u32 },
     /// The agent gave up or exhausted its turns without capturing the flag (US3, CTF mode).
     NotCaptured,
+    /// The next request could not be brought within the model's context budget (025 FR-002,
+    /// FR-014), or the provider refused one as too long.
+    ContextExhausted { detail: String },
 }
 
 /// One recorded tool call within a turn: the request, the result, and the audit events the kernel
@@ -97,6 +108,45 @@ pub struct TranscriptTurn {
     pub calls: Vec<RecordedCall>,
     /// Wall-clock duration of this turn (model round-trip + tool execution), milliseconds.
     pub duration_ms: u64,
+    /// bee's own notes added to the model's input before this turn's model call (025 FR-028): passive
+    /// leads, stuck reminders, the finish reminder.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<HarnessNote>,
+}
+
+/// What a [`HarnessNote`] is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoteKind {
+    /// A sandbox turn note, e.g. "N new passive leads" (019 US8).
+    Passive,
+    /// The same call has been repeated (025 FR-024).
+    StuckGeneral,
+    /// The same call keeps being denied by policy (025 FR-026).
+    StuckPolicy,
+    /// The run ends only through the finish tool (025 FR-035).
+    FinishRequired,
+}
+
+/// One note in bee's own words, added to the model's input as a user message (025 FR-028).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HarnessNote {
+    pub kind: NoteKind,
+    pub text: String,
+    /// The repeated call a stuck note answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call: Option<ToolCall>,
+}
+
+impl HarnessNote {
+    /// A note with no call attached.
+    pub fn new(kind: NoteKind, text: impl Into<String>) -> HarnessNote {
+        HarnessNote {
+            kind,
+            text: text.into(),
+            call: None,
+        }
+    }
 }
 
 /// Episode timing (FR-009).

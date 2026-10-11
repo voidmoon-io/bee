@@ -21,7 +21,7 @@ use crate::app::config::EffectiveConfig;
 /// somewhere is reading these, so they are an interface rather than an implementation detail.
 pub const EX_USAGE: u8 = 64;
 pub const EX_DATAERR: u8 = 65;
-pub const EX_UNAVAILABLE: u8 = 69;
+// EX_UNAVAILABLE (69) is now chosen in the library, by `bee::episode::exit_code`.
 pub const EX_SOFTWARE: u8 = 70;
 pub const EX_IOERR: u8 = 74;
 

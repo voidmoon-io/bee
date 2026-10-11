@@ -15,7 +15,9 @@ use crate::provider::{Conversation, Message, Model, ModelError, Turn, Usage};
 use crate::sandbox::{self, Sandbox};
 use crate::scenario::{Scenario, ScoringMode, WorkdirSetup};
 use crate::tools::{self, ToolRegistry};
-use crate::transcript::{EpisodeStatus, EpisodeTranscript, RecordedCall, Timing, TranscriptTurn};
+use crate::transcript::{
+    EpisodeStatus, EpisodeTranscript, HarnessNote, NoteKind, RecordedCall, Timing, TranscriptTurn,
+};
 
 /// A sink for human-readable live progress lines (research-agnostic; the CLI wires it to stderr).
 /// The loop owns the formatting; the sink just renders. `None` ⇒ silent (the default).
@@ -40,6 +42,9 @@ pub struct LoopOptions {
     /// behaves exactly as before. When set, the loop builds an [`crate::grants::ActivePolicy`] and
     /// drives the escalation hooks each step.
     pub escalation: Option<crate::grants::escalate::LoopEscalation>,
+    /// The context settings below the scenario: user and project `[context]`, and the provider's
+    /// window and reply limit (025). The scenario's own `[context]` is merged over them.
+    pub context: crate::context::ContextInputs,
 }
 
 impl Default for LoopOptions {
@@ -50,6 +55,7 @@ impl Default for LoopOptions {
             metrics: None,
             refresh_tools: None,
             escalation: None,
+            context: crate::context::ContextInputs::default(),
         }
     }
 }
@@ -85,6 +91,29 @@ fn status_label(s: &EpisodeStatus) -> String {
         EpisodeStatus::InfraError { detail } => format!("infra_error ({detail})"),
         EpisodeStatus::Captured { turn } => format!("captured (turn {turn})"),
         EpisodeStatus::NotCaptured => "not_captured".into(),
+        EpisodeStatus::ContextExhausted { detail } => format!("context exhausted ({detail})"),
+    }
+}
+
+/// `bee run`'s exit code: the run ended without completing its task (025, contracts/finish.md).
+pub const EXIT_INCOMPLETE: u8 = 3;
+/// `EX_UNAVAILABLE` (sysexits): the provider failed.
+const EXIT_UNAVAILABLE: u8 = 69;
+/// `EX_SOFTWARE` (sysexits): bee could not set the episode up.
+const EXIT_SOFTWARE: u8 = 70;
+
+/// The process exit code for an episode that ended with `status`. In the library, not the CLI, so the
+/// mapping is testable and an embedder gets the same answer (Constitution V).
+pub fn exit_code(status: &EpisodeStatus) -> u8 {
+    match status {
+        EpisodeStatus::InfraError { .. } => EXIT_SOFTWARE,
+        EpisodeStatus::ApiError { .. } => EXIT_UNAVAILABLE,
+        EpisodeStatus::ContextExhausted { .. } => EXIT_INCOMPLETE,
+        EpisodeStatus::Completed
+        | EpisodeStatus::Timeout
+        | EpisodeStatus::NoToolCalls
+        | EpisodeStatus::Captured { .. }
+        | EpisodeStatus::NotCaptured => 0,
     }
 }
 
@@ -160,6 +189,24 @@ pub async fn run_loop(
 
     let mut convo = Conversation::new(&scenario.system_prompt, &scenario.task);
 
+    // The context budget (025): never send a request over it, and cap each result the model sees.
+    let mut ctx = match crate::context::ContextManager::for_session(
+        &opts.context,
+        Some(&scenario.context),
+        model.id(),
+    ) {
+        Ok((ctx, notice)) => {
+            if let Some(n) = notice {
+                emit(opts, format!("  {n}"));
+            }
+            ctx
+        }
+        Err(e) => return infra_error(scenario, model, format!("invalid [context]: {e}")),
+    };
+    // bee's notes for the next model call (025 FR-028), queued by stuck detection and the finish
+    // reminder and recorded on the turn they precede.
+    let mut pending: Vec<HarnessNote> = Vec::new();
+
     let mut turns: Vec<TranscriptTurn> = Vec::new();
     let mut audit_trail = Vec::new();
     let mut usage_total: Option<Usage> = None;
@@ -195,11 +242,29 @@ pub async fn run_loop(
         }
         let schemas = registry.schemas();
 
-        // Harness notes for this turn (019 US8: "N new passive leads") — bee's own words.
+        // Harness notes for this turn (019 US8: "N new passive leads", 025 reminders) — bee's own
+        // words, recorded on the turn they precede.
+        let mut turn_notes: Vec<HarnessNote> = Vec::new();
         for note in sandbox.turn_notes() {
             emit(opts, format!("  {note}"));
-            convo.push(Message::User { text: note });
+            convo.push(Message::User { text: note.clone() });
+            turn_notes.push(HarnessNote::new(NoteKind::Passive, note));
         }
+        for note in std::mem::take(&mut pending) {
+            emit(opts, format!("  {}", note.text));
+            convo.push(Message::User {
+                text: note.text.clone(),
+            });
+            turn_notes.push(note);
+        }
+
+        let prepared = match ctx.prepare(&convo, &schemas) {
+            Ok(p) => p,
+            Err(e) => {
+                status = EpisodeStatus::ContextExhausted { detail: e.detail };
+                break;
+            }
+        };
 
         let call_start = Instant::now();
         let turn =
@@ -216,7 +281,13 @@ pub async fn run_loop(
                             "error",
                         );
                     }
-                    status = EpisodeStatus::ApiError { detail };
+                    // A provider refusal for length means the estimate ran low: report it as the
+                    // budget it is, not as a provider fault (plan risk 2).
+                    status = if crate::context::is_context_overflow(&detail) {
+                        EpisodeStatus::ContextExhausted { detail }
+                    } else {
+                        EpisodeStatus::ApiError { detail }
+                    };
                     break;
                 }
             };
@@ -232,6 +303,7 @@ pub async fn run_loop(
             );
         }
 
+        ctx.observe(prepared.sent_bytes, turn.usage.as_ref());
         if let Some(u) = turn.usage {
             usage_total = Some(usage_total.map_or(u, |acc| acc + u));
         }
@@ -249,6 +321,7 @@ pub async fn run_loop(
         // (a model that never engages — SC-007, no hang).
         if turn.tool_calls.is_empty() {
             turns.push(TranscriptTurn {
+                notes: std::mem::take(&mut turn_notes),
                 index,
                 assistant_text: assistant_text.clone(),
                 calls: Vec::new(),
@@ -279,6 +352,7 @@ pub async fn run_loop(
             if remaining.is_zero() {
                 status = EpisodeStatus::Timeout;
                 turns.push(TranscriptTurn {
+                    notes: std::mem::take(&mut turn_notes),
                     index,
                     assistant_text,
                     calls: recorded,
@@ -457,7 +531,8 @@ pub async fn run_loop(
             convo.push(Message::ToolResult {
                 call_id: tc.id.clone(),
                 name: tc.name.clone(),
-                content: result.content.clone(),
+                // The model sees the capped result; the record keeps the tool's own (025 FR-022).
+                content: ctx.cap(&result.content, result.original_len),
                 is_error: result.is_error,
                 provenance: result.provenance.clone(),
             });
@@ -478,6 +553,7 @@ pub async fn run_loop(
                     audit,
                 });
                 turns.push(TranscriptTurn {
+                    notes: std::mem::take(&mut turn_notes),
                     index,
                     assistant_text,
                     calls: recorded,
@@ -496,6 +572,7 @@ pub async fn run_loop(
             if timed_out {
                 status = EpisodeStatus::Timeout;
                 turns.push(TranscriptTurn {
+                    notes: std::mem::take(&mut turn_notes),
                     index,
                     assistant_text,
                     calls: recorded,
@@ -506,6 +583,7 @@ pub async fn run_loop(
         }
 
         turns.push(TranscriptTurn {
+            notes: std::mem::take(&mut turn_notes),
             index,
             assistant_text,
             calls: recorded,
@@ -657,12 +735,16 @@ fn write_with_parents(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<(
     std::fs::write(path, bytes)
 }
 
-/// Operator choices for one episode that are never read from a scenario or configuration file.
+/// Operator choices for one episode that the scenario file does not carry: command-line flags, and
+/// settings from the operator's own configuration.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct EpisodeOptions {
     /// `--http-scope-advisory`: run `[policy.http]` interception even though the kernel will not
     /// block (host mode, a build without `enforce`, or an observe-mode policy) — research R17.
     pub http_scope_advisory: bool,
+    /// User and project `[context]`, and the provider file's window and reply limit (025). The
+    /// scenario's own `[context]` is merged over them.
+    pub context: crate::context::ContextInputs,
 }
 
 /// Run a full episode: build the sandbox (a real bee scope under `--features enforce`), materialize
@@ -717,6 +799,7 @@ pub async fn run_episode_with(
             "episode",
             format!("episode:{}:{}", scenario.id, std::process::id()),
         ),
+        context: eopts.context,
         ..LoopOptions::default()
     };
 
@@ -1179,6 +1262,7 @@ mod mcp_cgroup_spike {
         )
         .unwrap();
         let scn = Scenario {
+            context: Default::default(),
             id: "mcp-spike".into(),
             policy_path: policy,
             system_prompt: "spike".into(),

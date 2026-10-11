@@ -10,11 +10,10 @@ use std::process::ExitCode;
 
 use clap::Args;
 
-use bee::transcript::EpisodeStatus;
 use bee::{run_batch, run_episode_with, BatchConfig, EpisodeOptions, EpisodeTranscript, Scenario};
 
 use crate::app::config::{self, EffectiveConfig, Flags};
-use crate::app::session::{self, EX_DATAERR, EX_IOERR, EX_SOFTWARE, EX_UNAVAILABLE, EX_USAGE};
+use crate::app::session::{self, EX_DATAERR, EX_IOERR, EX_SOFTWARE, EX_USAGE};
 
 const CMD: &str = "bee run";
 
@@ -146,6 +145,7 @@ impl RunArgs {
         // which runs just after this and knows about `--host` — the guard here did not, so it
         // refused ad-hoc host-mode runs that the operator had explicitly asked for.
         Ok(Scenario {
+            context: Default::default(),
             id: "adhoc".to_string(),
             policy_path: cfg
                 .policy_path
@@ -273,6 +273,11 @@ async fn run(args: RunArgs) -> ExitCode {
         progress_sink(args.quiet),
         EpisodeOptions {
             http_scope_advisory: args.http_scope_advisory,
+            context: bee::context::ContextInputs {
+                config: cfg.context,
+                provider_window: cfg.provider.context_window,
+                max_tokens: cfg.provider.max_tokens,
+            },
         },
     )
     .await;
@@ -288,11 +293,7 @@ async fn run(args: RunArgs) -> ExitCode {
         None => println!("{json}"),
     }
 
-    match transcript.status {
-        EpisodeStatus::InfraError { .. } => ExitCode::from(EX_SOFTWARE),
-        EpisodeStatus::ApiError { .. } => ExitCode::from(EX_UNAVAILABLE),
-        _ => ExitCode::SUCCESS,
-    }
+    ExitCode::from(bee::episode::exit_code(&transcript.status))
 }
 
 /// The `[policy.http]` gate for a single episode (019 T043/T044). The episode path re-checks; this

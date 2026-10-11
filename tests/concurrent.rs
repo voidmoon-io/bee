@@ -15,6 +15,7 @@ use bee::{run_loop, EpisodeStatus, EpisodeTranscript, LoopOptions};
 
 fn scenario() -> Scenario {
     Scenario {
+        context: Default::default(),
         id: "conc".into(),
         policy_path: "/dev/null".into(),
         system_prompt: "test agent".into(),

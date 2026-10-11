@@ -38,7 +38,9 @@ use crate::provider::{
 use crate::render_spec::{EffectSpec, RenderSpec};
 use crate::sandbox::Sandbox;
 use crate::tools::{ToolRegistry, ToolResult};
-use crate::transcript::{EpisodeStatus, EpisodeTranscript, RecordedCall, Timing, TranscriptTurn};
+use crate::transcript::{
+    EpisodeStatus, EpisodeTranscript, HarnessNote, NoteKind, RecordedCall, Timing, TranscriptTurn,
+};
 
 pub mod terminal;
 
@@ -89,6 +91,55 @@ pub struct ReplConfig {
     #[allow(clippy::type_complexity)]
     pub http_pane:
         Option<std::sync::Arc<dyn Fn() -> Option<crate::render_spec::RenderSpec> + Send + Sync>>,
+    /// The context settings below the session (025): user and project `[context]`, and the provider
+    /// file's window and reply limit.
+    pub context: crate::context::ContextInputs,
+    /// State that outlives one exchange (025): the context manager and bee's queued notes. Behind a
+    /// lock for the reason [`ReplEscalation`] is: [`run_exchange`] takes `&ReplConfig`. Never held
+    /// across an `.await`.
+    pub state: Mutex<ReplState>,
+}
+
+/// The REPL's session-lifetime context state (025). [`ReplState::reset`] is `/clear`'s half of it.
+#[derive(Debug, Default)]
+pub struct ReplState {
+    /// Built on first use from [`ReplConfig::context`] and the model's id, unless the front-end built
+    /// it at start-up (to report a bad `[context]` before the first message).
+    pub context: Option<crate::context::ContextManager>,
+    /// bee's notes for the next model call, recorded on the turn they precede (025 FR-028).
+    pub pending: Vec<crate::transcript::HarnessNote>,
+}
+
+impl ReplState {
+    /// State with a context manager the front-end has already built.
+    pub fn with_context(context: crate::context::ContextManager) -> ReplState {
+        ReplState {
+            context: Some(context),
+            pending: Vec::new(),
+        }
+    }
+
+    /// The context manager, built from `inputs` for `model_id` if there is none yet.
+    fn context_for(
+        &mut self,
+        inputs: &crate::context::ContextInputs,
+        model_id: &str,
+    ) -> Result<&mut crate::context::ContextManager, crate::context::ConfigError> {
+        if self.context.is_none() {
+            let (ctx, _notice) =
+                crate::context::ContextManager::for_session(inputs, None, model_id)?;
+            self.context = Some(ctx);
+        }
+        Ok(self.context.as_mut().expect("just built"))
+    }
+
+    /// Forget per-conversation state (`/clear`, 025 FR-019).
+    pub fn reset(&mut self) {
+        if let Some(c) = &mut self.context {
+            c.reset();
+        }
+        self.pending.clear();
+    }
 }
 
 /// Session-lifetime escalation state for the REPL.
@@ -142,6 +193,8 @@ impl Default for ReplConfig {
             visual: crate::config::VisualConfig::default(),
             escalation: None,
             http_pane: None,
+            context: crate::context::ContextInputs::default(),
+            state: Mutex::new(ReplState::default()),
         }
     }
 }
@@ -235,6 +288,8 @@ pub enum ExchangeOutcome {
     BudgetExhausted,
     /// A provider error (after retries) ended the exchange.
     ApiError(String),
+    /// The next request could not be brought within the context budget (025 FR-002, FR-014).
+    ContextExhausted(String),
 }
 
 /// The result of running one user→agent exchange (used by [`run_repl`] and by tests).
@@ -511,11 +566,46 @@ pub async fn run_exchange(
         }
         let schemas = registry.schemas();
 
-        // Harness notes for this turn (019 US8: "N new passive leads") — bee's own words.
+        // Harness notes for this turn (019 US8: "N new passive leads", 025 reminders) — bee's own
+        // words, recorded on the turn they precede.
+        let mut turn_notes: Vec<HarnessNote> = Vec::new();
         for note in sandbox.turn_notes() {
             output.info(&note);
-            conversation.push(Message::User { text: note });
+            conversation.push(Message::User { text: note.clone() });
+            turn_notes.push(HarnessNote::new(NoteKind::Passive, note));
         }
+        let queued = std::mem::take(&mut lock_state(config).pending);
+        for note in queued {
+            output.info(&note.text);
+            conversation.push(Message::User {
+                text: note.text.clone(),
+            });
+            turn_notes.push(note);
+        }
+
+        // The context budget (025): never send a request over it.
+        let prepared = {
+            let mut state = lock_state(config);
+            state
+                .context_for(&config.context, model.id())
+                .map_err(|e| format!("invalid [context]: {e}"))
+                .and_then(|ctx| ctx.prepare(conversation, &schemas).map_err(|e| e.detail))
+        };
+        let prepared = match prepared {
+            Ok(p) => p,
+            Err(detail) => {
+                output.error(&format!("context exhausted: {detail}"));
+                return ExchangeResult {
+                    outcome: ExchangeOutcome::ContextExhausted(detail),
+                    model_calls,
+                    tool_calls,
+                    denials,
+                    turns,
+                    audit: audit_all,
+                    usage: usage_total,
+                };
+            }
+        };
 
         let turn_start = Instant::now();
         // Show a "working" indicator from the instant the call is dispatched — this covers the
@@ -539,7 +629,7 @@ pub async fn run_exchange(
                         );
                     }
                     return ExchangeResult {
-                        outcome: ExchangeOutcome::ApiError(detail),
+                        outcome: exchange_error(detail),
                         model_calls,
                         tool_calls,
                         denials,
@@ -564,7 +654,7 @@ pub async fn run_exchange(
                     );
                 }
                 return ExchangeResult {
-                    outcome: ExchangeOutcome::ApiError(detail),
+                    outcome: exchange_error(detail),
                     model_calls,
                     tool_calls,
                     denials,
@@ -575,6 +665,9 @@ pub async fn run_exchange(
             }
         };
         model_calls += 1;
+        if let Some(ctx) = lock_state(config).context.as_mut() {
+            ctx.observe(prepared.sent_bytes, turn.usage.as_ref());
+        }
         if let Some(rec) = recorder {
             rec.record(
                 model.id(),
@@ -600,6 +693,7 @@ pub async fn run_exchange(
                 tool_calls: Vec::new(),
             });
             turns.push(TranscriptTurn {
+                notes: std::mem::take(&mut turn_notes),
                 index: turns.len() as u32,
                 assistant_text,
                 calls: Vec::new(),
@@ -804,10 +898,15 @@ pub async fn run_exchange(
                 output.panel_op(op);
             }
 
+            // The model sees the capped result; the record keeps the tool's own (025 FR-022).
+            let content = match lock_state(config).context.as_ref() {
+                Some(ctx) => ctx.cap(&result.content, result.original_len),
+                None => result.content.clone(),
+            };
             conversation.push(Message::ToolResult {
                 call_id: tc.id.clone(),
                 name: tc.name.clone(),
-                content: result.content.clone(),
+                content,
                 is_error: result.is_error,
                 provenance: result.provenance.clone(),
             });
@@ -821,6 +920,7 @@ pub async fn run_exchange(
         }
 
         turns.push(TranscriptTurn {
+            notes: std::mem::take(&mut turn_notes),
             index: turns.len() as u32,
             assistant_text,
             calls: recorded,
@@ -840,6 +940,21 @@ pub async fn run_exchange(
         turns,
         audit: audit_all,
         usage: usage_total,
+    }
+}
+
+/// The REPL's session state, recovering from a poisoned lock: the state is plain data, and a panic
+/// elsewhere must not wedge the session.
+fn lock_state(config: &ReplConfig) -> std::sync::MutexGuard<'_, ReplState> {
+    config.state.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The outcome for a provider error: a refusal for length is the context budget, not the provider.
+fn exchange_error(detail: String) -> ExchangeOutcome {
+    if crate::context::is_context_overflow(&detail) {
+        ExchangeOutcome::ContextExhausted(detail)
+    } else {
+        ExchangeOutcome::ApiError(detail)
     }
 }
 
@@ -1280,6 +1395,7 @@ pub async fn run_repl(
                 },
                 MetaCommand::Clear => {
                     conversation.messages.clear();
+                    lock_state(config).reset();
                     // Before the info line, so a front-end that wipes its transcript still shows the
                     // acknowledgement afterwards rather than clearing it away again (010).
                     output.clear_history();

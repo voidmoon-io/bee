@@ -101,6 +101,9 @@ pub struct EffectiveConfig {
     /// Security tooling configuration (016-native-tools): the ledger location and per-scanner
     /// settings. Paths are already resolved against the file that declared them.
     pub security: file::SecuritySection,
+    /// `[context]` from every layer, merged key by key (025). Validated when a session starts, against
+    /// the model's window.
+    pub context: file::ContextSection,
 }
 
 /// One thing bee needs and does not have, with the places it could come from.
@@ -185,6 +188,7 @@ struct Merged {
     visual_level: Option<String>,
     animations: Option<bool>,
     security: Option<file::SecuritySection>,
+    context: file::ContextSection,
 }
 
 impl Merged {
@@ -247,6 +251,9 @@ impl Merged {
                     scanner.bundle = scanner.bundle.as_ref().map(|p| layer.resolve_path(p));
                 }
                 m.security = Some(s);
+            }
+            if let Some(c) = c.context {
+                m.context = m.context.merge(c);
             }
         }
 
@@ -405,6 +412,7 @@ pub fn resolve_from_layers(
         theme_warning,
         visual,
         security: m.security.unwrap_or_default(),
+        context: m.context,
     })
 }
 

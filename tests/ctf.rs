@@ -17,6 +17,7 @@ const FLAG: &str = "FLAG{bee-ctf-2026}";
 
 fn ctf_scenario(turn_limit: u32) -> Scenario {
     Scenario {
+        context: Default::default(),
         id: "ctf-test".into(),
         policy_path: "/dev/null".into(),
         system_prompt: "You are a red-team agent.".into(),
@@ -204,6 +205,7 @@ fn score_report_counts_techniques() {
         model_id: "mock/x".into(),
         status: EpisodeStatus::NotCaptured,
         turns: vec![TranscriptTurn {
+            notes: Vec::new(),
             index: 0,
             assistant_text: None,
             calls,

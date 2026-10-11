@@ -743,6 +743,7 @@ mod tests {
         model: &str,
     ) -> ProviderConfig {
         ProviderConfig {
+            context_window: None,
             provider: ProviderType::Anthropic,
             base_url: None,
             model: model.to_string(),

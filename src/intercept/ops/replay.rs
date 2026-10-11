@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use super::{CallCtx, OpError};
+use super::{CallCtx, OpError, Refusal};
 use crate::intercept::control::{OriginKind, Outcome, RawTarget};
 use crate::intercept::diff::{self, Edit, Side};
 use crate::intercept::sidecar::Interceptor;
@@ -28,8 +28,10 @@ pub struct ReplayResult {
     pub id: String,
     /// The original.
     pub parent: String,
-    /// The unmodified re-send, when a noise probe ran.
+    /// The unmodified re-send, when a noise probe ran and got a response.
     pub probe: Option<String>,
+    /// Why a noise probe that was sent is not used.
+    pub probe_skipped: Option<String>,
     pub diff: Value,
 }
 
@@ -41,10 +43,13 @@ pub async fn replay(
 ) -> Result<ReplayResult, OpError> {
     let id = spec.id.as_str();
     let (target, head, body) = stored_request(icpt, id)?;
-    let mut original_bytes = head.clone();
+    // Edits are checked before anything is sent: an invalid one costs the target no request.
+    let (new_head, new_body) =
+        diff::apply_edits(&head, &body, &spec.edits).map_err(OpError::Invalid)?;
+    let mut original_bytes = head;
     original_bytes.extend_from_slice(&body);
 
-    let probe_id = if spec.noise_probe {
+    let probe = if spec.noise_probe {
         let sent = icpt
             .send(
                 target.clone(),
@@ -56,13 +61,11 @@ pub async fn replay(
                 spec.timeout,
             )
             .await?;
-        Some(sent.exchange_id)
+        Some(sent)
     } else {
         None
     };
 
-    let (new_head, new_body) =
-        diff::apply_edits(&head, &body, &spec.edits).map_err(OpError::Invalid)?;
     let mut bytes = new_head;
     bytes.extend_from_slice(&new_body);
     let sent = icpt
@@ -77,15 +80,35 @@ pub async fn replay(
         )
         .await?;
     if let Outcome::Refused { kind } = &sent.record.outcome {
-        return Err(OpError::Invalid(format!(
-            "the replay was refused by the proxy ({}); edits cannot move a request out of scope",
-            kind.as_str()
-        )));
+        return Err(OpError::Refused {
+            reason: Refusal::from_proxy(kind, &target),
+            note: None,
+        });
     }
 
     let original = side_of(icpt, id)?;
     let new = side_of(icpt, &sent.exchange_id)?;
-    let probe_side = match &probe_id {
+    // Only a probe that got a response measures volatility: diffed against a refused or failed
+    // one, every difference would look volatile and the edit's effect would be suppressed.
+    let (probe, probe_skipped) = match probe {
+        Some(p) if matches!(p.record.outcome, Outcome::Completed | Outcome::Truncated) => {
+            (Some(p.exchange_id), None)
+        }
+        Some(p) => {
+            let why = match &p.record.outcome {
+                Outcome::Refused { kind } => format!("was refused ({})", kind.as_str()),
+                Outcome::Failed { reason } => format!("failed ({reason})"),
+                Outcome::Completed | Outcome::Truncated => unreachable!("matched above"),
+            };
+            let note = format!(
+                "the noise probe {} {why}; volatile values are not suppressed",
+                p.exchange_id
+            );
+            (None, Some(note))
+        }
+        None => (None, None),
+    };
+    let probe_side = match &probe {
         Some(p) => Some(side_of(icpt, p)?),
         None => None,
     };
@@ -93,7 +116,8 @@ pub async fn replay(
         diff: diff::diff(&original, &new, probe_side.as_ref()),
         id: sent.exchange_id,
         parent: spec.id,
-        probe: probe_id,
+        probe,
+        probe_skipped,
     })
 }
 

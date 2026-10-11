@@ -670,6 +670,9 @@ pub struct EpisodeOptions {
     /// User and project `[context]`, and the provider file's window and reply limit (025). The
     /// scenario's own `[context]` is merged over them.
     pub context: crate::context::ContextInputs,
+    /// What the episode runs under. `None`: the kernel whenever the build can enforce, else the host.
+    /// `bee run --host` asks for `Host` on any build.
+    pub enforcement: Option<crate::session::Enforcement>,
 }
 
 /// Run a full episode: build the sandbox (a real bee scope under `--features enforce`), materialize
@@ -721,7 +724,7 @@ pub async fn run_episode_with(
     // The session, built the one way every entry point builds it (024 FR-006): skill grants, the
     // `[policy.http]` advisory, the sandbox, the Interceptor, the tool surface, MCP servers and
     // escalation.
-    let spec = spec_from_scenario(scenario, strip_env, eopts.http_scope_advisory);
+    let spec = spec_from_scenario(scenario, strip_env, &eopts);
     let mut session = match crate::session::build(spec, &|line| emit(&opts, line)).await {
         Ok(s) => s,
         Err(e) => return infra_error(scenario, model, e.to_string()),
@@ -768,7 +771,7 @@ pub async fn run_episode_with(
 fn spec_from_scenario(
     scenario: &Scenario,
     strip_env: Vec<String>,
-    http_scope_advisory: bool,
+    eopts: &EpisodeOptions,
 ) -> crate::session::SessionSpec {
     use bee_core::Policy;
     let policy = Policy::from_path(&scenario.policy_path).ok();
@@ -784,13 +787,11 @@ fn spec_from_scenario(
         label: scenario.id.clone(),
         policy,
         ceiling,
-        // A headless episode runs under the kernel whenever the build can; 024 PR 5a-2 lets `bee run`
-        // choose `--host` on an enforcement build.
-        enforcement: if cfg!(feature = "enforce") {
+        enforcement: eopts.enforcement.unwrap_or(if cfg!(feature = "enforce") {
             crate::session::Enforcement::Kernel
         } else {
             crate::session::Enforcement::Host
-        },
+        }),
         tools: scenario.tools.clone(),
         ctf_flag: scenario.workdir.flag.as_ref().map(|f| f.value.clone()),
         skill_roots: scenario.skills.clone(),
@@ -799,7 +800,7 @@ fn spec_from_scenario(
         workdir: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
         system_prompt: scenario.system_prompt.clone(),
         strip_env,
-        http_scope_advisory,
+        http_scope_advisory: eopts.http_scope_advisory,
         lease_turns: scenario.lease_turns,
         // Non-interactive: the ceiling file is the operator's reviewable pre-authorization.
         consent: std::sync::Arc::new(crate::skills::AllowWithinCeiling),

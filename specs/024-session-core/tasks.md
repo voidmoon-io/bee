@@ -406,7 +406,7 @@ drift cases behave as specified.
   - (d) `shutdown()` appends `["mcp", "interceptor", "scopes"]` to the session's `TeardownLog`
     (test-support, research R1) for every entry, including the `Drop` path;
   - (e) the `[policy.http]` advisory string in the snapshot is identical for every entry (FR-011, SC-003).
-- [ ] T038 [P] [US1] Create `tests/run_task_config.rs`. Building the `SessionSpec` the way `bee run --task`
+- [X] T038 [P] [US1] Create `tests/run_task_config.rs`. Building the `SessionSpec` the way `bee run --task`
   does, from an effective configuration with MCP servers and skills, keeps both. Test the mapping
   function, not the binary.
 
@@ -451,10 +451,10 @@ drift cases behave as specified.
 - [X] T044 [US1] Rewrite `src/episode.rs::run_episode_with` to call `session::build` and then `run_loop`
   through the `Session`. Delete the setup code and helpers moved in T042. Map `Scenario` to `SessionSpec`
   in a `fn spec_from_scenario` in `src/episode.rs`.
-- [ ] T045 [US1] Rewrite `src/app/repl.rs::repl` (`:123-412`) to map `EffectiveConfig` →
+- [X] T045 [US1] Rewrite `src/app/repl.rs::repl` (`:123-412`) to map `EffectiveConfig` →
   `SessionSpec { entry: Repl | Tui }` in a new `src/app/spec.rs::spec_from_config`, call `session::build`,
   and hand the `Session` to `run_repl` / `tui::run`. Delete `src/app/session.rs`.
-- [ ] T046 [US1] Rewrite `src/app/run.rs` so `--task` and `--scenario` build their spec through
+- [X] T046 [US1] Rewrite `src/app/run.rs` so `--task` and `--scenario` build their spec through
   `spec_from_config`, keeping user/project MCP servers and skills (FR-009; today `:115`, `:161-162` drop
   them). Remove the third advisory copy (`:300-335`) and the `--host` asymmetry (`:227-241`). Headless now
   honours `Enforcement::Host` where the build allows it.
@@ -493,8 +493,16 @@ drift cases behave as specified.
   - MCP configured on a build without `mcp` is refused by the builder for every entry point.
   - T037 (b), the scanner directory per entry point, is covered by construction: every entry point runs
     the same `resolve_grants`.
-- **5a-2 (next):** `bee repl`/TUI and `bee run --task` via `spec_from_config` (T038, T045, T046), and
-  `app/session.rs` deleted.
+- **5a-2 (done):** `bee repl`/TUI builds its `SessionSpec` from the effective configuration and runs
+  on the built session; its private grant resolution, skill discovery and sandbox construction are gone
+  from `app/session.rs`, which keeps only model construction, exit codes and the enforcement decision.
+  It was not deleted outright: those three are the command's own. `bee run --task` keeps the configured
+  MCP servers and skill roots (FR-009, T038, as a unit test in `src/app/run.rs`, since the mapping lives
+  in the binary). `--host` now means host on an enforcement build too (`EpisodeOptions.enforcement`).
+  The early `[policy.http]` check calls `session::http_advisory`, so the rule has one copy.
+  - Behaviour that unifies, as intended: the REPL's start-up lines use the episode's wording
+    (`skill grant: '…' …`), and a REPL session always has escalation, so a skill's `requires` is asked
+    about even without a policy (bounded by an empty ceiling).
 - **5a-3:** the concurrent runner via the builder (T047), MCP tgid attribution (T049), and the harness
   (T048). The harness needs a test-only way to start the Interceptor with an injected resolver and
   in-process worker, which the builder does not offer yet.

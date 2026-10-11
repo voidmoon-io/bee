@@ -95,8 +95,11 @@ fn escalation(hooks: Vec<Box<dyn LoopHook>>, ttl: Ttl) -> LoopEscalation {
         base: policy(&[]),
         ceiling: policy(&[("/tmp", Access::Write)]),
         hooks,
-        consent: RecordingConsent::new(true),
-        timeout: Duration::from_secs(5),
+        operator: bee::operator::Operator::with_consent(
+            bee::operator::OperatorKind::Autonomous,
+            RecordingConsent::new(true),
+        )
+        .with_timeout(Duration::from_secs(5)),
         default_ttl: ttl,
     }
 }

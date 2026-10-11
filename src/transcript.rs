@@ -197,6 +197,10 @@ pub struct EpisodeTranscript {
     /// HTTP interception, when the session ran it (019).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http_scope: Option<HttpSessionHeader>,
+    /// Every consent decision the session's operator made, in order (024 FR-004). Absent when there
+    /// were none, so a transcript without grants is unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub consents: Vec<crate::operator::ConsentRecord>,
 }
 
 impl EpisodeTranscript {
@@ -280,6 +284,7 @@ impl EpisodeTranscript {
             .format(&time::format_description::well_known::Rfc3339)
             .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
         EpisodeTranscript {
+            consents: Vec::new(),
             http_scope: None,
             scenario_id,
             model_id,

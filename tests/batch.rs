@@ -215,6 +215,7 @@ fn enforcement_trace_extracts_audit() {
         audit: vec![denied.clone()],
     };
     let transcript = EpisodeTranscript {
+        consents: Vec::new(),
         http_scope: None,
         scenario_id: "s".into(),
         model_id: "mock/x".into(),

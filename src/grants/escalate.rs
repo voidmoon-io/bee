@@ -1,24 +1,24 @@
 //! The escalation cycle and its trigger hooks (007-dynamic-grants).
 //!
-//! [`escalate`] is the widen cycle: attenuation pre-check → consent (bounded by a timeout,
-//! elapse → deny) → [`ActivePolicy::try_apply`] → [`crate::sandbox::Sandbox::reload`] → register
+//! [`escalate`] is the widen cycle: attenuation pre-check → the session's
+//! [`crate::operator::Operator`] (which bounds consent by its timeout and records the decision) →
+//! [`ActivePolicy::try_apply`] → [`crate::sandbox::Sandbox::reload`] → register
 //! granted tools. It is consumed by the loop driver on a [`Flow::Escalate`] returned by a hook.
 //!
 //! Two built-in hooks emit that `Flow`: [`DenialEscalationHook`] (reactive — a kernel denial, US1)
 //! and [`SkillEscalationHook`] (proactive — a loaded skill's `requires`, US2). Both only *propose*
 //! a delta; the driver runs the cycle so the `Sandbox`/`ActivePolicy` mutation stays in one place.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 use bee_core::Access;
 
 use crate::grants::{ActivePolicy, GrantDelta, GrantId, GrantOrigin, Ttl};
 use crate::hooks::{Flow, LoopHook, StepEvent, StepEventKind};
+use crate::operator::{ConsentRequest, Operator, Reason};
 use crate::sandbox::Sandbox;
-use crate::skills::grant::{parse_access, Decision};
-use crate::skills::{ConsentSink, GrantRequest, SkillRegistry, SkillRequires};
+use crate::skills::grant::parse_access;
+use crate::skills::{SkillRegistry, SkillRequires};
 use crate::tools::ToolRegistry;
 
 /// Per-episode escalation configuration, carried on `LoopOptions`/`ReplConfig`. `None` there ⇒ no
@@ -31,10 +31,8 @@ pub struct LoopEscalation {
     pub ceiling: bee_core::Policy,
     /// Hooks that may return [`Flow::Escalate`]/[`Flow::Deescalate`].
     pub hooks: Vec<Box<dyn LoopHook>>,
-    /// The async consent sink (with a timeout applied by the loop).
-    pub consent: Arc<dyn ConsentSink>,
-    /// Max wait for consent before deny (fail-closed).
-    pub timeout: Duration,
+    /// Who decides a grant, within what time, and where each decision is recorded (024).
+    pub operator: Operator,
     /// TTL applied to a granted lease that carries none.
     pub default_ttl: Ttl,
 }
@@ -63,8 +61,9 @@ impl EscalateOutcome {
 }
 
 /// Run the widen cycle for `delta`. Order (contract `consent.md`): attenuation pre-check (no
-/// prompting beyond ceiling) → consent with timeout (elapse → deny) → apply → reload → register
-/// tools. Any failure leaves `active`, the scope, and the registry unchanged (fail-closed).
+/// prompting beyond ceiling, but recorded) → the operator's consent, bounded by its timeout → apply →
+/// reload → register tools. Any failure leaves `active`, the scope, and the registry unchanged
+/// (fail-closed). A request whose capabilities are all held is not a decision and is not recorded.
 #[allow(clippy::too_many_arguments)]
 pub async fn escalate(
     active: &mut ActivePolicy,
@@ -72,8 +71,7 @@ pub async fn escalate(
     delta: GrantDelta,
     ttl: Ttl,
     turn: u32,
-    consent: &dyn ConsentSink,
-    timeout: Duration,
+    operator: &Operator,
     sandbox: &mut Sandbox,
     registry: &mut ToolRegistry,
 ) -> EscalateOutcome {
@@ -91,31 +89,21 @@ pub async fn escalate(
         return EscalateOutcome::AlreadyHeld;
     }
 
-    // 1. Attenuation ceiling — unpromptable. A beyond-ceiling request never reaches consent.
+    // 1. Attenuation ceiling — unpromptable. A beyond-ceiling request never reaches consent, but the
+    //    refusal is recorded like any other decision.
+    let request = ConsentRequest::from_delta(origin.clone(), &delta, turn);
     if let Err(e) = active.check_widen(&delta) {
+        operator.record_unasked(request, Reason::BeyondCeiling);
         return EscalateOutcome::Refused(e);
     }
 
-    // 2. Consent, bounded by a timeout. Elapse or Denied → refuse (fail-closed, Constitution I).
-    let fs_display: BTreeMap<String, String> = delta
-        .filesystem
-        .iter()
-        .map(|(p, a)| (p.clone(), access_word(*a).to_string()))
-        .collect();
-    let request = GrantRequest {
-        skill: origin_label(&origin),
-        tools: &delta.tools,
-        filesystem: &fs_display,
-        net: &delta.net,
-        exec: &delta.exec,
-        http_targets: &delta.http_targets,
-    };
-    let decision = match tokio::time::timeout(timeout, consent.confirm(&request)).await {
-        Ok(d) => d,
-        Err(_) => Decision::Denied, // timed out
-    };
-    if decision == Decision::Denied {
-        return EscalateOutcome::Refused("denied by operator".to_string());
+    // 2. Consent, bounded by the operator's timeout. Anything but a grant refuses (fail-closed,
+    //    Constitution I), and a timeout says so rather than reading as the operator's "no".
+    let record = operator.consent(request).await;
+    match record.reason {
+        Reason::Granted => {}
+        Reason::TimedOut => return EscalateOutcome::Refused("consent timed out".to_string()),
+        _ => return EscalateOutcome::Refused("denied by operator".to_string()),
     }
 
     // 3. Apply the lease (re-validates ⊆ ceiling and recomputes `active`).
@@ -143,6 +131,7 @@ pub async fn escalate(
             return EscalateOutcome::Refused(format!("target-scope widening failed: {e}"));
         }
     }
+    operator.attach_lease(&record, &id);
 
     // 5. Register granted tools (Layer 1 membership), built by the one constructor with the
     //    session's dependencies, so a tool granted now is configured exactly as one present from the
@@ -189,23 +178,6 @@ impl LoopHook for ProxyRefusalHook {
             });
         }
         Flow::Continue
-    }
-}
-
-fn access_word(a: Access) -> &'static str {
-    match a {
-        Access::Read => "read",
-        Access::Write => "write",
-        Access::Deny => "deny",
-    }
-}
-
-fn origin_label(origin: &GrantOrigin) -> &str {
-    match origin {
-        GrantOrigin::ReactiveDenial { .. } => "reactive-denial",
-        GrantOrigin::SkillRequires { skill } => skill,
-        GrantOrigin::Explicit => "explicit",
-        GrantOrigin::ProxyRefusal { .. } => "proxy-refusal",
     }
 }
 
@@ -319,10 +291,15 @@ impl LoopHook for SkillEscalationHook {
 mod tests {
     use super::*;
     use crate::grants::{DenyAll, GrantOrigin};
+    use crate::operator::{AllowWithinCeiling, OperatorKind, Verdict};
     use crate::sandbox::Sandbox;
-    use crate::skills::grant::AllowWithinCeiling;
     use bee_core::{Mode, Policy};
+    use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn operator(consent: impl crate::operator::Consent + 'static) -> Operator {
+        Operator::with_consent(OperatorKind::Autonomous, Arc::new(consent))
+    }
 
     fn policy(name: &str, fs: &[(&str, Access)]) -> Policy {
         let mut p = Policy {
@@ -368,8 +345,7 @@ mod tests {
             delta,
             Ttl::Turns(1),
             0,
-            &AllowWithinCeiling,
-            Duration::from_secs(5),
+            &operator(AllowWithinCeiling),
             &mut sb,
             &mut reg,
         )
@@ -383,10 +359,15 @@ mod tests {
     #[tokio::test]
     async fn escalate_beyond_ceiling_refuses_without_consent() {
         static ASKED: AtomicBool = AtomicBool::new(false);
-        let spy = |_: &GrantRequest<'_>| {
-            ASKED.store(true, Ordering::SeqCst);
-            true
-        };
+        struct Spy;
+        #[async_trait::async_trait]
+        impl crate::operator::Consent for Spy {
+            async fn decide(&self, _r: &ConsentRequest) -> crate::operator::Decision {
+                ASKED.store(true, Ordering::SeqCst);
+                crate::operator::Decision::Granted
+            }
+        }
+        let spy = operator(Spy);
         let mut ap = ActivePolicy::new(
             policy("base", &[]),
             policy("ceil", &[("/tmp", Access::Write)]),
@@ -400,7 +381,6 @@ mod tests {
             Ttl::Forever,
             0,
             &spy,
-            Duration::from_secs(5),
             &mut sb,
             &mut reg,
         )
@@ -413,6 +393,12 @@ mod tests {
             "consent must not be consulted beyond the ceiling"
         );
         assert!(ap.leases().is_empty());
+        let log = spy.take_log();
+        assert_eq!(log.len(), 1, "the refusal is still recorded");
+        assert_eq!(
+            (log[0].decision, log[0].reason),
+            (Verdict::Refused, Reason::BeyondCeiling)
+        );
     }
 
     // Consent denial (or timeout) refuses and changes nothing.
@@ -430,8 +416,7 @@ mod tests {
             fs_delta("/tmp/w", Access::Write),
             Ttl::Forever,
             0,
-            &DenyAll,
-            Duration::from_secs(5),
+            &operator(DenyAll),
             &mut sb,
             &mut reg,
         )

@@ -21,10 +21,11 @@ mod scripted;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bee::episode::{run_loop, LoopOptions};
+use bee::episode::{run_loop, LoopOptions, ProgressSink};
 use bee::grants::escalate::{DenialEscalationHook, LoopEscalation};
 use bee::grants::{GrantDelta, Ttl};
 use bee::hooks::{Flow, LoopHook, StepEvent, StepEventKind};
+use bee::operator::{Operator, OperatorKind, ProgressOutput};
 use bee::provider::mock_model::MockModel;
 use bee::provider::Turn;
 use bee::sandbox::{Sandbox, ScriptedAudit};
@@ -66,6 +67,19 @@ async fn progress(
     ceiling: Policy,
     setup: impl FnOnce(&mut Sandbox, &FakeCallHooks),
 ) -> Vec<String> {
+    progress_with(turns, attempts, hooks, ceiling, setup, false).await
+}
+
+/// [`progress`], optionally with the Autonomous operator reporting its decisions on the same sink,
+/// as `bee run` wires it.
+async fn progress_with(
+    turns: Vec<Turn>,
+    attempts: Vec<Attempt>,
+    hooks: Vec<Box<dyn LoopHook>>,
+    ceiling: Policy,
+    setup: impl FnOnce(&mut Sandbox, &FakeCallHooks),
+    consent_lines: bool,
+) -> Vec<String> {
     let audit = Arc::new(ScriptedAudit::default());
     let mut sb = Sandbox::host_scripted(Vec::new(), audit.clone());
     let call_hooks = Arc::new(FakeCallHooks::default());
@@ -76,16 +90,22 @@ async fn progress(
 
     let lines = Arc::new(Mutex::new(Vec::<String>::new()));
     let sink = lines.clone();
+    let progress: Arc<ProgressSink> = Arc::new(Box::new(move |l: &str| {
+        sink.lock().unwrap().push(l.to_string())
+    }));
+    let operator = if consent_lines {
+        Operator::autonomous(Arc::new(ProgressOutput(progress.clone())))
+    } else {
+        Operator::with_consent(OperatorKind::Autonomous, RecordingConsent::new(true))
+            .with_timeout(Duration::from_secs(5))
+    };
     let opts = LoopOptions {
-        progress: Some(Box::new(move |l: &str| {
-            sink.lock().unwrap().push(l.to_string())
-        })),
+        progress: Some(Box::new(move |l: &str| progress(l))),
         escalation: Some(LoopEscalation {
             base: policy(&[]),
             ceiling,
             hooks,
-            consent: RecordingConsent::new(true),
-            timeout: Duration::from_secs(5),
+            operator,
             default_ttl: Ttl::Forever,
         }),
         ..LoopOptions::default()
@@ -112,11 +132,12 @@ async fn progress(
     out
 }
 
-#[tokio::test]
-async fn every_loop_line_is_byte_identical() {
+/// Every line the loop emits, one scenario: a note, text, ok, ERR with an exit code, a reactive
+/// refusal beyond the ceiling, a reactive grant, a proactive grant and a proxy refusal.
+async fn every_line(consent_lines: bool) -> Vec<String> {
     let mut err_with_exit = ToolResult::error("boom\nsecond line");
     err_with_exit.exit_code = Some(2);
-    let lines = progress(
+    progress_with(
         vec![
             tool_turn(
                 Some("\n  Looking around.\nnot this line"),
@@ -156,10 +177,13 @@ async fn every_loop_line_is_byte_identical() {
                 .push("3 new passive leads".into());
             hooks.push("c5", vec![refusal("c5", "10.0.0.9", 80)]);
         },
+        consent_lines,
     )
-    .await;
+    .await
+}
 
-    let expected = [
+fn every_line_expected() -> Vec<&'static str> {
+    vec![
         "episode 'progress' · mock/scripted · tools: scripted,bash",
         "  3 new passive leads",
         "turn 0",
@@ -187,8 +211,45 @@ async fn every_loop_line_is_byte_identical() {
         "turn 5",
         "  text: all done",
         "done: completed · 6 turns · Nms",
-    ];
-    assert_eq!(lines, expected);
+    ]
+}
+
+#[tokio::test]
+async fn every_loop_line_is_byte_identical() {
+    assert_eq!(every_line(false).await, every_line_expected());
+}
+
+// T052: under the Autonomous operator each decision adds one `  consent: …` line, just before the
+// escalation it decided; every other line is unchanged.
+#[tokio::test]
+async fn the_autonomous_operator_adds_one_consent_line_per_decision() {
+    let lines = every_line(true).await;
+    let consent: Vec<&str> = lines
+        .iter()
+        .map(String::as_str)
+        .filter(|l| l.starts_with("  consent: "))
+        .collect();
+    assert_eq!(
+        consent,
+        [
+            "  consent: refused (beyond ceiling) — kernel denial file_open /etc/shadow",
+            "  consent: granted (granted) — kernel denial file_open /tmp/x",
+            // A proactive grant is named for the skill the call loads; this stand-in hook fires on a
+            // call with no `name`, which the origin reads as `skill`.
+            "  consent: granted (granted) — skill 'skill'",
+        ]
+    );
+    let rest: Vec<&str> = lines
+        .iter()
+        .map(String::as_str)
+        .filter(|l| !l.starts_with("  consent: "))
+        .collect();
+    assert_eq!(rest, every_line_expected());
+    let at = |needle: &str| lines.iter().position(|l| l == needle).unwrap();
+    assert_eq!(
+        at("  consent: granted (granted) — kernel denial file_open /tmp/x") + 1,
+        at("  escalate(reactive): Granted(\"g0\")")
+    );
 }
 
 /// The proxy-refusal escalation line exists only with `intercept`.

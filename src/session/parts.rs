@@ -33,7 +33,7 @@ pub(super) struct Grants {
 }
 
 /// Resolve every discovered skill's `requires` against the policy and ceiling, asking the spec's
-/// consent sink for each within-ceiling request (006). Without a policy there is nothing to widen,
+/// operator about each within-ceiling request (006). Without a policy there is nothing to widen,
 /// and nothing is asked. With one, each skill directory becomes readable, so bundled resources
 /// resolve, and a granted scanner's report directory becomes writable (FR-010).
 pub(super) async fn resolve_grants(spec: &SessionSpec, skills: &SkillRegistry) -> Grants {
@@ -48,7 +48,7 @@ pub(super) async fn resolve_grants(spec: &SessionSpec, skills: &SkillRegistry) -
     let ceiling = spec.ceiling.clone().unwrap_or_else(|| base.clone());
     let skill_refs: Vec<&Skill> = skills.iter().collect();
     let mut outcome =
-        crate::skills::resolve_grants(&skill_refs, base, &ceiling, spec.consent.as_ref()).await;
+        crate::skills::resolve_grants(&skill_refs, base, &ceiling, &spec.operator).await;
     // Declaring a skills root authorizes reading it: read, never write — a skill's files are inputs.
     for s in &skill_refs {
         if let Some(dir) = s.dir.to_str() {

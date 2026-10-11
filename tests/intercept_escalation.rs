@@ -18,8 +18,8 @@ use std::time::Duration;
 use bee::call::{run_call, CallInput, CallOutcome, Escalation, TimeoutPolicy, Trigger};
 use bee::grants::escalate::{escalate, LoopEscalation, ProxyRefusalHook};
 use bee::grants::{ActivePolicy, GrantDelta, GrantOrigin, Ttl};
+use bee::operator::{Consent, ConsentRequest, Decision};
 use bee::provider::ToolCall;
-use bee::skills::{ConsentSink, Decision, GrantRequest};
 use bee_core::{HostPort, HttpPolicy, Policy};
 use harness::{scope, Session};
 use proptest::prelude::*;
@@ -32,9 +32,9 @@ struct Recording {
 }
 
 #[async_trait::async_trait]
-impl ConsentSink for Recording {
-    async fn confirm(&self, r: &GrantRequest<'_>) -> Decision {
-        self.seen.lock().unwrap().push(r.http_targets.to_vec());
+impl Consent for Recording {
+    async fn decide(&self, r: &ConsentRequest) -> Decision {
+        self.seen.lock().unwrap().push(r.http_targets.clone());
         match self.answer {
             Some(true) => Decision::Granted,
             Some(false) => Decision::Denied,
@@ -69,8 +69,11 @@ fn esc(answer: Option<bool>) -> (LoopEscalation, Arc<Recording>) {
             base: policy_with(&[]),
             ceiling: policy_with(&[]),
             hooks: vec![Box::new(ProxyRefusalHook { enabled: true })],
-            consent: sink.clone(),
-            timeout: Duration::from_millis(300),
+            operator: bee::operator::Operator::with_consent(
+                bee::operator::OperatorKind::Autonomous,
+                sink.clone(),
+            )
+            .with_timeout(Duration::from_millis(300)),
             default_ttl: Ttl::Forever,
         },
         sink,
@@ -220,7 +223,7 @@ async fn a_beyond_ceiling_target_is_refused_without_asking() {
 #[tokio::test]
 async fn a_worker_that_cannot_take_the_scope_rolls_the_grant_back() {
     let mut f = fixture().await;
-    let (mut e, sink) = esc(Some(true));
+    let (mut e, _sink) = esc(Some(true));
     e.ceiling = policy_with(&[f.a.clone(), f.b.clone()]);
     let mut active = ActivePolicy::new(policy_with(&[f.a.clone()]), e.ceiling.clone());
     // Kill the worker twice: the first death is restarted, the second leaves it gone.
@@ -243,8 +246,7 @@ async fn a_worker_that_cannot_take_the_scope_rolls_the_grant_back() {
         },
         Ttl::Forever,
         1,
-        sink.as_ref(),
-        e.timeout,
+        &e.operator,
         &mut f.s.sandbox,
         &mut reg,
     )

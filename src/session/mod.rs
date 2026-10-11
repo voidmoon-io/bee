@@ -35,7 +35,9 @@ pub struct SessionSnapshot {
     pub tools: Vec<crate::tools::SurfaceEntry>,
     pub policy_fs: Option<Vec<String>>,
     pub ceiling_fs: Option<Vec<String>>,
-    pub escalation_timeout_secs: Option<u64>,
+    /// Who decides grants, and how long a decision may take.
+    pub operator: crate::operator::OperatorKind,
+    pub consent_timeout_secs: u64,
     pub lease_turns: Option<u32>,
     pub system_prompt: String,
     pub http_advisory: Option<String>,
@@ -47,6 +49,8 @@ pub struct Session {
     pub registry: ToolRegistry,
     /// Escalation: the floor, the ceiling, the hooks that propose grants, and who decides them.
     pub escalation: Option<LoopEscalation>,
+    /// The session's one operator (FR-001). Its log is the session's consent record.
+    pub operator: crate::operator::Operator,
     pub skills: Arc<SkillRegistry>,
     /// The base prompt plus the notes for the tools the session holds — the same for every entry point.
     pub system_prompt: String,
@@ -95,7 +99,8 @@ impl Session {
             tools: self.registry.surface(),
             policy_fs: esc.map(|e| e.base.filesystem.keys().cloned().collect()),
             ceiling_fs: esc.map(|e| e.ceiling.filesystem.keys().cloned().collect()),
-            escalation_timeout_secs: esc.map(|e| e.timeout.as_secs()),
+            operator: self.operator.kind(),
+            consent_timeout_secs: self.operator.timeout().as_secs(),
             lease_turns: esc.and_then(|e| match e.default_ttl {
                 Ttl::Turns(n) => Some(n),
                 Ttl::Forever => None,
@@ -299,6 +304,7 @@ pub async fn build(mut spec: SessionSpec, report: &dyn Fn(&str)) -> Result<Sessi
         sandbox,
         registry,
         escalation: Some(escalation),
+        operator: spec.operator.clone(),
         skills,
         system_prompt,
         http_advisory,
@@ -342,8 +348,7 @@ fn escalation(
         base: floor.clone(),
         ceiling,
         hooks,
-        consent: spec.consent.clone(),
-        timeout: spec.consent_timeout,
+        operator: spec.operator.clone(),
         default_ttl: spec.lease_turns.map_or(Ttl::Forever, Ttl::Turns),
     }
 }

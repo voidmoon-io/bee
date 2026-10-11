@@ -225,8 +225,11 @@ async fn repl(args: ReplArgs) -> ExitCode {
         strip_env,
         http_scope_advisory: args.http_scope_advisory,
         lease_turns: None,
-        consent: std::sync::Arc::new(prompt_consent as fn(&bee::skills::GrantRequest<'_>) -> bool),
-        consent_timeout: std::time::Duration::from_secs(120),
+        operator: bee::operator::Operator::with_consent(
+            bee::operator::OperatorKind::Interactive,
+            std::sync::Arc::new(PromptConsent),
+        )
+        .with_timeout(std::time::Duration::from_secs(120)),
         prebuilt_sandbox: None,
     };
     let use_tui = spec.entry == bee::session::EntryPoint::Tui;
@@ -441,20 +444,29 @@ fn terminal_rows() -> Option<u16> {
 
 /// Interactive skill-grant consent: prompt on stderr, read a y/N line from stdin. Any non-`y`
 /// answer — including end-of-input — refuses, so the default is deny.
-///
-/// A plain function rather than a trait impl: `ConsentSink` is blanket-implemented for any
-/// `Fn(&GrantRequest) -> bool`, which is exactly what a prompt is. This is the interactive
-/// session's whole contribution to the otherwise-shared grant path.
-fn prompt_consent(request: &bee::skills::GrantRequest<'_>) -> bool {
+struct PromptConsent;
+
+#[async_trait::async_trait]
+impl bee::operator::Consent for PromptConsent {
+    async fn decide(&self, request: &bee::operator::ConsentRequest) -> bee::operator::Decision {
+        let lines = request.render_lines();
+        let granted = tokio::task::spawn_blocking(move || prompt_consent(&lines))
+            .await
+            .unwrap_or(false);
+        if granted {
+            bee::operator::Decision::Granted
+        } else {
+            bee::operator::Decision::Denied
+        }
+    }
+}
+
+fn prompt_consent(lines: &[String]) -> bool {
     use std::io::Write;
-    // Every field here is skill-authored. Skill loading already refuses control characters in
-    // frontmatter, but this prompt is the consent boundary itself and takes a `GrantRequest` from
-    // any source, so it escapes what it prints rather than trusting an upstream check: a forged
-    // prompt is a granted capability. One line per field, so nothing can smuggle in a second line.
     // `render_lines` escapes every field and covers every one — net and exec included, which this
-    // prompt once silently omitted (019 P2).
+    // prompt once silently omitted (019 P2) — one line per field, so nothing can smuggle in another.
     eprintln!();
-    for line in request.render_lines() {
+    for line in lines {
         eprintln!("{line}");
     }
     eprint!("grant these (within the ceiling)? [y/N] ");

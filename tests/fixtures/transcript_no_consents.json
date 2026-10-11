@@ -1,0 +1,13 @@
+{
+  "scenario_id": "golden",
+  "model_id": "mock/golden",
+  "status": {
+    "status": "completed"
+  },
+  "turns": [],
+  "timing": {
+    "started_at": "2026-01-01T00:00:00Z",
+    "ended_at": "2026-01-01T00:00:01Z",
+    "total_ms": 1000
+  }
+}

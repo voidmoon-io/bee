@@ -52,7 +52,11 @@ fn prepare_episodes(
         let strip_env = sandbox::key_vars(
             (!provider.api_key_env.is_empty()).then_some(provider.api_key_env.as_str()),
         );
-        let mut spec = spec_from_scenario(&scenario, strip_env, &EpisodeOptions::default());
+        // Autonomous, like any headless run; a concurrent batch has no progress stream to report on.
+        let operator =
+            crate::operator::Operator::autonomous(std::sync::Arc::new(crate::operator::NullOutput));
+        let mut spec =
+            spec_from_scenario(&scenario, strip_env, &EpisodeOptions::default(), operator);
         spec.entry = EntryPoint::Batch { concurrent: true };
         let result = crate::session::refuse_unsupported(&spec)
             .map_err(|e| e.to_string())
@@ -247,6 +251,7 @@ pub async fn run_concurrent(
                 &opts,
             )
             .await;
+            t.consents = session.operator.take_log();
             if let Err(e) = session.shutdown().await {
                 eprintln!("bee: WARNING: {e} — a process may have outlived enforcement");
             }

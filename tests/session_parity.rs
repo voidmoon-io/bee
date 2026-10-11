@@ -13,10 +13,9 @@
 mod fixtures;
 
 use std::sync::Arc;
-use std::time::Duration;
 
+use bee::operator::{NullOutput, Operator};
 use bee::session::{build, BuildError, Enforcement, EntryPoint, SessionSpec};
-use bee::skills::AllowWithinCeiling;
 use bee_core::Access;
 use fixtures::{http_policy, policy};
 
@@ -44,8 +43,7 @@ fn spec(entry: EntryPoint) -> SessionSpec {
         strip_env: Vec::new(),
         http_scope_advisory: false,
         lease_turns: Some(3),
-        consent: Arc::new(AllowWithinCeiling),
-        consent_timeout: Duration::from_secs(60),
+        operator: Operator::autonomous(Arc::new(NullOutput)),
         prebuilt_sandbox: None,
     }
 }

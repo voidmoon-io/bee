@@ -15,9 +15,8 @@ use bee_core::{Access, Policy};
 
 pub mod escalate;
 
-pub use crate::skills::grant::{
-    resolve_grants, AllowWithinCeiling, ConsentSink, Decision, DenyAll, GrantOutcome, GrantRequest,
-};
+pub use crate::operator::{AllowWithinCeiling, Consent, ConsentRequest, Decision, DenyAll};
+pub use crate::skills::grant::{resolve_grants, GrantOutcome};
 
 /// Stable identifier for a lease, targetable by de-escalation. Deterministic (a per-policy counter),
 /// so tests and audits are reproducible.
@@ -72,8 +71,11 @@ impl GrantDelta {
 }
 
 /// Why a lease was granted — provenance for the audit trail (Constitution IV).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum GrantOrigin {
+    /// A discovered skill's `requires`, resolved before the session's first turn (024).
+    Startup { skill: String },
     /// A tool hit a kernel denial and the grant covers that resource.
     ReactiveDenial { op: String, target: String },
     /// A loaded skill's `requires` block asked for it.

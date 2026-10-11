@@ -5,12 +5,10 @@
 //! lives in an entry point any more; what differs between them is only what they put here.
 
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Duration;
 
 use bee_core::Policy;
 
-use crate::skills::ConsentSink;
+use crate::operator::Operator;
 
 /// Which entry point a session serves. It selects refusals and labels, never behaviour (FR-007).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,9 +64,9 @@ pub struct SessionSpec {
     pub http_scope_advisory: bool,
     /// The lifetime of grants made mid-session, in model turns. `None`: the rest of the session.
     pub lease_turns: Option<u32>,
-    /// Who decides a grant request. 024 PR 5b replaces this pair with the Operator.
-    pub consent: Arc<dyn ConsentSink>,
-    pub consent_timeout: Duration,
+    /// Who decides a grant request, and where every decision is recorded (FR-001). The only thing
+    /// an autonomous and an interactive session differ by.
+    pub operator: Operator,
     /// A sandbox the entry point built itself — the concurrent runner's scopes share one engine and one
     /// audit ring, which the builder cannot create per session. `None`: the builder builds it.
     pub prebuilt_sandbox: Option<crate::sandbox::Sandbox>,

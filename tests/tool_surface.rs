@@ -7,13 +7,11 @@
 //! configured how".
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use bee::grants::escalate::escalate;
 use bee::grants::{ActivePolicy, GrantDelta, GrantOrigin, Ttl};
 use bee::provider::ToolCall;
 use bee::sandbox::Sandbox;
-use bee::skills::AllowWithinCeiling;
 use bee::tools::{ToolDeps, ToolRegistry, UnknownTool};
 use bee_core::{Access, Mode, Policy};
 
@@ -60,8 +58,7 @@ async fn grant(registry: &mut ToolRegistry, tools: &[&str]) {
         delta,
         Ttl::Turns(5),
         0,
-        &AllowWithinCeiling,
-        Duration::from_secs(5),
+        &bee::operator::Operator::autonomous(std::sync::Arc::new(bee::operator::NullOutput)),
         &mut Sandbox::host(Vec::new()),
         registry,
     )

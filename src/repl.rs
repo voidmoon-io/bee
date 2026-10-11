@@ -964,6 +964,7 @@ fn build_transcript(
     usage: Option<Usage>,
 ) -> EpisodeTranscript {
     EpisodeTranscript {
+        consents: Vec::new(),
         http_scope: None,
         scenario_id: "repl".to_string(),
         model_id: model_id.to_string(),

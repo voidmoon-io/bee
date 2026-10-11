@@ -15,7 +15,8 @@ mod vuln_target;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bee::grants::escalate::{proxy_refusal_step, LoopEscalation, ProxyRefusalHook};
+use bee::call::{run_call, CallInput, CallOutcome, Escalation, TimeoutPolicy, Trigger};
+use bee::grants::escalate::{escalate, LoopEscalation, ProxyRefusalHook};
 use bee::grants::{ActivePolicy, GrantDelta, GrantOrigin, Ttl};
 use bee::provider::ToolCall;
 use bee::skills::{ConsentSink, Decision, GrantRequest};
@@ -76,12 +77,49 @@ fn esc(answer: Option<bool>) -> (LoopEscalation, Arc<Recording>) {
     )
 }
 
-fn call(id: &str) -> ToolCall {
+fn send_call(hostport: &str) -> ToolCall {
     ToolCall {
-        id: id.into(),
+        id: "c1".into(),
         name: "http_send".into(),
-        arguments: json!({}),
+        arguments: json!({ "request": { "url": format!("http://{hostport}/search?q=x") } }),
     }
+}
+
+/// Send to `hostport` through the call lifecycle, with escalation on — the path both loops take: a
+/// refusal is escalated and, if the target scope widened, the call retried (024 `run_call`).
+async fn send_escalating(
+    s: &mut Session,
+    e: &LoopEscalation,
+    active: &mut ActivePolicy,
+    hostport: &str,
+) -> CallOutcome {
+    let tc = send_call(hostport);
+    run_call(
+        CallInput {
+            call: &tc,
+            turn: 1,
+            origin: bee::sandbox::CallOrigin::Tool,
+            timeout: TimeoutPolicy::PerCall(Duration::from_secs(30)),
+        },
+        &mut s.sandbox,
+        &mut s.registry,
+        Some(Escalation {
+            config: e,
+            active,
+            lease_turn: 1,
+        }),
+    )
+    .await
+}
+
+/// The one escalation a call ran, which must have been for a proxy refusal.
+fn proxy_escalation(out: &CallOutcome) -> &bee::grants::escalate::EscalateOutcome {
+    assert_eq!(out.escalations.len(), 1, "{:?}", out.escalations);
+    assert!(matches!(
+        out.escalations[0].trigger,
+        Trigger::ProxyRefusal { .. }
+    ));
+    &out.escalations[0].outcome
 }
 
 struct Fixture {
@@ -126,29 +164,21 @@ async fn an_approved_widening_asks_for_exactly_the_refused_target_then_works() {
     e.ceiling = policy_with(&[f.a.clone(), f.b.clone()]);
     let mut active = ActivePolicy::new(policy_with(&[f.a.clone()]), e.ceiling.clone());
 
-    let (ok, events) = send_to(&mut f.s, &f.b).await;
-    assert!(!ok, "out of scope before the grant");
-    let mut reg = bee::tools::ToolRegistry::new();
-    let out = proxy_refusal_step(
-        &e,
-        &mut active,
-        &events,
-        &call("c1"),
-        1,
-        &mut f.s.sandbox,
-        &mut reg,
-    )
-    .await
-    .expect("a refusal proposes a grant");
-    assert!(out.is_granted(), "{out:?}");
+    let out = send_escalating(&mut f.s, &e, &mut active, &f.b).await;
+    assert!(proxy_escalation(&out).is_granted(), "{out:?}");
     assert_eq!(*sink.seen.lock().unwrap(), vec![vec![f.b.clone()]]);
     // The lease records why it exists.
     assert!(matches!(
         &active.leases()[0].origin,
         GrantOrigin::ProxyRefusal { host, .. } if host == "127.0.0.1"
     ));
-
-    // Both layers took it: the retry is sent and answered.
+    // Both layers took it: the retry was sent and answered, and the refusal that justified it is
+    // kept (024 FR-021).
+    assert!(out.retried && !out.result.is_error, "{:?}", out.result);
+    assert!(out
+        .denied_attempt_proxy_events
+        .iter()
+        .any(|ev| ev.kind.is_refusal()));
     let (ok, _) = send_to(&mut f.s, &f.b).await;
     assert!(ok, "in scope after the grant");
 }
@@ -160,20 +190,12 @@ async fn a_declined_or_unanswered_widening_changes_nothing() {
         let (mut e, sink) = esc(answer);
         e.ceiling = policy_with(&[f.a.clone(), f.b.clone()]);
         let mut active = ActivePolicy::new(policy_with(&[f.a.clone()]), e.ceiling.clone());
-        let (_, events) = send_to(&mut f.s, &f.b).await;
-        let mut reg = bee::tools::ToolRegistry::new();
-        let out = proxy_refusal_step(
-            &e,
-            &mut active,
-            &events,
-            &call("c"),
-            1,
-            &mut f.s.sandbox,
-            &mut reg,
-        )
-        .await
-        .unwrap();
-        assert!(!out.is_granted(), "{answer:?}: {out:?}");
+        let out = send_escalating(&mut f.s, &e, &mut active, &f.b).await;
+        assert!(!proxy_escalation(&out).is_granted(), "{answer:?}: {out:?}");
+        assert!(
+            !out.retried && out.result.is_error,
+            "{answer:?}: not retried"
+        );
         assert_eq!(sink.seen.lock().unwrap().len(), 1, "the operator was asked");
         assert!(active.leases().is_empty());
         let (ok, _) = send_to(&mut f.s, &f.b).await;
@@ -187,20 +209,8 @@ async fn a_beyond_ceiling_target_is_refused_without_asking() {
     let (mut e, sink) = esc(Some(true));
     e.ceiling = policy_with(&[f.a.clone()]); // b is not in the ceiling
     let mut active = ActivePolicy::new(policy_with(&[f.a.clone()]), e.ceiling.clone());
-    let (_, events) = send_to(&mut f.s, &f.b).await;
-    let mut reg = bee::tools::ToolRegistry::new();
-    let out = proxy_refusal_step(
-        &e,
-        &mut active,
-        &events,
-        &call("c"),
-        1,
-        &mut f.s.sandbox,
-        &mut reg,
-    )
-    .await
-    .unwrap();
-    assert!(!out.is_granted());
+    let out = send_escalating(&mut f.s, &e, &mut active, &f.b).await;
+    assert!(!proxy_escalation(&out).is_granted());
     assert!(
         sink.seen.lock().unwrap().is_empty(),
         "never prompted beyond the ceiling"
@@ -210,27 +220,35 @@ async fn a_beyond_ceiling_target_is_refused_without_asking() {
 #[tokio::test]
 async fn a_worker_that_cannot_take_the_scope_rolls_the_grant_back() {
     let mut f = fixture().await;
-    let (mut e, _sink) = esc(Some(true));
+    let (mut e, sink) = esc(Some(true));
     e.ceiling = policy_with(&[f.a.clone(), f.b.clone()]);
     let mut active = ActivePolicy::new(policy_with(&[f.a.clone()]), e.ceiling.clone());
-    let (_, events) = send_to(&mut f.s, &f.b).await;
     // Kill the worker twice: the first death is restarted, the second leaves it gone.
     for _ in 0..2 {
         f.s.icpt.kill_worker_for_test().await;
         tokio::time::sleep(Duration::from_millis(400)).await;
     }
+    // The widen cycle for exactly the refused target, as a proxy refusal would drive it.
     let mut reg = bee::tools::ToolRegistry::new();
-    let out = proxy_refusal_step(
-        &e,
+    let out = escalate(
         &mut active,
-        &events,
-        &call("c"),
+        GrantOrigin::ProxyRefusal {
+            host: "127.0.0.1".into(),
+            port: hp(&f.b).port,
+            call: "c".into(),
+        },
+        GrantDelta {
+            http_targets: vec![f.b.clone()],
+            ..Default::default()
+        },
+        Ttl::Forever,
         1,
+        sink.as_ref(),
+        e.timeout,
         &mut f.s.sandbox,
         &mut reg,
     )
-    .await
-    .unwrap();
+    .await;
     assert!(!out.is_granted(), "{out:?}");
     assert!(active.leases().is_empty(), "the lease was released");
     assert!(!active

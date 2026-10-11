@@ -199,6 +199,11 @@ fn enforcement_trace_extracts_audit() {
         target: "/etc/shadow".into(),
     };
     let call = RecordedCall {
+        denied_attempt_audit: Vec::new(),
+        denied_attempt_proxy_events: Vec::new(),
+        escalations: Vec::new(),
+        retried: false,
+        timed_out: false,
         proxy_events: Vec::new(),
         call: ToolCall {
             id: "c1".into(),

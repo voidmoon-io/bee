@@ -6,7 +6,9 @@
 //! through both and records what each does today, before `src/call.rs::run_call` replaces the copies.
 //!
 //! Where the loops differ, each loop's *current* value is asserted under a `// DRIFT FR-0xx` tag.
-//! Later phases flip those assertions to one expected value; they are never deleted. A difference
+//! Later phases flip those assertions to one expected value; they are never deleted. A flipped one
+//! keeps its requirement id and says which PR made the loops agree (PR 3: FR-021, FR-022, FR-024,
+//! FR-025, when both loops moved onto `src/call.rs::run_call`). A difference
 //! without a tag would be behaviour the spec did not list as drift, and has to be raised rather than
 //! folded into a fix.
 //!
@@ -147,6 +149,8 @@ struct Call {
     is_error: bool,
     audit: Vec<A>,
     proxy: Vec<&'static str>,
+    /// The proxy events of an attempt a proxy refusal retried (024 FR-021).
+    denied_proxy: Vec<&'static str>,
 }
 
 #[derive(Debug)]
@@ -175,6 +179,11 @@ fn calls_of(turns: &[bee::transcript::TranscriptTurn]) -> Vec<Call> {
             is_error: c.result.is_error,
             audit: norm_audit(&c.audit),
             proxy: c.proxy_events.iter().map(|e| e.kind.as_str()).collect(),
+            denied_proxy: c
+                .denied_attempt_proxy_events
+                .iter()
+                .map(|e| e.kind.as_str())
+                .collect(),
         })
         .collect()
 }
@@ -278,6 +287,7 @@ fn call(content: &str, is_error: bool, audit: &[AuditEvent]) -> Call {
         is_error,
         audit: norm_audit(audit),
         proxy: Vec::new(),
+        denied_proxy: Vec::new(),
     }
 }
 
@@ -317,10 +327,10 @@ async fn s2_kernel_denial_granted_and_retried() {
     assert_eq!((e.asked, e.attempts), (1, 2));
     assert!(!e.counted_denial && !r.counted_denial);
 
-    // DRIFT FR-021: the denial that justified the widening. The episode's audit trail keeps it; the
-    // exchange's audit drops it, because the REPL replaces the call's audit with the retry's.
+    // FR-021 (one value since PR 3; was DRIFT): the denial that justified the widening is in both
+    // loops' audit records. Before, the exchange replaced the call's audit with the retry's.
     assert_eq!(e.trail, norm_audit(&[denial("/tmp/x")]));
-    assert!(r.trail.is_empty());
+    assert_eq!(r.trail, e.trail);
 }
 
 // ── 3. Kernel denial → beyond the ceiling → refused ─────────────────────────────────────────────
@@ -373,13 +383,19 @@ async fn s5_proxy_refusal_granted_and_retried() {
     // The widening reaches the proxy, the call is retried once, and the result is the retry's.
     assert_eq!((e.asked, e.attempts), (1, 2));
     assert_eq!(e.http_updates, vec![vec!["10.0.0.9:80".to_string()]]);
-    assert_eq!(e.calls, vec![call("200 OK", false, &[])]);
+    assert_eq!(
+        e.calls,
+        vec![Call {
+            denied_proxy: vec!["refused_out_of_scope"],
+            ..call("200 OK", false, &[])
+        }]
+    );
 
-    // DRIFT FR-021: the refusal that justified the widening. Both loops replace the call's proxy
-    // events with the retry's, so it is in neither record; PR 3 keeps it in
-    // `denied_attempt_proxy_events`.
-    assert!(e.calls[0].proxy.is_empty());
-    assert!(r.calls[0].proxy.is_empty());
+    // FR-021 (one value since PR 3; was DRIFT): the refusal that justified the widening is kept, in
+    // `denied_attempt_proxy_events`, apart from the retry's own proxy events. Before, both loops
+    // replaced the call's proxy events with the retry's and the refusal was in neither record.
+    assert!(e.calls[0].proxy.is_empty() && r.calls[0].proxy.is_empty());
+    assert_eq!(r.calls[0].denied_proxy, vec!["refused_out_of_scope"]);
 }
 
 // ── 6. A retry runs into the time limit ─────────────────────────────────────────────────────────
@@ -419,11 +435,11 @@ async fn s6b_kernel_retry_after_the_first_attempt_used_the_budget() {
     let (e, r) = tokio::join!(episode(&case), repl(&case));
     assert_eq!((e.attempts, r.attempts), (2, 2));
 
-    // DRIFT FR-024: the retry's time budget. The episode gives it only what is left of the deadline,
-    // so it times out and the first attempt's result stands; the REPL gives it a fresh per-call
-    // limit, so it completes.
+    // FR-024 (one value since PR 3; was DRIFT): the retry gets only what the first attempt left, in
+    // both loops, so it times out and the first attempt's result stands. Before, the REPL gave the
+    // retry a fresh per-call limit and it completed.
     assert_eq!(e.calls, vec![call("EACCES", true, &[denial("/tmp/x")])]);
-    assert_eq!(r.calls, vec![call("written", false, &[])]);
+    assert_eq!(r.calls, e.calls);
 }
 
 /// 6c. A proxy-refusal retry that times out. Both loops keep the first attempt's result but record
@@ -444,15 +460,20 @@ async fn s6c_proxy_retry_times_out() {
     assert_same_calls(&e, &r);
     assert_eq!((e.asked, e.attempts), (1, 2));
 
-    // DRIFT FR-025: the result is the first attempt's ("refused"), the audit the timed-out retry's
-    // (empty) — the first attempt's `/tmp/cache` event is not in the record. Both loops today.
-    assert_eq!(e.calls, vec![call("refused", true, &[])]);
-    // DRIFT FR-021: the first attempt's audit survives in the episode's trail only.
+    // FR-025 (one value since PR 3; was DRIFT): the abandoned retry does not replace the attempt that
+    // stands, so the result, the audit and the proxy events are all the first attempt's. Before, the
+    // record paired the first attempt's result with the timed-out retry's (empty) audit.
+    let cache = ev("file_open", "/tmp/cache", "allowed", None);
     assert_eq!(
-        e.trail,
-        norm_audit(&[ev("file_open", "/tmp/cache", "allowed", None)])
+        e.calls,
+        vec![Call {
+            proxy: vec!["refused_out_of_scope"],
+            ..call("refused", true, std::slice::from_ref(&cache))
+        }]
     );
-    assert!(r.trail.is_empty());
+    // FR-021 (one value since PR 3; was DRIFT): the first attempt's audit is in both loops' records.
+    assert_eq!(e.trail, norm_audit(&[cache]));
+    assert_eq!(r.trail, e.trail);
 }
 
 // ── 7. A proxy-scope denial ─────────────────────────────────────────────────────────────────────
@@ -472,9 +493,9 @@ async fn s7_proxy_scope_denial() {
     assert_eq!(e.asked, 0);
     assert_eq!(e.trail, r.trail);
 
-    // DRIFT FR-022: whether a proxy-scope denial is counted as the tool's. The episode tags the
-    // result `DENIED`; the REPL excludes `scope_id = "proxy"` from its denial count.
-    assert!(e.counted_denial);
+    // FR-022 (one value since PR 3; was DRIFT): a proxy-scope denial is the proxy's, never counted as
+    // the tool's. Before, the episode tagged the result `DENIED`.
+    assert!(!e.counted_denial);
     assert!(!r.counted_denial);
 }
 

@@ -74,6 +74,23 @@ pub struct RecordedCall {
     /// user-space refusal is never a kernel one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub proxy_events: Vec<crate::proxy_event::ProxyEvent>,
+    /// The audit of an attempt that was denied and then retried under a widened scope — the denial
+    /// that justified widening it (024 FR-021). `audit` is the retry's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub denied_attempt_audit: Vec<AuditEvent>,
+    /// The proxy events of an attempt a proxy refusal retried — the refusal that justified widening
+    /// the target scope (024 FR-021). `proxy_events` is the retry's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub denied_attempt_proxy_events: Vec<crate::proxy_event::ProxyEvent>,
+    /// Every widen cycle run during the call, in order, with what started it (024 FR-018).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub escalations: Vec<crate::call::EscalationRecord>,
+    /// A retry ran to completion, and `result` and `audit` are its.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retried: bool,
+    /// An attempt hit the time limit. When it was a retry, the attempt before it stands (FR-025).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub timed_out: bool,
 }
 
 /// The interception session a transcript was recorded under (019 T044): how `[policy.http]` was
@@ -164,7 +181,8 @@ pub struct EpisodeTranscript {
     pub model_id: String,
     pub status: EpisodeStatus,
     pub turns: Vec<TranscriptTurn>,
-    /// Full episode audit trail (also inlined per call above).
+    /// Every kernel event of the episode, call by call: each call's `denied_attempt_audit`, then its
+    /// `audit` (024 FR-021). Each call's own events are also inlined in its [`RecordedCall`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub audit_trail: Vec<AuditEvent>,
     pub timing: Timing,

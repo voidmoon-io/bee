@@ -207,7 +207,7 @@ record identical normalized audits.
 
 ### Tests (write first, see them fail)
 
-- [ ] T018 [P] [US3] Create `tests/call_lifecycle.rs` (gated on `test-support`; add its `[[test]] … required-features = ["test-support"]` entry to `Cargo.toml` in this task). It calls `bee::call::run_call`
+- [X] T018 [P] [US3] Create `tests/call_lifecycle.rs` (gated on `test-support`; add its `[[test]] … required-features = ["test-support"]` entry to `Cargo.toml` in this task). It calls `bee::call::run_call`
   directly with `Sandbox::host_scripted`, a `ScriptedTool`, `FakeCallHooks` and `FakeHttpScope`, covering:
   - no denial;
   - kernel → granted → retry (`retried`, `denied_attempt_audit` holds the denial — FR-021);
@@ -222,13 +222,13 @@ record identical normalized audits.
   - a proxy-scope denial (`tool_denials() == 0`, `proxy_audit` non-empty — FR-022);
   - a late tool batch (attributed to this call — FR-023);
   - `escalations` order and triggers.
-- [ ] T019 [P] [US3] In `tests/call_characterization.rs`, flip every `// DRIFT FR-021/022/024/025`
+- [X] T019 [P] [US3] In `tests/call_characterization.rs`, flip every `// DRIFT FR-021/022/024/025`
   assertion to the single expected value for both loops. Do not touch the FR-029 assertions yet; they flip
   in phase 5. These tests must fail until T024.
 
 ### Implementation
 
-- [ ] T020 [US3] Create the `src/operator.rs` skeleton so `run_call` gets its final signature now
+- [X] T020 [US3] Create the `src/operator.rs` skeleton so `run_call` gets its final signature now
   (research R2):
   - `OperatorKind`, `SessionOutput` (extends `ReplOutput` with the default methods in
     `contracts/operator.md`), `ConsentRequest`, `ConsentRecord`, `Reason`;
@@ -239,33 +239,51 @@ record identical normalized audits.
   `src/lib.rs`) with the types from `contracts/call-lifecycle.md`: `TimeoutPolicy { Deadline, PerCall }`,
   `CallInput`, `Escalation`, `CallOutcome`, `EscalationRecord`, `Trigger`, plus
   `CallOutcome::tool_denials()` and `CallOutcome::to_recorded()`.
-- [ ] T021 [US3] In `src/call.rs`, implement `pub async fn run_call(...)` following the contract's 7-step
+- [X] T021 [US3] In `src/call.rs`, implement `pub async fn run_call(...)` following the contract's 7-step
   sequence exactly. It absorbs the sequencing from `src/episode.rs:299-463` and `src/repl.rs:632-813`. Move
   `proactive_step`, `reactive_step`, `proxy_refusal_step` and `first_denial` from `src/grants/escalate.rs`
   (`:164-313`) into `src/call.rs` as private helpers returning `(Trigger, EscalateOutcome)`. Leave
   `escalate()` and the hooks in `escalate.rs`. Add a compile-time `Send` assertion:
   `fn _assert_send() { fn s<T: Send>(_: T) {} s(run_call(..)) }`, or the equivalent static check.
-- [ ] T022 [US3] In `src/transcript.rs`, extend `RecordedCall` (`:55-66`) with `denied_attempt_audit`,
+- [X] T022 [US3] In `src/transcript.rs`, extend `RecordedCall` (`:55-66`) with `denied_attempt_audit`,
   `denied_attempt_proxy_events`, `proxy_audit`, `escalations` (serialized form of `EscalationRecord`), `retried` and `timed_out`, all
   `#[serde(default, skip_serializing_if = ...)]`. Fix the doc at `:117` so `audit_trail` is described as
   the concatenation of every call's `denied_attempt_audit + audit + proxy_audit`.
-- [ ] T023 [US3] Replace the per-call block in `src/episode.rs::run_loop` (`:299-463`) with `run_call(...,
+- [X] T023 [US3] Replace the per-call block in `src/episode.rs::run_loop` (`:299-463`) with `run_call(...,
   TimeoutPolicy::Deadline(deadline))`, then:
   - render the `CallOutcome` through the existing `emit` lines (escalate lines from `outcome.escalations`
     in order);
   - derive `DENIED` from `outcome.tool_denials() > 0` (FR-022);
   - push `audit_trail` in the order described in T022;
   - keep the terminal and timeout handling at `:465-505`.
-- [ ] T024 [US3] Replace the per-call block in `src/repl.rs::run_exchange` (`:632-813`) with `run_call(...,
+- [X] T024 [US3] Replace the per-call block in `src/repl.rs::run_exchange` (`:632-813`) with `run_call(...,
   TimeoutPolicy::PerCall(tool_timeout))`, so a retry shares the first attempt's budget (FR-024), locking `esc.active` once per call and passing `&mut *guard`.
   Render through `ReplOutput` as today (`report_escalation` from `outcome.escalations`). Count
   `denials += outcome.tool_denials()`, and make `audit_all` include `denied_attempt_audit` (FR-021).
-- [ ] T025 [US3] Delete the now-unused `pub` step functions and any dead imports in `src/grants/escalate.rs`.
+- [X] T025 [US3] Delete the now-unused `pub` step functions and any dead imports in `src/grants/escalate.rs`.
   Update the module docs at `:159-163` to point at `src/call.rs`.
-- [ ] T026 [US3] Run the gate. `call_lifecycle` passes, the flipped `call_characterization` assertions
+- [X] T026 [US3] Run the gate. `call_lifecycle` passes, the flipped `call_characterization` assertions
   pass, and `episode_progress_strings` passes (lines changed only as FR-022 permits — update just that
   expectation, with a comment citing FR-022). Record the line deltas of `episode.rs` and `repl.rs` for
   SC-009. Open PR 3.
+
+**As built (PR 3)**:
+- **No `src/operator.rs` yet (T020).** Both loops render from the returned `CallOutcome`, as T023/T024
+  describe, so `run_call` takes no output parameter, and consent still flows through
+  `LoopEscalation.consent`. The Operator lands whole in PR 5 and adds one parameter to `run_call`.
+- **`Escalation` carries `lease_turn`.** The REPL still passes its per-call counter (FR-029 flips in PR
+  4); the call context's `turn` is the turn index, as before.
+- **A retry that times out leaves the first attempt standing** — its result, audit and proxy events —
+  marked `timed_out`, with any events of the abandoned retry appended. This satisfies FR-025 and keeps
+  the untagged pin s6a.
+- **`tool_denials()` counts only the attempt that stands**, as pin s2 requires (data-model.md updated).
+- **No serialized `proxy_audit` (T022).** `RecordedCall.audit` keeps tool and proxy events together, as
+  before.
+- **`proxy_refusal_step` callers in `tests/intercept_escalation.rs`** now go through `run_call`, or call
+  `escalate` directly for the worker-rollback case.
+- **SC-009 line deltas** against main: `episode.rs` +41/−147 (net −106), `repl.rs` +47/−151 (net −104).
+  Gross removal meets the ~150-line duplicate; the net figure is lower because each loop keeps its
+  rendering of the outcome. `src/call.rs` is 450 lines, including docs.
 
 **Checkpoint**: the call protocol exists once (SC-002).
 

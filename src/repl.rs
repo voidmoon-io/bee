@@ -723,157 +723,57 @@ pub async fn run_exchange(
             tool_calls += 1;
             output.tool_call(&tc.name, &tc.arguments);
 
-            // Proactive escalation (007, US2): a hook may request a grant before this call runs —
-            // a loaded skill's `requires`, above all. In an interactive session the consent sink is
-            // a prompt, which is why the cycle only ever asks for what is not already held.
-            let turn_no = config.escalation.as_ref().map(|e| e.next_turn());
-            if let (Some(esc), Some(turn_no)) = (config.escalation.as_ref(), turn_no) {
-                let mut active = esc.active.lock().await;
-                if let Some(out) = crate::grants::escalate::proactive_step(
-                    &esc.config,
-                    &mut active,
-                    tc,
-                    turn_no,
-                    sandbox,
-                    registry,
-                )
-                .await
-                {
-                    report_escalation(output, "capability", &out);
-                }
-            }
-
-            // Attribute whatever this call spawns — the call and, after a widening, its one retry —
-            // to this tool call (019 P3): the interception proxy issues a per-call credential from it.
-            sandbox
-                .begin_call(crate::sandbox::CallContext {
-                    call_id: tc.id.clone(),
+            // The call, start to finish: escalation, the timed attempt, its audit, at most one retry,
+            // the proxy and late drains (024, src/call.rs). A retry shares the call's time limit
+            // (FR-024). The active policy is locked once for the whole call.
+            let mut active_guard = match config.escalation.as_ref() {
+                Some(esc) => Some(esc.active.lock().await),
+                None => None,
+            };
+            let escalation = match (config.escalation.as_ref(), active_guard.as_mut()) {
+                (Some(esc), Some(active)) => Some(crate::call::Escalation {
+                    config: &esc.config,
+                    active,
+                    lease_turn: esc.next_turn(),
+                }),
+                _ => None,
+            };
+            let outcome = crate::call::run_call(
+                crate::call::CallInput {
+                    call: tc,
                     turn: turns.len() as u32,
                     origin: crate::sandbox::CallOrigin::Tool,
-                })
-                .await;
-            let mut retried = false;
-            let mut result = match tokio::time::timeout(
-                Duration::from_secs(config.tool_timeout_secs),
-                registry.execute(tc, sandbox),
+                    timeout: crate::call::TimeoutPolicy::PerCall(Duration::from_secs(
+                        config.tool_timeout_secs,
+                    )),
+                },
+                sandbox,
+                registry,
+                escalation,
             )
-            .await
-            {
-                Ok(r) => r,
-                Err(_) => ToolResult::error(format!(
-                    "tool timed out after {}s",
-                    config.tool_timeout_secs
-                )),
-            };
-
-            // Correlate the kernel audit events this call produced (FR-008). `settle` lets the async
-            // demux path deliver this call's events; it is a no-op for the sync sandboxes.
-            sandbox.settle().await;
-            let mut audit = sandbox.drain_audit();
-
-            // Reactive escalation (007, US1): a kernel denial may be escalated and the call retried
-            // exactly once under the widened scope, so the user sees one result rather than a
-            // denial followed by a mysterious success.
-            if let (Some(esc), Some(turn_no)) = (config.escalation.as_ref(), turn_no) {
-                if let Some((op, target)) = crate::grants::escalate::first_denial(&audit) {
-                    let mut active = esc.active.lock().await;
-                    if let Some(out) = crate::grants::escalate::reactive_step(
-                        &esc.config,
-                        &mut active,
-                        &op,
-                        &target,
-                        tc,
-                        turn_no,
-                        sandbox,
-                        registry,
-                    )
-                    .await
-                    {
-                        report_escalation(output, &format!("{op} {target}"), &out);
-                        if out.is_granted() {
-                            if let Ok(r) = tokio::time::timeout(
-                                Duration::from_secs(config.tool_timeout_secs),
-                                registry.execute(tc, sandbox),
-                            )
-                            .await
-                            {
-                                sandbox.settle().await;
-                                let retry_audit = sandbox.drain_audit();
-                                result = r;
-                                retried = true;
-                                audit = retry_audit;
-                            }
-                        }
+            .await;
+            drop(active_guard);
+            for rec in &outcome.escalations {
+                let subject = match &rec.trigger {
+                    crate::call::Trigger::Proactive => "capability".to_string(),
+                    crate::call::Trigger::KernelDenial { op, target } => format!("{op} {target}"),
+                    crate::call::Trigger::ProxyRefusal { host, port } => {
+                        format!("http target {host}:{port}")
                     }
-                }
+                };
+                report_escalation(output, &subject, &rec.outcome);
             }
 
-            #[cfg_attr(not(feature = "intercept"), allow(unused_mut))]
-            let mut proxy_events = sandbox.end_call().await;
-
-            // 019 US3: a proxy refusal may become a consented target-scope widening (the operator is
-            // asked, and the prompt shows the exact host:port), then the call is retried once —
-            // unless a kernel-denial widening already spent the one retry.
-            #[cfg(feature = "intercept")]
-            if let (false, Some(esc), Some(turn_no)) =
-                (retried, config.escalation.as_ref(), turn_no)
-            {
-                let mut active = esc.active.lock().await;
-                if let Some(out) = crate::grants::escalate::proxy_refusal_step(
-                    &esc.config,
-                    &mut active,
-                    &proxy_events,
-                    tc,
-                    turn_no,
-                    sandbox,
-                    registry,
-                )
-                .await
-                {
-                    let target = proxy_events
-                        .iter()
-                        .find(|e| e.kind.is_refusal())
-                        .map(|e| format!("http target {}:{}", e.host, e.port))
-                        .unwrap_or_default();
-                    report_escalation(output, &target, &out);
-                    if out.is_granted() {
-                        sandbox
-                            .begin_call(crate::sandbox::CallContext {
-                                call_id: tc.id.clone(),
-                                turn: turns.len() as u32,
-                                origin: crate::sandbox::CallOrigin::Tool,
-                            })
-                            .await;
-                        if let Ok(r) = tokio::time::timeout(
-                            Duration::from_secs(config.tool_timeout_secs),
-                            registry.execute(tc, sandbox),
-                        )
-                        .await
-                        {
-                            result = r;
-                        }
-                        sandbox.settle().await;
-                        audit = sandbox.drain_audit();
-                        proxy_events = sandbox.end_call().await;
-                    }
-                }
-            }
-            #[cfg(not(feature = "intercept"))]
-            let _ = retried;
-            // The proxy scope's kernel events, tagged `scope_id = "proxy"`, join the call's audit
-            // only now — after escalation, which they must never drive (019 T047).
-            let sidecar_audit = sandbox.drain_sidecar_audit();
-            // Tool-scope events that reached the ring since the last drain (the sidecar drain
-            // buffers them) belong to this call, not the next one.
-            audit.extend(sandbox.drain_audit());
-            audit.extend(sidecar_audit);
-
-            denials += audit
+            denials += outcome.tool_denials() as u32;
+            let audit: Vec<AuditEvent> = outcome
+                .audit
                 .iter()
-                .filter(|e| e.decision == "denied" && e.scope_id.as_deref() != Some("proxy"))
-                .count() as u32;
-            output.tool_result(&result, &audit);
-            for ev in &proxy_events {
+                .chain(&outcome.proxy_audit)
+                .cloned()
+                .collect();
+            let result = &outcome.result;
+            output.tool_result(result, &audit);
+            for ev in &outcome.proxy_events {
                 output.proxy_event(ev);
             }
             // If the tool produced a visualization (the `render` tool), surface it — routed by its
@@ -910,13 +810,9 @@ pub async fn run_exchange(
                 is_error: result.is_error,
                 provenance: result.provenance.clone(),
             });
-            audit_all.extend(audit.iter().cloned());
-            recorded.push(RecordedCall {
-                proxy_events,
-                call: tc.clone(),
-                result,
-                audit,
-            });
+            // The session's audit keeps the denial a retry replaced (FR-021).
+            audit_all.extend(outcome.audit_trail().cloned());
+            recorded.push(outcome.to_recorded(tc));
         }
 
         turns.push(TranscriptTurn {

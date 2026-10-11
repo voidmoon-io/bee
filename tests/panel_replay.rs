@@ -22,6 +22,11 @@ fn text(s: &str) -> RenderSpec {
 /// A recorded `render` call that committed `spec` to `target`.
 fn render_call(id: &str, target: RenderTarget, spec: RenderSpec) -> RecordedCall {
     RecordedCall {
+        denied_attempt_audit: Vec::new(),
+        denied_attempt_proxy_events: Vec::new(),
+        escalations: Vec::new(),
+        retried: false,
+        timed_out: false,
         proxy_events: Vec::new(),
         call: ToolCall {
             id: id.into(),
@@ -107,6 +112,11 @@ fn inline_only_transcript_reconstructs_no_panels() {
 /// A recorded `render` call that requested `ops` on the panel column.
 fn ops_call(id: &str, ops: Vec<bee::render_spec::PanelOp>) -> RecordedCall {
     RecordedCall {
+        denied_attempt_audit: Vec::new(),
+        denied_attempt_proxy_events: Vec::new(),
+        escalations: Vec::new(),
+        retried: false,
+        timed_out: false,
         proxy_events: Vec::new(),
         call: ToolCall {
             id: id.into(),

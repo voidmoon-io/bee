@@ -370,163 +370,67 @@ pub async fn run_loop(
                 ),
             );
 
-            // Proactive escalation (007, US2): a hook may request a grant before this call runs
-            // (e.g. a loaded skill's `requires`). The grant applies (or is refused) in place; the
-            // call then executes normally under the possibly-widened scope.
-            if let (Some(esc), Some(active)) = (opts.escalation.as_ref(), active_policy.as_mut()) {
-                if let Some(out) = crate::grants::escalate::proactive_step(
-                    esc, active, tc, index, sandbox, registry,
-                )
-                .await
-                {
-                    emit(opts, format!("  escalate(proactive): {out:?}"));
-                }
-            }
-
-            // Attribute whatever this call spawns — the call and, after a widening, its one retry —
-            // to this tool call (019 P3): the interception proxy issues a per-call credential from it.
-            sandbox
-                .begin_call(crate::sandbox::CallContext {
-                    call_id: tc.id.clone(),
+            // The call, start to finish: escalation, the timed attempt, its audit, at most one retry,
+            // the proxy and late drains (024, src/call.rs). Rendering the outcome stays here.
+            let outcome = crate::call::run_call(
+                crate::call::CallInput {
+                    call: tc,
                     turn: index,
                     origin: crate::sandbox::CallOrigin::Tool,
-                })
-                .await;
-            let mut retried = false;
-            let (mut result, timed_out) =
-                match tokio::time::timeout(remaining, registry.execute(tc, sandbox)).await {
-                    Ok(r) => (r, false),
-                    Err(_) => (
-                        crate::tools::ToolResult::error(
-                            "tool aborted: episode wall-clock deadline reached",
-                        ),
-                        true,
-                    ),
-                };
-
-            // Correlate the kernel audit events this call produced (FR-008). `settle` lets the async
-            // demux path (US4) deliver this call's events; it is a no-op for the sync paths.
-            sandbox.settle().await;
-            let mut audit = sandbox.drain_audit();
-            audit_trail.extend(audit.iter().cloned());
-
-            // Reactive escalation (007, US1): a kernel denial may be escalated (a grant scoped to the
-            // denied resource) and the call retried ONCE under the widened scope. Runs before the
-            // result is recorded, so the model sees the single (post-reload) outcome.
-            if audit.iter().any(|e| e.decision == "denied") {
-                if let (Some(esc), Some(active)) =
-                    (opts.escalation.as_ref(), active_policy.as_mut())
-                {
-                    if let Some((op, target)) = crate::grants::escalate::first_denial(&audit) {
-                        if let Some(out) = crate::grants::escalate::reactive_step(
-                            esc, active, &op, &target, tc, index, sandbox, registry,
-                        )
-                        .await
-                        {
-                            emit(opts, format!("  escalate(reactive): {out:?}"));
-                            // Retry the call exactly once under the widened scope (SC-005). Only on
-                            // a genuine widening: `AlreadyHeld` changed nothing, so the retry would
-                            // be denied exactly as the first attempt was.
-                            let left = deadline.saturating_duration_since(Instant::now());
-                            if out.is_granted() && !left.is_zero() {
-                                if let Ok(r) =
-                                    tokio::time::timeout(left, registry.execute(tc, sandbox)).await
-                                {
-                                    sandbox.settle().await;
-                                    let retry_audit = sandbox.drain_audit();
-                                    audit_trail.extend(retry_audit.iter().cloned());
-                                    result = r;
-                                    retried = true;
-                                    audit = retry_audit;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            #[cfg_attr(not(feature = "intercept"), allow(unused_mut))]
-            let mut proxy_events = sandbox.end_call().await;
-
-            // 019 US3: a proxy refusal may become a consented target-scope widening, then the call is
-            // retried once under it — unless a kernel-denial widening already spent the one retry.
-            #[cfg(feature = "intercept")]
-            if !retried {
-                if let (Some(esc), Some(active)) =
-                    (opts.escalation.as_ref(), active_policy.as_mut())
-                {
-                    if let Some(out) = crate::grants::escalate::proxy_refusal_step(
-                        esc,
+                    timeout: crate::call::TimeoutPolicy::Deadline(deadline),
+                },
+                sandbox,
+                registry,
+                match (opts.escalation.as_ref(), active_policy.as_mut()) {
+                    (Some(config), Some(active)) => Some(crate::call::Escalation {
+                        config,
                         active,
-                        &proxy_events,
-                        tc,
-                        index,
-                        sandbox,
-                        registry,
-                    )
-                    .await
-                    {
-                        emit(opts, format!("  escalate(proxy): {out:?}"));
-                        let left = deadline.saturating_duration_since(Instant::now());
-                        if out.is_granted() && !left.is_zero() {
-                            sandbox
-                                .begin_call(crate::sandbox::CallContext {
-                                    call_id: tc.id.clone(),
-                                    turn: index,
-                                    origin: crate::sandbox::CallOrigin::Tool,
-                                })
-                                .await;
-                            if let Ok(r) =
-                                tokio::time::timeout(left, registry.execute(tc, sandbox)).await
-                            {
-                                result = r;
-                            }
-                            sandbox.settle().await;
-                            let retry_audit = sandbox.drain_audit();
-                            audit_trail.extend(retry_audit.iter().cloned());
-                            audit = retry_audit;
-                            proxy_events = sandbox.end_call().await;
-                        }
-                    }
-                }
+                        lease_turn: index,
+                    }),
+                    _ => None,
+                },
+            )
+            .await;
+            audit_trail.extend(outcome.audit_trail().cloned());
+            for rec in &outcome.escalations {
+                let kind = match rec.trigger {
+                    crate::call::Trigger::Proactive => "proactive",
+                    crate::call::Trigger::KernelDenial { .. } => "reactive",
+                    crate::call::Trigger::ProxyRefusal { .. } => "proxy",
+                };
+                emit(opts, format!("  escalate({kind}): {:?}", rec.outcome));
             }
-            #[cfg(not(feature = "intercept"))]
-            let _ = retried;
-            // The proxy scope's kernel events join the call's audit only now, after escalation —
-            // which they must never drive — tagged `scope_id = "proxy"` (019 T047).
-            let sidecar_audit = sandbox.drain_sidecar_audit();
-            // Tool-scope events that reached the ring since the last drain (the sidecar drain
-            // buffers them) belong to this call, not the next one.
-            let late = sandbox.drain_audit();
-            audit_trail.extend(late.iter().cloned());
-            audit.extend(late);
-            audit_trail.extend(sidecar_audit.iter().cloned());
-            audit.extend(sidecar_audit);
-            for ev in &proxy_events {
+            for ev in &outcome.proxy_events {
                 emit(opts, format!("  {}", crate::repl::render_proxy_event(ev)));
             }
 
-            let denied = audit.iter().any(|e| e.decision == "denied");
-            let tag = if denied {
+            // `DENIED` is the tool's own denial only — never the proxy scope's (FR-022).
+            let tag = if outcome.tool_denials() > 0 {
                 "DENIED"
-            } else if result.is_error {
+            } else if outcome.result.is_error {
                 "ERR"
             } else {
                 "ok"
             };
-            let exit = result
+            let exit = outcome
+                .result
                 .exit_code
                 .map(|c| format!(" (exit {c})"))
                 .unwrap_or_default();
             emit(
                 opts,
-                format!("  result {tag}{exit}: {}", preview(&result.content, 120)),
+                format!(
+                    "  result {tag}{exit}: {}",
+                    preview(&outcome.result.content, 120)
+                ),
             );
-            for e in &audit {
+            for e in outcome.audit.iter().chain(&outcome.proxy_audit) {
                 if e.decision == "denied" {
                     emit(opts, format!("  audit: {} denied {}", e.op, e.target));
                 }
             }
+            let timed_out = outcome.timed_out;
+            let result = &outcome.result;
 
             convo.push(Message::ToolResult {
                 call_id: tc.id.clone(),
@@ -546,12 +450,7 @@ pub async fn run_loop(
                 } else {
                     EpisodeStatus::NotCaptured
                 };
-                recorded.push(RecordedCall {
-                    proxy_events,
-                    call: tc.clone(),
-                    result,
-                    audit,
-                });
+                recorded.push(outcome.to_recorded(tc));
                 turns.push(TranscriptTurn {
                     notes: std::mem::take(&mut turn_notes),
                     index,
@@ -562,12 +461,7 @@ pub async fn run_loop(
                 break 'outer;
             }
 
-            recorded.push(RecordedCall {
-                proxy_events,
-                call: tc.clone(),
-                result,
-                audit,
-            });
+            recorded.push(outcome.to_recorded(tc));
 
             if timed_out {
                 status = EpisodeStatus::Timeout;

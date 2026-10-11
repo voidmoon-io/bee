@@ -527,7 +527,7 @@ issues zero prompts and records both. An interactive request with no answer is r
 
 ### Tests (write first, see them fail)
 
-- [ ] T051 [P] [US2] Create `tests/operator.rs` (gated on `test-support`, paused clock; add its `[[test]]` entry to `Cargo.toml` in this task):
+- [X] T051 [P] [US2] Create `tests/operator.rs` (gated on `test-support`, paused clock; add its `[[test]]` entry to `Cargo.toml` in this task):
   - (a) `Operator::autonomous`: one kernel denial inside the ceiling and one outside, via `run_call` →
     exactly two `ConsentRecord`s (`Granted`, `BeyondCeiling`), with no call to any interactive adapter. A
     following `skill` call whose `requires` are already held adds **no** record;
@@ -538,14 +538,14 @@ issues zero prompts and records both. An interactive request with no answer is r
   - (d) a start-up skill grant with `net`/`exec`/`http_targets` → the request carries all kinds;
   - (e) the episode transcript JSON contains `consents` only when non-empty, and an unchanged session's
     transcript is byte-identical to the phase-1 golden output (store one under `tests/fixtures/`).
-- [ ] T052 [P] [US2] Add to `tests/episode_progress_strings.rs`: a new `  consent: …` line per decision under
+- [X] T052 [P] [US2] Add to `tests/episode_progress_strings.rs`: a new `  consent: …` line per decision under
   the Autonomous operator, with every pre-existing line unchanged.
-- [ ] T053 [P] [US2] Create `src/repl/consent_input.rs` unit tests for the answer rule: `y/yes/n/no`
+- [X] T053 [P] [US2] Create `src/repl/consent_input.rs` unit tests for the answer rule: `y/yes/n/no`
   (trimmed, case-insensitive) answer; anything else returns `NotAnAnswer`.
 
 ### Implementation
 
-- [ ] T054 [US2] Complete `src/operator.rs` (skeleton from T020) with the types and impls from
+- [X] T054 [US2] Complete `src/operator.rs` (skeleton from T020) with the types and impls from
   `contracts/operator.md`:
   - `OperatorKind`, `Consent`, `ConsentRequest` (owned, every capability kind), `ConsentRecord`,
     `Reason`, `ConsentLog`;
@@ -555,7 +555,7 @@ issues zero prompts and records both. An interactive request with no answer is r
     (mpsc + oneshot), and `ProgressOutput(ProgressSink)` reproducing the episode strings.
 
   Add the `SessionOutput` trait extending `ReplOutput` with default methods.
-- [ ] T055 [US2] In `src/grants/escalate.rs::escalate`:
+- [X] T055 [US2] In `src/grants/escalate.rs::escalate`:
   - take `&Operator` instead of `&dyn ConsentSink` plus a timeout;
   - record `BeyondCeiling` via `record_unasked` before returning `Refused`. `AlreadyHeld` is **not**
     recorded (no decision was made);
@@ -563,14 +563,14 @@ issues zero prompts and records both. An interactive request with no answer is r
     "denied by operator".
 
   Remove `consent` and `timeout` from `LoopEscalation` (`:26-40`); the Operator owns them.
-- [ ] T056 [US2] Add `GrantOrigin::Startup { skill }` in `src/grants/mod.rs`. In
+- [X] T056 [US2] Add `GrantOrigin::Startup { skill }` in `src/grants/mod.rs`. In
   `src/skills/grant.rs::resolve_grants` (`:180-235`), consult `&Operator` for start-up grants with that
   origin and the full capability kinds (fixing the hard-coded empties at `:213-220`). Delete the blanket
   `impl ConsentSink for Fn`, or move it under `#[cfg(test)]`, and delete `DenyAll` if unused.
-- [ ] T057 [US2] In `src/transcript.rs`, add `consents: Vec<ConsentRecord>` to `EpisodeTranscript` (`:112-129`)
+- [X] T057 [US2] In `src/transcript.rs`, add `consents: Vec<ConsentRecord>` to `EpisodeTranscript` (`:112-129`)
   with `serde(default, skip_serializing_if = "Vec::is_empty")`. Fill it from `operator.take_log()` at
   episode end. Add the same to the REPL exchange result in `src/repl.rs`.
-- [ ] T058 [US2] Inline REPL: in `src/repl.rs::run_repl` (`:1207-1364`), add a `consent_rx` arm to the
+- [X] T058 [US2] Inline REPL: in `src/repl.rs::run_repl` (`:1207-1364`), add a `consent_rx` arm to the
   `select!`:
   - on a request, print `render_lines()` through the output and store `awaiting:
     Option<oneshot::Sender<Decision>>`;
@@ -578,12 +578,12 @@ issues zero prompts and records both. An interactive request with no answer is r
     steering as today and the question is re-shown.
 
   Create `src/repl/consent_input.rs` holding the parser.
-- [ ] T059 [US2] TUI:
+- [X] T059 [US2] TUI:
   - add a `ConsentModal` state to `src/tui/app.rs` (`App`) and render it in the TUI draw code;
   - add a `consent_rx` arm to `run_turn`'s `select!` (`src/tui/mod.rs:262-285`) that opens the modal;
   - in the reducer (`src/tui/app.rs:329`), route `y`/`n` keys to the oneshot while the modal is open,
     leaving the input buffer untouched.
-- [ ] T060 [US2] Start-up consent for Interactive (research R3). There is never a second terminal reader:
+- [X] T060 [US2] Start-up consent for Interactive (research R3). There is never a second terminal reader:
   - **Inline REPL**: start the front-end's line reader (`issue_read`, `src/repl.rs:1207`) *before*
     `session::build`, and serve start-up consent from that one pending read through the same
     `consent_rx` path as T058. Hand the still-pending read to `run_repl` as its first outstanding read,
@@ -595,7 +595,7 @@ issues zero prompts and records both. An interactive request with no answer is r
 
   Delete `prompt_consent` (`src/app/repl.rs:532-549`) and the `println!`/`eprintln!` at the old
   session.rs `:143-148`; output goes through `operator.output()`.
-- [ ] T061 [US2] Wire the operators:
+- [X] T061 [US2] Wire the operators:
   - `src/app/run.rs` and batch → `Operator::autonomous(ProgressOutput(stderr sink))` with a 60 s timeout;
   - `src/app/repl.rs` → `Operator::interactive(ChannelConsent, TerminalOutput | SessionSink)` with a 120 s
     timeout;
@@ -603,9 +603,45 @@ issues zero prompts and records both. An interactive request with no answer is r
 
   Extend `tests/session_parity.rs` to include the REPL and TUI specs built by `spec_from_config`, asserting
   the snapshots differ only in operator kind.
-- [ ] T062 [US2] Run the gate. `operator`, the extended `session_parity` and `episode_progress_strings`
+- [X] T062 [US2] Run the gate. `operator`, the extended `session_parity` and `episode_progress_strings`
   pass. Do the manual interactive check in `quickstart.md` (phase 4 section) and paste its result into the
   PR description. Open PR 5b.
+
+**As built — PR 5b is delivered in three parts:**
+- **5b-1 (T051 a, c–e, T052, T054–T057, T061 autonomous):** `src/operator.rs`: `Operator` (kind,
+  `Arc<dyn Consent>`, a swappable `Arc<dyn SessionOutput>`, timeout, `ConsentLog`), `ConsentRequest`
+  (owned, every capability kind, `render_lines` moved from `GrantRequest`), `ConsentRecord` (with `seq`
+  and the lease a grant became, attached after apply), `Reason`, `Verdict`, and the adapters
+  `AllowWithinCeiling`, `DenyAll`, `ChannelConsent`, `ProgressOutput`, `NullOutput`. `escalate` and the
+  start-up `resolve_grants` take `&Operator`; `ConsentSink`, `GrantRequest` and the blanket `Fn` impl are
+  gone. `LoopEscalation.operator` replaces `consent`/`timeout`; `SessionSpec.operator` replaces the pair;
+  `Session.operator` holds the log. A timeout refuses as "consent timed out".
+  - `SessionOutput` is the Operator's output only (`info` + `consent_decided`), blanket-implemented for
+    every `ReplOutput`; it does not yet carry the episode's progress lines, which `run_loop` still emits
+    through its `ProgressSink`. The Autonomous operator shares that sink (`ProgressOutput`), so the
+    strings are unchanged and the `  consent: …` line is additive.
+  - `SkillRequires` has only `tools` and `filesystem`, so a start-up request carries those; it is built
+    by the same `ConsentRequest::from_delta` as an in-loop request, so any kind a skill gains later is
+    carried without another change (T051 d).
+  - The golden for T051 (e) was written by `main` (`tests/fixtures/transcript_no_consents.json`).
+- **5b-2 (T051 b, T053, T058, T060 inline):** `ReplTerminal` (editor, printer, consent receiver) is
+  opened before `session::build`; `serve_startup` answers start-up questions from it, and a read still
+  open when the operator stops waiting becomes `run_repl`'s first read (a late `y`/`n` there is
+  dropped). Mid-exchange questions go through `repl::consent_input::route`. Off a terminal, the channel
+  is closed and every request refused; the session ends as before.
+- **5b-3 (T059, T060 TUI, T061 parity):** `App::consent`/`consent_answer`, a modal drawn last,
+  `run_turn`'s `consent_rx` arm and `settle_consent`. Start-up: `tui::serve_startup` enters the full
+  screen only when a question arrives and leaves it before `run`. `session_parity` asserts an Interactive
+  and an Autonomous session differ only in the operator kind and timeout.
+  - The REPL's and TUI's specs are built in the binary (`app/repl.rs`), not by a library
+    `spec_from_config`, so T061's parity is asserted on one spec with each operator.
+- **Gate (T062):** fmt; clippy clean on default, `mcp`, `intercept,test-support`, `tui`, `enforce`,
+  `tui,intercept,test-support`; tests 807 / 819 (`mcp`) / 975 (`intercept,test-support`). VM matrix
+  49/49. Interactive checks in a pty: on the host, in-loop consent in the inline REPL (a steering line
+  re-shows the question, `y` grants, `n` refuses) and in the TUI modal; on the VM with an enforced
+  policy and ceiling, start-up consent inline (a non-answer re-asks, `y` grants, recorded as
+  `startup`/`interactive`), in the TUI (a stray key swallowed, `y` grants), and the 120 s timeout (refused
+  as `timed_out`, the late `y` reported as "consent already timed out" and dropped, the session starts).
 
 **Checkpoint**: autonomous and interactive bee differ only in the Operator (SC-001, SC-005).
 

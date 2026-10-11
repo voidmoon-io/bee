@@ -375,6 +375,11 @@ required-features = ["intercept"]
 
 # 024 R1: host orchestration tests that drive the scripted audit source.
 [[test]]
+name = "hooks_leases"
+path = "tests/hooks_leases.rs"
+required-features = ["test-support"]
+
+[[test]]
 name = "call_lifecycle"
 path = "tests/call_lifecycle.rs"
 required-features = ["test-support"]

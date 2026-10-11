@@ -46,6 +46,29 @@ impl GrantDelta {
             && self.net.is_empty()
             && self.http_targets.is_empty()
     }
+
+    /// Fold `other` into this delta: the union of both, a path asked for twice taking the more
+    /// permissive access. How grants proposed by several hooks for one event combine (024 FR-034).
+    pub fn merge(&mut self, other: GrantDelta) {
+        fn union(mine: &mut Vec<String>, theirs: Vec<String>) {
+            for x in theirs {
+                if !mine.contains(&x) {
+                    mine.push(x);
+                }
+            }
+        }
+        union(&mut self.tools, other.tools);
+        union(&mut self.exec, other.exec);
+        union(&mut self.net, other.net);
+        union(&mut self.http_targets, other.http_targets);
+        for (path, access) in other.filesystem {
+            let merged = match self.filesystem.get(&path) {
+                Some(&mine) => more_permissive(mine, access),
+                None => access,
+            };
+            self.filesystem.insert(path, merged);
+        }
+    }
 }
 
 /// Why a lease was granted — provenance for the audit trail (Constitution IV).

@@ -300,13 +300,13 @@ beats Escalate.
 
 ### Tests (write first, see them fail)
 
-- [ ] T027 [P] [US5] Rewrite `first_non_continue_wins` in `src/hooks.rs` (`:139`) as unit tests of the new
+- [X] T027 [P] [US5] Rewrite `first_non_continue_wins` in `src/hooks.rs` (`:139`) as unit tests of the new
   `dispatch`:
   - Deny beats Escalate regardless of registration order;
   - Escalate deltas from two hooks merge;
   - Deescalates accumulate;
   - `RefreshTools` accumulates alongside the winning flow.
-- [ ] T028 [P] [US5] Create `tests/hooks_leases.rs` (gated on `test-support`; add its `[[test]] … required-features = ["test-support"]` entry to `Cargo.toml` in this task). Through `run_loop` and through
+- [X] T028 [P] [US5] Create `tests/hooks_leases.rs` (gated on `test-support`; add its `[[test]] … required-features = ["test-support"]` entry to `Cargo.toml` in this task). Through `run_loop` and through
   `run_exchange`, cover:
   - (a) a `BeforeToolCall` Deny hook — the tool never runs (`ScriptedTool` call count is 0), the model sees
     `refused by hook:` and `CallOutcome.refused_by_hook` is set;
@@ -320,12 +320,12 @@ beats Escalate.
     with a `Deescalate` hook). Assert the read succeeds during the lease and is denied by the kernel, with a
     `file_open denied` audit event, after the next turn starts. Host tests (a)–(d) only show that narrowing
     is requested.
-- [ ] T029 [P] [US5] In `tests/call_characterization.rs`, flip the `// DRIFT FR-029` assertions (the REPL's
+- [X] T029 [P] [US5] In `tests/call_characterization.rs`, flip the `// DRIFT FR-029` assertions (the REPL's
   lease turn now counts model turns).
 
 ### Implementation
 
-- [ ] T030 [US5] In `src/hooks.rs`:
+- [X] T030 [US5] In `src/hooks.rs`:
   - trim `StepEvent` to `TurnStart{turn}`, `BeforeToolCall`, `KernelDenial`, `ProxyRefusal`, and delete
     `BeforeModelCall` and `AfterToolResult`;
   - trim `Flow` to `Continue | Deny(String) | Escalate(GrantDelta) | Deescalate(GrantId) | RefreshTools`,
@@ -333,10 +333,10 @@ beats Escalate.
   - add `pub struct Dispatch` and rewrite `dispatch` to consult every observing hook and combine per
     `contracts/hooks.md`;
   - update the module doc (`:8`), which currently claims refresh is a TurnStart hook.
-- [ ] T031 [US5] In `src/call.rs`, act on `Dispatch.deny` for `BeforeToolCall`: skip execution and return
+- [X] T031 [US5] In `src/call.rs`, act on `Dispatch.deny` for `BeforeToolCall`: skip execution and return
   `ToolResult::refused_by_hook(reason)`. Add that constructor in `src/tools.rs`, with a distinct outcome
   tag and `is_error = true`. Use `Dispatch.escalate` for the existing triggers.
-- [ ] T032 [US5] Add `pub async fn turn_start(turn, hooks, active: Option<&mut ActivePolicy>, sandbox, registry,
+- [X] T032 [US5] Add `pub async fn turn_start(turn, hooks, active: Option<&mut ActivePolicy>, sandbox, registry,
   mcp: Option<&McpBridge>) -> TurnStartReport` in a new `src/turn.rs`. It is moved into `Session` in phase 6.
   It runs these steps:
   1. dispatch `TurnStart`;
@@ -346,19 +346,36 @@ beats Escalate.
      dropped lease had `http_targets`, and remove from `registry` the tools that only a dropped lease
      granted;
   5. on `refresh_tools`: the MCP re-registration (from `src/episode.rs:914-926`).
-- [ ] T033 [US5] Add `McpRefreshHook { bridge: Arc<McpBridge> }` (cfg `mcp`) in `src/mcp/bridge.rs`. It
+- [X] T033 [US5] Add `McpRefreshHook { bridge: Arc<McpBridge> }` (cfg `mcp`) in `src/mcp/bridge.rs`. It
   observes `TurnStart` and returns `RefreshTools` when `bridge.take_dirty()`. Remove `refresh_tools` from
   `LoopOptions` (`src/episode.rs:38`) and `ReplConfig` (`src/repl.rs:74`), along with their call sites
   (`:193`, `:509`). Register the hook where the bridge is connected (episode and REPL setup).
-- [ ] T034 [US5] Call `turn_start` at the top of each model turn in `src/episode.rs::run_loop` (turn =
+- [X] T034 [US5] Call `turn_start` at the top of each model turn in `src/episode.rs::run_loop` (turn =
   `index`) and in `src/repl.rs::run_exchange` (top of the `for _step` loop, `:505`).
   - Replace `ReplEscalation::next_turn()` per-call increments (`:122`, `:635`) with a session-monotonic
     model-turn counter incremented once per step.
   - Pass that counter as the lease turn and as `CallInput.turn`.
-- [ ] T035 [US5] Run the gate. `hooks_leases` and the `hooks.rs` unit tests pass, and the flipped FR-029
+- [X] T035 [US5] Run the gate. `hooks_leases` and the `hooks.rs` unit tests pass, and the flipped FR-029
   characterization passes. Run the T028e VM cases. If `ac-matrix-vm` is unavailable, PR 4 may merge with
   the cases written and marked pending in its description, but **phase 6 does not start until they have
   passed** (FR-042). Open PR 4.
+
+**As built (PR 4)**:
+- **MCP refresh (T033)** is a `RefreshHook` over a small `turn::ToolRefresh` trait, which `McpBridge`
+  implements; it is not an `McpRefreshHook` in `bridge.rs`. `turn_start` takes the refresh source and
+  dispatches its hook beside the session's hooks, so refresh still happens when there is no escalation
+  config (a REPL without a policy can still have MCP servers). `LoopOptions` and `ReplConfig` carry
+  `tool_refresh: Option<Arc<dyn ToolRefresh>>` in place of the closures. The tests use a fake source,
+  so they need no `mcp` feature.
+- **The REPL's model-turn counter (T034)** is `ReplState::model_turns`, beside the 025 context state,
+  not on `ReplEscalation`, so it also exists without escalation. It stamps leases and `CallInput.turn`,
+  and is not reset by `/clear`.
+- **New opt-in `[scenario] lease_turns = N`** sets the lifetime of mid-episode grants (default: none,
+  as before). Without it, no `bee run` lease could expire, so the VM case could not exist.
+- **VM tier (T028e)**: `lease-expiry` is written. `lease-release` is listed as `PENDING`: a release
+  hook cannot be configured from the `bee` binary, and it shares expiry's narrowing path.
+  `test/vm/matrix.sh` accepts `PENDING` without failing the run. **Neither has run — no BPF-LSM VM is
+  available — so per FR-042, phase 6 waits for `lease-expiry` to pass.**
 
 **Checkpoint**: the hook interface offers nothing it ignores (SC-007).
 

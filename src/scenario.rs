@@ -99,6 +99,10 @@ pub struct Scenario {
     /// like `[mcp]` and `[security]`, and merged over the user's and project's `[context]`.
     #[serde(default, skip_serializing_if = "is_default_context")]
     pub context: crate::context::ContextConfig,
+    /// How many model turns a capability granted mid-episode lasts before it expires and the scope
+    /// narrows again (007 US4, 024 FR-029). Absent: a grant lasts for the rest of the episode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_turns: Option<u32>,
 }
 
 fn is_default_context(c: &crate::context::ContextConfig) -> bool {
@@ -178,6 +182,12 @@ impl Scenario {
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
+        if self.lease_turns == Some(0) {
+            return Err(ConfigError::Invalid(
+                "scenario.lease_turns must be at least 1 (omit it for grants that do not expire)"
+                    .into(),
+            ));
+        }
         for (field, val) in [
             ("id", &self.id),
             ("system_prompt", &self.system_prompt),
@@ -295,6 +305,19 @@ value = "FLAG{abc}"
         let s = Scenario::from_path(&p).unwrap();
         assert_eq!(s.skills[0], dir.join("skills"));
         assert_eq!(s.skills[1], PathBuf::from("missing"));
+    }
+
+    #[test]
+    fn lease_turns_is_optional_and_at_least_one() {
+        let s = Scenario::from_path(&write("lease-none", OK)).unwrap();
+        assert_eq!(s.lease_turns, None, "grants do not expire unless asked");
+        let s =
+            Scenario::from_path(&write("lease-two", &format!("{OK}lease_turns = 2\n"))).unwrap();
+        assert_eq!(s.lease_turns, Some(2));
+        assert!(matches!(
+            Scenario::from_path(&write("lease-zero", &format!("{OK}lease_turns = 0\n"))),
+            Err(ConfigError::Invalid(_))
+        ));
     }
 
     #[test]

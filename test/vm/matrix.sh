@@ -57,7 +57,8 @@ fail=0
 while IFS='|' read -r tag name status note; do
   [ "$tag" = RESULT ] || continue
   printf '%-18s %-6s %s\n' "$name" "$status" "$note"
-  [ "$status" = PASS ] || fail=1
+  # PENDING: a case written but not yet runnable (it is listed, and does not fail the run).
+  [ "$status" = PASS ] || [ "$status" = PENDING ] || fail=1
 done <<< "$OUT"
 
 echo

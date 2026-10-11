@@ -145,6 +145,7 @@ impl RunArgs {
         // which runs just after this and knows about `--host` — the guard here did not, so it
         // refused ad-hoc host-mode runs that the operator had explicitly asked for.
         Ok(Scenario {
+            lease_turns: None,
             context: Default::default(),
             id: "adhoc".to_string(),
             policy_path: cfg

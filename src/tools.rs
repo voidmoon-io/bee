@@ -269,6 +269,12 @@ impl ToolResult {
         }
     }
 
+    /// A call a hook refused before it ran (024 FR-031): `is_error`, and phrased so the model can tell
+    /// it from a failure of the tool — the tool never ran.
+    pub fn refused_by_hook(reason: &str) -> Self {
+        ToolResult::error(format!("refused by hook: {reason} (the tool did not run)"))
+    }
+
     /// The FR-016 malformed-arguments result: `"<tool>: invalid arguments: <detail>"`.
     pub fn invalid_args(tool: &str, detail: impl std::fmt::Display) -> Self {
         ToolResult::error(format!("{tool}: invalid arguments: {detail}"))
@@ -510,6 +516,13 @@ impl ToolRegistry {
                 },
             })
             .collect()
+    }
+
+    /// Unregister the tool `name` — a tool only an expired or released lease granted (024 FR-029).
+    /// Returns whether one was registered.
+    pub fn remove(&mut self, name: &str) -> bool {
+        self.built.remove(name);
+        self.tools.remove(name).is_some()
     }
 
     /// Drop every `mcp__…` tool. Used to rebuild the MCP set after a `tools/list_changed`

@@ -76,6 +76,8 @@ pub mod session;
 pub mod skills;
 pub mod tools;
 pub mod transcript;
+// The top of a model turn: lease expiry, release, MCP refresh (024 FR-028–FR-030).
+pub mod turn;
 // Full-screen TUI front-end (008-grid-tui, M3–M4). Only compiled with `--features tui`.
 #[cfg(feature = "tui")]
 pub mod tui;

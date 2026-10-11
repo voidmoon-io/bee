@@ -27,6 +27,7 @@ fn render_call(id: &str, target: RenderTarget, spec: RenderSpec) -> RecordedCall
         escalations: Vec::new(),
         retried: false,
         timed_out: false,
+        refused_by_hook: None,
         proxy_events: Vec::new(),
         call: ToolCall {
             id: id.into(),
@@ -117,6 +118,7 @@ fn ops_call(id: &str, ops: Vec<bee::render_spec::PanelOp>) -> RecordedCall {
         escalations: Vec::new(),
         retried: false,
         timed_out: false,
+        refused_by_hook: None,
         proxy_events: Vec::new(),
         call: ToolCall {
             id: id.into(),

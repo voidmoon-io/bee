@@ -8,7 +8,8 @@
 //! Where the loops differ, each loop's *current* value is asserted under a `// DRIFT FR-0xx` tag.
 //! Later phases flip those assertions to one expected value; they are never deleted. A flipped one
 //! keeps its requirement id and says which PR made the loops agree (PR 3: FR-021, FR-022, FR-024,
-//! FR-025, when both loops moved onto `src/call.rs::run_call`). A difference
+//! FR-025, when both loops moved onto `src/call.rs::run_call`; PR 4: FR-029, when both counted model
+//! turns). A difference
 //! without a tag would be behaviour the spec did not list as drift, and has to be raised rather than
 //! folded into a fix.
 //!
@@ -521,10 +522,9 @@ async fn s8_late_tool_batch_on_the_sidecar_drain() {
 
 // ── Lease turns ─────────────────────────────────────────────────────────────────────────────────
 
-/// A lease's turn. The REPL counts one "turn" per tool call (`ReplEscalation::next_turn`), so a
-/// grant on the second call of the first model turn is stamped turn 1. The episode passes the model
-/// turn's index (`src/episode.rs`, `index`), which would stamp it 0; its `ActivePolicy` is local to
-/// `run_loop`, so only the REPL's value can be observed from here.
+/// A lease's turn. A grant on the second call of the first model turn is stamped turn 0 in both
+/// loops: a turn is a model turn (D3). The episode passes the model turn's index; its `ActivePolicy`
+/// is local to `run_loop`, so only the REPL's value can be observed from here.
 #[tokio::test]
 async fn lease_turn_counts() {
     let two_calls = tool_turn(None, &[("c0", SCRIPTED), ("c1", SCRIPTED)]);
@@ -539,6 +539,7 @@ async fn lease_turn_counts() {
     let active = config.escalation.as_ref().unwrap().active.lock().await;
     let lease = &active.leases()[0];
 
-    // DRIFT FR-029: the REPL stamps the lease with its per-call counter (1), not the model turn (0).
-    assert_eq!(lease.granted_at_turn, 1);
+    // FR-029 (one value since PR 4; was DRIFT): the REPL stamps the lease with the model turn (0).
+    // Before, it counted one "turn" per tool call and stamped it 1.
+    assert_eq!(lease.granted_at_turn, 0);
 }

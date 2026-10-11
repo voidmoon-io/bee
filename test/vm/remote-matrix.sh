@@ -682,6 +682,55 @@ EOF
   else
     emit reload-beyond-ceiling FAIL "refused escalation did not stay denied ($(tail -1 "$WORK/dyn-deny.log" 2>/dev/null))"
   fi
+
+  # ------------------------------------------- 024 FR-042: a lease that runs out narrows the kernel
+  # lease-expiry — the same denial → escalate → retry, but the grant lasts one model turn
+  # (`lease_turns = 1`). Turn 0 writes (denied, granted, retried). At the start of turn 1 the lease
+  # expires and the scope is reloaded narrower, so turn 1's identical write is denied by the kernel
+  # again before it is re-escalated. Without expiry the second write succeeds first time and the
+  # transcript holds one denied attempt, not two.
+  cat >"$WORK/lease.prov.toml" <<'EOF'
+[provider]
+provider = "mock"
+[[provider.script]]
+tool = "write_file"
+args = { path = "/home/ubuntu/dyngrant/out.txt", content = "turn 0\n" }
+[[provider.script]]
+tool = "write_file"
+args = { path = "/home/ubuntu/dyngrant/out.txt", content = "turn 1\n" }
+[[provider.script]]
+text = "Done."
+EOF
+  rm -f /home/ubuntu/dyngrant/out.txt
+  cat >"$WORK/lease.scn.toml" <<EOF
+[scenario]
+id            = "lease-expiry"
+policy_path   = "$WORK/dyn-base.policy.toml"
+ceiling_policy_path = "$WORK/dyn-ceiling.policy.toml"
+system_prompt = "You are a sandboxed agent."
+task          = "Write the output twice."
+turn_limit    = 4
+timeout_secs  = 30
+tools         = ["write_file"]
+lease_turns   = 1
+EOF
+  sudo "$BEE" run --scenario "$WORK/lease.scn.toml" --provider "$WORK/lease.prov.toml" \
+    --out "$WORK/lease.json" >"$WORK/lease.log" 2>&1
+  t="$WORK/lease.json"
+  denied_attempts=$(grep -c '"denied_attempt_audit"' "$t" 2>/dev/null || echo 0)
+  if [ -f "$t" ] \
+     && grep -q 'lease expired: g0' "$WORK/lease.log" \
+     && [ "$denied_attempts" -eq 2 ] \
+     && [ "$(cat /home/ubuntu/dyngrant/out.txt 2>/dev/null)" = "turn 1" ]; then
+    emit lease-expiry PASS "lease expired at turn 1; the kernel denied the same write again"
+  else
+    emit lease-expiry FAIL "denied attempts=$denied_attempts; $(grep -o 'lease expired[^"]*' "$WORK/lease.log" | head -1)"
+  fi
+
+  # lease-release — a `Deescalate` hook releasing the lease narrows through the same turn-start step
+  # as expiry. No hook can be configured from the `bee` binary, so the case is pending until one can
+  # (024 PR 4). Host coverage: tests/hooks_leases.rs.
+  echo "RESULT|lease-release|PENDING|needs a configurable release hook; narrowing path shared with lease-expiry"
   rm -rf /home/ubuntu/dynwork /home/ubuntu/dyngrant
 else
   emit episode-file-deny FAIL "bee not shipped to $BEE"

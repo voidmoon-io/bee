@@ -42,6 +42,7 @@ pub fn http_policy(targets: &[&str]) -> Policy {
 /// A host scenario: no policy file, no MCP, no skills, no ceiling.
 pub fn scenario(id: &str, tools: &[&str], turn_limit: u32, timeout_secs: u64) -> Scenario {
     Scenario {
+        lease_turns: None,
         context: Default::default(),
         id: id.into(),
         policy_path: "/dev/null".into(),

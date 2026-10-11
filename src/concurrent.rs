@@ -279,6 +279,7 @@ mod tests {
 
     fn scenario(id: &str, policy_path: PathBuf) -> Scenario {
         Scenario {
+            lease_turns: None,
             context: Default::default(),
             id: id.into(),
             policy_path,

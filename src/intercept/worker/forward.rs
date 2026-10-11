@@ -325,11 +325,11 @@ async fn relay(
         // A rewritten request is checked again: a rule cannot move traffic out of scope.
         let mut whole = h.clone();
         whole.extend_from_slice(&b);
-        if let Err(r) =
-            worker
-                .scope()
-                .check_host_header(&super::raw::host_headers(&whole), &rec.host, rec.port)
-        {
+        if let Err(r) = worker.scope().check_host_header(
+            &super::raw::request_authorities(&whole),
+            &rec.host,
+            rec.port,
+        ) {
             worker.refuse(&r, Some(&ctx.call_id));
             return refusal_response(&r);
         }
@@ -558,7 +558,14 @@ impl Body for TeeBody {
 
 impl Drop for TeeBody {
     fn drop(&mut self) {
-        if !self.finished {
+        if self.finished {
+            return;
+        }
+        // A body that was already at its end (HEAD, 204, 304, Content-Length: 0) may be dropped by
+        // hyper without ever being polled — that is a completed exchange, not an abandoned one.
+        if self.inner.is_end_stream() {
+            self.finish(None);
+        } else {
             self.finish(Some("client stopped reading the response".into()));
         }
     }

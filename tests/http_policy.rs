@@ -211,10 +211,20 @@ fn a_zero_limit_is_refused() {
 
 #[test]
 fn a_malformed_host_port_is_refused_at_parse() {
-    for bad in ["app.test", "app.test:http", ":443", "app.test:70000"] {
+    // `fe80::1` is an unbracketed IPv6 literal that once parsed as host `fe80:` port 1.
+    for bad in [
+        "app.test",
+        "app.test:http",
+        ":443",
+        "app.test:70000",
+        "fe80::1",
+        "::1:443",
+    ] {
         let toml = with_http(&format!("targets = [\"{bad}\"]"));
         assert!(Policy::from_toml(&toml).is_err(), "{bad} accepted");
     }
+    let ok = HostPort::try_from("[fe80::1]:443".to_string()).unwrap();
+    assert_eq!((ok.host.as_str(), ok.port), ("fe80::1", 443));
 }
 
 // ── derived enforcement ──────────────────────────────────────────────────────────────────────────

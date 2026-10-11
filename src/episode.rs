@@ -421,6 +421,11 @@ pub async fn run_loop(
             // The proxy scope's kernel events join the call's audit only now, after escalation —
             // which they must never drive — tagged `scope_id = "proxy"` (019 T047).
             let sidecar_audit = sandbox.drain_sidecar_audit();
+            // Tool-scope events that reached the ring since the last drain (the sidecar drain
+            // buffers them) belong to this call, not the next one.
+            let late = sandbox.drain_audit();
+            audit_trail.extend(late.iter().cloned());
+            audit.extend(late);
             audit_trail.extend(sidecar_audit.iter().cloned());
             audit.extend(sidecar_audit);
             for ev in &proxy_events {

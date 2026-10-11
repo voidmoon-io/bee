@@ -185,9 +185,12 @@ fn percent_decode(s: &str) -> String {
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
+        // Hex digits are read as bytes, never by slicing `s`: the input is client-sent, and a
+        // multibyte character after `%` would put a `str` slice off a char boundary and panic.
         if b[i] == b'%' && i + 2 < b.len() {
-            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(v);
+            let hex = |c: u8| (c as char).to_digit(16);
+            if let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2])) {
+                out.push((h * 16 + l) as u8);
                 i += 3;
                 continue;
             }
@@ -219,5 +222,8 @@ mod tests {
         assert_eq!(percent_decode("a%3Ab"), "a:b");
         assert_eq!(percent_decode("plain"), "plain");
         assert_eq!(percent_decode("50%"), "50%");
+        // Client-sent; a multibyte char after `%` once panicked on a str slice (review of #21).
+        assert_eq!(percent_decode("%aé:tok"), "%aé:tok");
+        assert_eq!(percent_decode("x%é"), "x%é");
     }
 }

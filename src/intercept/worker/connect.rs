@@ -92,7 +92,7 @@ pub async fn handle(
         // Hosts in `inspect` are decrypted (US4): finish the client's handshake against a leaf from
         // the session CA — replaying the ClientHello already read — and serve HTTP/1.1 inside it,
         // forwarding each request upstream over a TLS connection of the worker's own.
-        if scope.is_inspected(&host) {
+        if scope.is_inspected(&host, port) {
             let Some(ca) = worker.ca() else {
                 // `inspect` named a host but no CA exists: refuse rather than quietly tunnel.
                 return refuse_hello(&worker, &ctx, &host, port, "no session CA");

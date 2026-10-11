@@ -221,7 +221,7 @@ pub fn scope_view(icpt: &Interceptor) -> Value {
                 "host": e.host,
                 "port": e.port,
                 "role": e.role,
-                "inspect": checker.is_inspected(&e.host),
+                "inspect": checker.is_inspected(&e.host, e.port),
                 "insecure_upstream": checker.is_insecure_upstream(&e.host),
                 "enforced_by": layers,
             })

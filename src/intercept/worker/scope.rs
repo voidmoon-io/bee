@@ -150,16 +150,20 @@ impl ScopeChecker {
                 normalize_host(&named.0) == normalize_host(strip_brackets(host)) && named.1 == port;
             if !same && self.check_testable(&named.0, named.1).is_err() {
                 let mut r = Refusal::new(ProxyEventKind::RefusedOutOfScope, &named.0, named.1);
-                r.detail = serde_json::json!({ "reason": "Host header names an out-of-scope host", "authority": format!("{host}:{port}") });
+                r.detail = serde_json::json!({ "reason": "the request (Host header or request-target) names an out-of-scope host", "authority": format!("{host}:{port}") });
                 return Err(r);
             }
         }
         Ok(())
     }
 
-    /// Whether `host` is decrypted (∈ `inspect`).
-    pub fn is_inspected(&self, host: &str) -> bool {
+    /// Whether a tunnel to `host:port` is decrypted: it matches `inspect` **and** is a testable
+    /// target. An `inspect` wildcard can also match an egress host (`*.corp.com` over
+    /// `pkg.corp.com`); egress stays an opaque tunnel, since every request decrypted on it would be
+    /// refused as not testable.
+    pub fn is_inspected(&self, host: &str, port: u16) -> bool {
         self.scope.inspect.iter().any(|p| p.matches(host))
+            && self.check_testable(host, port).is_ok()
     }
 
     /// Whether `host`'s upstream certificate goes unverified (∈ `insecure_upstream`).
@@ -209,6 +213,10 @@ fn strip_brackets(h: &str) -> &str {
 /// Split an authority `host:port` (`[v6]:port` allowed).
 pub fn split_authority(a: &str) -> Option<(String, u16)> {
     let (h, p) = a.rsplit_once(':')?;
+    // `::1` is a bare IPv6 host, not host `:` port 1; only a bracketed literal carries a port.
+    if h.contains(':') && !(h.starts_with('[') && h.ends_with(']')) {
+        return None;
+    }
     let port: u16 = p.parse().ok()?;
     let host = strip_brackets(h);
     (!host.is_empty()).then(|| (host.to_string(), port))
@@ -318,6 +326,30 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(lit, "10.0.0.5:8080".parse().unwrap());
+    }
+
+    #[test]
+    fn an_unbracketed_ipv6_authority_has_no_port() {
+        assert_eq!(split_authority("::1"), None);
+        assert_eq!(split_authority("[::1]:8443"), Some(("::1".into(), 8443)));
+        assert_eq!(
+            split_authority("app.test:443"),
+            Some(("app.test".into(), 443))
+        );
+    }
+
+    #[test]
+    fn an_inspect_wildcard_never_decrypts_egress() {
+        let mut scope = checker().scope.clone();
+        scope.inspect =
+            vec![bee_core::policy::HostPattern::try_from("*.test".to_string()).unwrap()];
+        scope
+            .egress
+            .push(entry("pkg.test", 443, &["127.0.0.8"], Role::Egress));
+        let c = ScopeChecker::new(scope);
+        assert!(c.is_inspected("app.test", 443));
+        assert!(!c.is_inspected("pkg.test", 443));
+        assert!(!c.is_inspected("app.test", 8443));
     }
 
     #[test]

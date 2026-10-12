@@ -4,12 +4,13 @@
 
 use serde_json::{json, Value};
 
+use crate::intercept::ops::OpError;
 use crate::intercept::query::{self, HistoryFilter, QueryError};
 use crate::intercept::sidecar::Interceptor;
 use crate::provider::ToolSchema;
 use crate::sandbox::Sandbox;
-use crate::tools::http::{invalid, live, with_notices};
-use crate::tools::{Provenance, Tool, ToolOutcome, ToolResult};
+use crate::tools::http::{invalid, live, respond_text};
+use crate::tools::{Provenance, Tool, ToolResult};
 
 pub const BOUND: usize = 24 * 1024;
 
@@ -66,9 +67,13 @@ impl Tool for HttpHistory {
             Ok(f) => f,
             Err(e) => return invalid("http_history", e),
         };
-        let res = icpt.with_store(|s| query::history(s, &filter));
-        match res {
-            Ok(mut r) => {
+        let res = icpt
+            .with_store(|s| query::history(s, &filter))
+            .map_err(|e| match e {
+                QueryError::Invalid(e) => OpError::Invalid(e),
+                e => OpError::Failed(e.to_string()),
+            })
+            .map(|mut r| {
                 // Keep within the bound by dropping rows from the end, and say how many.
                 let mut body = serde_json::to_string(&r).unwrap_or_default();
                 let mut dropped = 0;
@@ -83,14 +88,13 @@ impl Tool for HttpHistory {
                         "\n({dropped} more rows fit no bound; narrow the filter or lower `limit`)"
                     ));
                 }
-                // Paths and hosts come from requests other tools made — possibly from links in a
-                // hostile page — so the rows travel as data too.
-                ToolResult::ok(with_notices(body, icpt)).with_provenance(Provenance::Remote {
-                    source: "http:history".into(),
-                })
-            }
-            Err(QueryError::Invalid(e)) => invalid("http_history", e),
-            Err(e) => ToolOutcome::<()>::failed(e.to_string()).into_tool_result(|_| String::new()),
-        }
+                body
+            });
+        // Paths and hosts come from requests other tools made — possibly from links in a hostile
+        // page — so the rows travel as data too.
+        let provenance = Provenance::Remote {
+            source: "http:history".into(),
+        };
+        respond_text("http_history", icpt, res, Some(provenance))
     }
 }

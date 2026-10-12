@@ -143,7 +143,6 @@ pub fn wire_ctx(call: &CallContext) -> WireCtx {
         origin: match &call.origin {
             CallOrigin::Tool => "tool".into(),
             CallOrigin::Mcp(s) => format!("mcp:{s}"),
-            CallOrigin::Fuzz(r) => format!("fuzz:{r}"),
         },
     }
 }

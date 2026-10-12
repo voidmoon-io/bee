@@ -65,8 +65,6 @@ pub enum CallOrigin {
     Tool,
     /// A long-lived MCP stdio server, named.
     Mcp(String),
-    /// An `http_fuzz` run.
-    Fuzz(String),
 }
 
 /// Extra environment variables for one tool child, applied **after** [`restrict_env`] (research R6).

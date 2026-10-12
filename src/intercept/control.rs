@@ -28,7 +28,7 @@ pub const PROTOCOL_VERSION: u32 = 1;
 pub struct WireCtx {
     pub call_id: String,
     pub turn: u32,
-    /// `tool`, `mcp:<server>` or `fuzz:<run>`.
+    /// `tool` or `mcp:<server>`.
     pub origin: String,
 }
 

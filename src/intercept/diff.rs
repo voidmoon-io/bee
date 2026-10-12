@@ -269,7 +269,7 @@ pub fn apply_edits(head: &[u8], body: &[u8], edits: &[Edit]) -> Result<(Vec<u8>,
             Edit::SetBody { text, base64 } => {
                 r.body = match (text, base64) {
                     (Some(t), None) => t.clone().into_bytes(),
-                    (None, Some(b)) => crate::tools::http_send::b64(b)?,
+                    (None, Some(b)) => super::ops::bound::b64(b)?,
                     _ => return Err("set_body: give exactly one of text or base64".into()),
                 };
                 body_changed = true;

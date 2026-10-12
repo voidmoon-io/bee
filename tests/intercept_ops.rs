@@ -11,7 +11,9 @@ mod vuln_target;
 use std::time::Duration;
 
 use bee::intercept::diff::Edit;
-use bee::intercept::ops::{self, CallCtx, ReplaySpec, SendSpec, SitemapQuery, StructuredRequest};
+use bee::intercept::ops::{
+    self, CallCtx, OpError, Part, Refusal, ReplaySpec, SendSpec, SitemapQuery, StructuredRequest,
+};
 use harness::{scope, Session};
 use serde_json::json;
 
@@ -180,4 +182,141 @@ async fn the_sitemap_op_matches_the_tool() {
     let (r, _) = s.call("http_sitemap", json!({})).await;
     assert!(!r.is_error, "{}", r.content);
     assert_eq!(Session::json(&r), direct);
+}
+
+#[tokio::test]
+async fn a_same_origin_redirect_with_a_url_in_its_query_is_followed() {
+    let (http, _, _fx) = vuln_target::start_with(false);
+    let s = session(http).await;
+    let url = format!(
+        "http://127.0.0.1:{}/redirect?to=/search%3Fq%3Dhttp://elsewhere.test/",
+        http.port()
+    );
+    let r = ops::send(&s.icpt, &ctx(), get(url, 2)).await.unwrap();
+    assert_eq!(r.hops.len(), 1);
+    assert!(r.hops[0].stopped.is_none(), "{:?}", r.hops);
+    assert_eq!(r.last.record.status, Some(200));
+}
+
+#[tokio::test]
+async fn an_invalid_edit_sends_nothing() {
+    let (http, _, fx) = vuln_target::start_with(false);
+    let s = session(http).await;
+    let orig = ops::send(
+        &s.icpt,
+        &ctx(),
+        get(format!("http://127.0.0.1:{}/search?q=1", http.port()), 0),
+    )
+    .await
+    .unwrap()
+    .last
+    .exchange_id;
+    let sent_before = fx
+        .counters
+        .requests
+        .load(std::sync::atomic::Ordering::SeqCst);
+    let stored_before = s.icpt.with_store(|st| st.count_exchanges()).unwrap();
+    let edits: Vec<Edit> =
+        serde_json::from_value(json!([{ "json_set": { "pointer": "/a", "value": 1 } }])).unwrap();
+    let r = ops::replay(
+        &s.icpt,
+        &ctx(),
+        ReplaySpec {
+            id: orig,
+            edits,
+            noise_probe: true,
+            timeout: Duration::from_secs(15),
+        },
+    )
+    .await;
+    assert!(matches!(r, Err(OpError::Invalid(_))), "{r:?}");
+    assert_eq!(
+        fx.counters
+            .requests
+            .load(std::sync::atomic::Ordering::SeqCst),
+        sent_before,
+        "no noise probe went out"
+    );
+    assert_eq!(
+        s.icpt.with_store(|st| st.count_exchanges()).unwrap(),
+        stored_before
+    );
+}
+
+#[tokio::test]
+async fn a_refused_replay_is_a_typed_refusal() {
+    let (http, _, _fx) = vuln_target::start_with(false);
+    let s = session(http).await;
+    let orig = ops::send(
+        &s.icpt,
+        &ctx(),
+        get(format!("http://127.0.0.1:{}/search?q=1", http.port()), 0),
+    )
+    .await
+    .unwrap()
+    .last
+    .exchange_id;
+    // Point the stored exchange at a port outside the scope, as if the scope had narrowed since.
+    s.icpt.with_store(|st| {
+        st.conn()
+            .execute("UPDATE exchanges SET port = 1 WHERE id = ?1", [&orig])
+            .unwrap()
+    });
+    let r = ops::replay(
+        &s.icpt,
+        &ctx(),
+        ReplaySpec {
+            id: orig,
+            edits: Vec::new(),
+            noise_probe: false,
+            timeout: Duration::from_secs(15),
+        },
+    )
+    .await;
+    match r {
+        Err(OpError::Refused {
+            reason: Refusal::OutOfScope { port: 1, .. },
+            ..
+        }) => {}
+        other => panic!("expected an out-of-scope refusal, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn read_exchange_gives_the_tool_view() {
+    let (http, _, _fx) = vuln_target::start_with(false);
+    let mut s = Session::start(
+        scope(&format!("targets = [\"127.0.0.1:{}\"]", http.port()), &[]),
+        &[],
+        &["http_get"],
+    )
+    .await;
+    let id = ops::send(
+        &s.icpt,
+        &ctx(),
+        get(format!("http://127.0.0.1:{}/json", http.port()), 0),
+    )
+    .await
+    .unwrap()
+    .last
+    .exchange_id;
+    let view =
+        bee::intercept::slice::View::parse(&json!({ "json_pointer": "/user/role" })).unwrap();
+    let direct = ops::read_exchange(&s.icpt, &id, Part::Response, &view, 31 * 1024).unwrap();
+    assert_eq!(direct["content"], json!("\"guest\""), "{direct}");
+    let (r, _) = s
+        .call(
+            "http_get",
+            json!({ "id": id, "view": { "json_pointer": "/user/role" } }),
+        )
+        .await;
+    assert_eq!(Session::json(&r), direct);
+
+    let head = bee::intercept::slice::View::parse(&json!({ "raw_head": true })).unwrap();
+    let req = ops::read_exchange(&s.icpt, &id, Part::Request, &head, 31 * 1024).unwrap();
+    assert_eq!(req["part"], "request");
+    assert!(req["content"]
+        .as_str()
+        .unwrap()
+        .starts_with("GET /json HTTP/1.1\r\n"));
 }

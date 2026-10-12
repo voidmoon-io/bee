@@ -282,6 +282,8 @@ fn transcript() -> EpisodeTranscript {
         consents: Vec::new(),
         mcp_audit: Default::default(),
         finish_offered: false,
+        compactions: Vec::new(),
+        summary_usage: None,
     }
 }
 

@@ -461,7 +461,7 @@ Default stays **off**.
 
 ### Tests first
 
-- [ ] T035 [P] [US1] Create `tests/context_compaction.rs` with the sixteen tests in quickstart.md Phase E.
+- [X] T035 [P] [US1] Create `tests/context_compaction.rs` with the sixteen tests in quickstart.md Phase E.
   - Add its `[[test]]` entry with `required-features = ["test-support"]`.
   - Use `MockModel::from_fn`. A call with an empty `tools` slice is the summary call: reply with a fixed
     summary, or with an error to test the fallback. Otherwise script the agent.
@@ -474,7 +474,7 @@ Default stays **off**.
   - `record_identical_with_and_without` runs the same script twice (compaction on/off, budget large
     enough for "off" to fit) and compares `serde_json::to_value` of the two transcripts, minus
     `compactions` and `summary_usage`.
-- [ ] T036 [P] [US1] Add unit tests in `src/context/compact.rs`:
+- [X] T036 [P] [US1] Add unit tests in `src/context/compact.rs`:
   - turn segmentation (R4), including notes and steering between turns;
   - recent-window sizing (floor of two turns, and everything since the last `Assistant`);
   - stub text for each `NoteOutcome`, matching contracts/context.md byte for byte;
@@ -482,11 +482,11 @@ Default stays **off**.
 
 ### Implementation
 
-- [ ] T037 [US1] Implement `CallNote`, `NoteOutcome` and `CallNote::from_outcome(&ToolCall, &CallOutcome)`
+- [X] T037 [US1] Implement `CallNote`, `NoteOutcome` and `CallNote::from_outcome(&ToolCall, &CallOutcome)`
   in `src/context/compact.rs` (data-model.md: denials capped at 5 plus "and N more"). In both loops,
   call `ctx.note_call(id, CallNote::from_outcome(..))` beside the `cap` call from T016/T017, including
   for `not_run` calls (`NotRun`) and hook refusals.
-- [ ] T038 [US1] Implement the regions in `src/context/compact.rs`:
+- [X] T038 [US1] Implement the regions in `src/context/compact.rs`:
   - `segment(&Conversation, preamble_len) -> Vec<TurnSpan>`;
   - `recent_start(spans, ratio, budget, share) -> usize`;
   - bee-inserted messages (the summary and the removal marker) always sit directly after the preamble.
@@ -499,7 +499,7 @@ Default stays **off**.
   - `remove(convo, spans, target) -> u32` removes whole turns and puts the marker in the head, replacing
     any earlier marker and updating `head_len`. Summarizing folds an existing marker into the new summary,
     so the head is at most one summary plus one marker.
-- [ ] T039 [US1] Implement `src/context/summary.rs`:
+- [X] T039 [US1] Implement `src/context/summary.rs`:
   - the system prompt and user-message rendering from contracts/context.md, with tool results rendered
     through `framing::frame_untrusted` and capped at 2 KiB each;
   - `SummaryState`;
@@ -509,7 +509,7 @@ Default stays **off**.
   - Reject a reply over `summary_share` of the budget.
   - Build the summary message text, with a stable nonce keyed `bee:summary#{generation}`. Do this
     through `frame_untrusted` with a nonce drawn once per generation and stored in `SummaryState`.
-- [ ] T040 [US1] Complete `ContextManager::prepare` in `src/context/mod.rs` to the sequence in
+- [X] T040 [US1] Complete `ContextManager::prepare` in `src/context/mod.rs` to the sequence in
   contracts/context.md: elide → summarize → remove on failure → `ContextExhausted`.
   - Produce at most one `CompactionEvent` per kind, with token estimates before and after.
   - Add the summary usage to `summary_usage` and return it in `Prepared`, so the loops add it to
@@ -517,26 +517,59 @@ Default stays **off**.
   - Add `pub mod compact; pub mod summary;`.
   - `prepare` keeps no `MutexGuard` across `.await`; the future must be `Send`. Add a
     `fn _assert_send()` compile check.
-- [ ] T041 [US1] Record and show compactions:
+- [X] T041 [US1] Record and show compactions:
   - add `CompactionKind`, `CompactionEvent`, `EpisodeTranscript.compactions` and
     `EpisodeTranscript.summary_usage` to `src/transcript.rs`;
   - both loops drain `ctx.take_events()` each turn into the transcript (episode) or `ExchangeResult`
     (REPL);
   - emit the progress and info lines from contracts/context.md;
   - pin those lines as new tests in `tests/episode_progress_strings.rs`.
-- [ ] T042 [US1] Run the gate with compaction off (the default). The full suite must be unchanged apart
+- [X] T042 [US1] Run the gate with compaction off (the default). The full suite must be unchanged apart
   from the new tests.
 
 **Checkpoint**: PR E. US1 works on its own when switched on.
+
+**As built (PR E, 2026-10-12)**:
+- **Head tracking.** The head is tracked as two flags, `head_summary` and `head_marker`, not a
+  `head_len` count. Its order is fixed: the summary first, then the marker. Turns are numbered by
+  `turns_gone`, so a summary's `turns a–b` are conversation turn numbers.
+- **`segment` and the first turn.** `segment` gives anything before the first `Assistant` (turn 0's
+  notes) to the first turn, so the middle is always made of whole turns.
+- **How much to fold.** Summarization folds the oldest middle turns until the request *without them*
+  reaches the target, or the whole middle is folded. The removal fallback removes the same turns.
+- **`CompactionEvent.turns: Option<(u32, u32)>`** is new beside the data-model fields. The progress
+  line for a summary needs the turn range.
+- **The REPL.** The `ContextManager` is taken out of `ReplState` for `prepare`'s await and put back
+  after, so no lock is held across it. A summary call in the REPL gets 120 s
+  (`SUMMARY_TIMEOUT`). `ExchangeResult.compactions` carries the events, and the session transcript
+  (`/save`) collects them. Its `summary_usage` is the sum of the events' usage.
+- **`budget::message_bytes`** was split out of `estimate_bytes`, so spans are measured exactly as
+  requests are.
+- **Progress-line sizes** are written to one decimal (`6.0k`) and pinned in
+  `episode_progress_strings::the_context_lines`.
+- **The tests' model** is a test-local `Model`, not `MockModel::from_fn`, because `from_fn` cannot
+  return a provider error, and the removal fallback needs one. It recognises the summary call by its
+  system prompt and asserts the contracts/context.md invariants on every agent request. A mutation
+  check, eliding inside the recent window, was caught by `elides_before_summarizing`.
+
+**Phase 7, as built**:
+- **T043.** The `CONTEXT.md` glossary gained entries for context budget, preamble, recent window,
+  middle region, elision, summarization, compaction, streak and finish tool.
+- **T044.** No `docs/` file documents configuration. The README does, so the `[context]` and
+  `[stuck]` tables, the window precedence and the finish/exit-code rules went into a new README
+  section, "Long runs".
+- **T045 and T046 are not done.** The SC-010 comparison needs a real model and provider key. The
+  mock provider cannot show whether compaction costs completions. Until that report exists,
+  `compaction` stays off by default.
 
 ---
 
 ## Phase 7: Polish and the default flip
 
-- [ ] T043 [P] Update `CONTEXT.md` (repo root; the glossary 024 extended) with the spec's terms: context
+- [X] T043 [P] Update `CONTEXT.md` (repo root; the glossary 024 extended) with the spec's terms: context
   budget, preamble, recent window, middle region, elision, summarization, compaction, streak, finish
   tool.
-- [ ] T044 [P] Document `[context]` and `[stuck]` in the user-facing config docs (find them with
+- [X] T044 [P] Document `[context]` and `[stuck]` in the user-facing config docs (find them with
   `grep -rln "\[session\]" docs README.md`), with the defaults table from data-model.md and the
   window precedence from contracts/config.md.
 - [ ] T045 Run the SC-010 comparison (quickstart "SC-010"):

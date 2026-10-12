@@ -71,3 +71,39 @@ _Avoid_: Tool list, registry contents
 **Call lifecycle**:
 Everything that happens to one tool call, from the model's request to its recorded outcome: opening the call, running the tool, collecting its audit, escalating and retrying at most once, closing the call. Owned by one module that every loop — and codemode — runs calls through.
 _Avoid_: Tool execution, call wrapper
+
+**Context budget**:
+The most a session may send the model in one request: the model's context window less room for its reply. Bee estimates each request's size before sending it and never sends one it measures as over budget; a run that cannot be brought within it ends as context exhausted.
+_Avoid_: Context limit, token limit, max context
+
+**Preamble**:
+The start of the model's conversation that compaction never touches: the system prompt and the first message (the task, or the REPL's first user message).
+_Avoid_: Prompt, header
+
+**Recent window**:
+The newest turns of the conversation, kept verbatim: at least the last two turns, and as many more as fit in a share of the context budget.
+_Avoid_: Tail, short-term memory
+
+**Middle region**:
+The turns between the preamble and the recent window — the only part of the conversation compaction edits.
+_Avoid_: History, old context
+
+**Elision**:
+Replacing a bulky tool result in the middle region with a one-line stub that keeps what the call was, how it ended, its size and what was denied. The first, cheapest step of compaction.
+_Avoid_: Truncation, pruning
+
+**Summarization**:
+Folding the oldest turns of the middle region into one running summary written by the model, kept right after the preamble and framed as untrusted data, because it is the model's rewrite of tool output. If the summary call fails, those turns are removed instead and a marker says so.
+_Avoid_: Memory, recap
+
+**Compaction**:
+Keeping a long session's conversation within its context budget by elision, then summarization. It edits only what the model is sent; the session record keeps every turn in full. Off unless `[context] compaction = true`.
+_Avoid_: Context management, garbage collection
+
+**Streak**:
+A run of identical tool calls — the same tool with structurally equal arguments, one after another. A long streak earns the model a reminder; a long streak of failing calls ends the run, or the REPL exchange.
+_Avoid_: Loop, repetition
+
+**Finish tool**:
+How an autonomous run ends: the model calls `finish` with an outcome (completed, blocked, abandoned) and a summary. Offered to headless standard-mode runs only; without it, prose ends such a run only after one reminder, as "ended without finish".
+_Avoid_: Done tool, stop tool, submit

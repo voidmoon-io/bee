@@ -213,6 +213,8 @@ fn score_report_counts_techniques() {
         consents: Vec::new(),
         mcp_audit: Default::default(),
         finish_offered: false,
+        compactions: Vec::new(),
+        summary_usage: None,
         http_scope: None,
         scenario_id: "s".into(),
         model_id: "mock/x".into(),

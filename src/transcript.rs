@@ -226,6 +226,48 @@ pub struct EpisodeTranscript {
     /// The run was offered `finish` (025 US3), so ending without it is an incomplete run.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub finish_offered: bool,
+    /// Every compaction of the model's conversation, in order (025 FR-017). The turns themselves are
+    /// recorded in full regardless (FR-011).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compactions: Vec<CompactionEvent>,
+    /// What the summary calls cost, apart from the agent's own (FR-012). Also counted in `usage`
+    /// (FR-013).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_usage: Option<Usage>,
+}
+
+/// Which compaction ran (025 FR-017).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionKind {
+    /// Bulky middle results replaced by stubs.
+    Elided,
+    /// Old turns folded into the running summary.
+    Summarized,
+    /// Old turns removed after the summary call failed.
+    Removed,
+}
+
+/// One compaction (data-model.md "CompactionEvent").
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompactionEvent {
+    /// The model turn it ran before.
+    pub turn: u32,
+    pub kind: CompactionKind,
+    /// Results elided, or turns folded or removed.
+    pub items: u32,
+    /// The first and last conversation turn folded or removed. Absent for elision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turns: Option<(u32, u32)>,
+    /// The request's estimated size before and after, in tokens.
+    pub before_tokens: u32,
+    pub after_tokens: u32,
+    /// The summary call's usage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
+    /// Why the summary failed, for a removal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 impl EpisodeTranscript {
@@ -312,6 +354,8 @@ impl EpisodeTranscript {
             consents: Vec::new(),
             mcp_audit: Default::default(),
             finish_offered: false,
+            compactions: Vec::new(),
+            summary_usage: None,
             http_scope: None,
             scenario_id,
             model_id,

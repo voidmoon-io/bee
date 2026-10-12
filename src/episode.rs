@@ -168,7 +168,7 @@ fn rfc3339(t: OffsetDateTime) -> String {
 
 /// One provider round-trip with bounded exponential backoff on transient errors (FR-017). Never
 /// sleeps past `deadline`. Returns a human-readable detail string on terminal failure.
-async fn complete_with_retry(
+pub(crate) async fn complete_with_retry(
     model: &dyn Model,
     convo: &Conversation,
     schemas: &[crate::provider::ToolSchema],
@@ -262,6 +262,8 @@ pub async fn run_loop(
     let mut audit_trail = Vec::new();
     let mut usage_total: Option<Usage> = None;
     let mut any_tool_called = false;
+    let mut compactions: Vec<crate::transcript::CompactionEvent> = Vec::new();
+    let mut summary_usage: Option<Usage> = None;
 
     // Dynamic capability grants (007-dynamic-grants): the mutable active policy, present only when
     // escalation is configured. Starts at `base`, bounded by `ceiling`.
@@ -317,13 +319,29 @@ pub async fn run_loop(
             turn_notes.push(note);
         }
 
-        let prepared = match ctx.prepare(&convo, &schemas) {
+        // The context budget (025): compact if it is on and called for, and never send a request
+        // over the budget. A summary call's cost is the session's too (FR-013).
+        let prepared = ctx
+            .prepare(&mut convo, &schemas, model, deadline, index)
+            .await;
+        for e in ctx.take_events() {
+            emit(
+                opts,
+                format!("  {}", crate::context::describe(&e, ctx.budget().tokens())),
+            );
+            compactions.push(e);
+        }
+        let prepared = match prepared {
             Ok(p) => p,
             Err(e) => {
                 status = EpisodeStatus::ContextExhausted { detail: e.detail };
                 break;
             }
         };
+        if let Some(u) = prepared.summary_usage {
+            usage_total = Some(usage_total.map_or(u, |acc| acc + u));
+            summary_usage = Some(summary_usage.map_or(u, |acc| acc + u));
+        }
 
         let call_start = Instant::now();
         let turn =
@@ -510,6 +528,10 @@ pub async fn run_loop(
                 is_error: result.is_error,
                 provenance: result.provenance.clone(),
             });
+            ctx.note_call(
+                &tc.id,
+                crate::context::compact::CallNote::from_outcome(tc, &outcome),
+            );
 
             // A terminal tool (`submit_flag`/`give_up`, US3) ends the episode immediately. The loop
             // stays tool-name-agnostic except for the one distinction that decides the status:
@@ -616,6 +638,8 @@ pub async fn run_loop(
         consents: Vec::new(),
         mcp_audit: Default::default(),
         finish_offered,
+        compactions,
+        summary_usage,
         http_scope: None,
         scenario_id: scenario.id.clone(),
         model_id: model.id().to_string(),
@@ -661,6 +685,8 @@ fn infra_error(scenario: &Scenario, model: &dyn Model, detail: String) -> Episod
         consents: Vec::new(),
         mcp_audit: Default::default(),
         finish_offered: false,
+        compactions: Vec::new(),
+        summary_usage: None,
         http_scope: None,
         scenario_id: scenario.id.clone(),
         model_id: model.id().to_string(),

@@ -110,6 +110,50 @@ walk input history, `Tab` focus, `p` panel overlay on narrow terminals, `y` yank
 Mouse reporting is on so the wheel works, which means drag-to-select is the terminal's `Shift`-click
 gesture there.
 
+## Long runs: context budget, stuck detection, finish (025)
+
+**Context budget.** Every model request is measured before it is sent, and one over the budget (the
+model's window less room for the reply) is never sent: the run ends as `context exhausted` instead of
+in a provider error. Each tool result the model sees is capped; the transcript keeps the full output.
+With `compaction = true`, a long session stays inside the budget: past `soft`, bulky old results are
+replaced by one-line stubs that keep what was denied; past `hard`, the oldest turns are folded into a
+summary the model writes, framed as untrusted data (or removed, with a marker, if that call fails).
+The first message and the newest turns are never touched, and the transcript always keeps every turn.
+**Compaction is off by default** until a paired run against a real model shows it costs no
+completions.
+
+```toml
+# ~/.config/bee/config.toml, .bee/config.toml, or a scenario file (top-level, beside [scenario])
+[context]
+window_tokens    = 200000   # default: the model table, else [provider] context_window, else 32000
+compaction       = false
+soft             = 0.60     # share of the budget where elision starts
+hard             = 0.85     # share where summarization starts
+target_gap       = 0.10     # compaction aims for soft − target_gap
+recent_share     = 0.30     # share kept verbatim at the end (never fewer than two turns)
+bulky_tokens     = 300      # a result above this may be elided
+summary_share    = 0.10     # the summary's maximum size
+result_cap_bytes = 24000    # the model sees at most min(result_cap_bytes,
+result_cap_share = 0.10     #   result_cap_share of the budget) of one result
+
+[stuck]
+remind_after        = 5     # identical calls before a reminder
+denied_remind_after = 2     # identical calls denied by policy before a policy reminder
+stop_after          = 8     # identical failing calls before the run (or REPL exchange) ends
+stop                = true  # false: remind, never stop
+```
+
+The window comes from, in order: the scenario's `[context] window_tokens`, the user's and project's,
+`[provider] context_window`, bee's table of known models, then 32,000 (with a one-time notice). The
+layers merge key by key, and a bad combination (for example `soft` above `hard`) refuses to start.
+
+**Finish.** A headless standard-mode run is offered a `finish(outcome, summary)` tool and ends when
+the model calls it; prose alone gets one reminder, then ends the run as `ended without finish`. Set
+`finish = false` under `[scenario]` to keep the older ending, where the first text-only turn completes
+the run. CTF runs and the REPL never see `finish`. `bee run` exits **0** only for
+`finish` with outcome `completed` (or a normal ending where finish was not offered) and **3** for a run
+that ended without completing its task — see `bee run --help`.
+
 ## Security analysis tooling (opt-in)
 
 Tools for using an agent to *review* code, rather than only to write it. All default-off: a build

@@ -76,12 +76,16 @@ jobs:
         # source. `test-support` is test-only and never in a shipping feature set
         # (tests/test_support_absent.rs, run in the default step above). Only the targets that need
         # the feature are run here, with and without `intercept` — the loops compile a different
-        # call path (the proxy-refusal retry) under it.
+        # call path (the proxy-refusal retry) under it. The 019 suites build their session through
+        # the builder's test-support seam (024 T048), so they run here too.
         run: |
           cargo test --features test-support --locked \
-            --test call_characterization --test episode_progress_strings
+            --test call_characterization --test episode_progress_strings --test session_parity
           cargo test --features intercept,test-support --locked \
-            --test call_characterization --test episode_progress_strings
+            --test call_characterization --test episode_progress_strings --test session_parity \
+            --test intercept_tools --test intercept_replay --test intercept_fuzz \
+            --test intercept_rules --test intercept_leads --test intercept_escalation \
+            --test intercept_har --test intercept_tls
 
   enforce-check:
     name: enforce type-check (best-effort)

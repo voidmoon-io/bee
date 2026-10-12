@@ -7,6 +7,13 @@
 //! then the Interceptor, then the scopes — and a `Drop` guard does what it can of that if a session is
 //! dropped without it.
 //!
+//! MCP servers run in the tool scope. Each server's own process is attributed by `tgid`: its kernel
+//! events belong to a call made to that server, and otherwise go to a per-server record
+//! ([`crate::sandbox::Sandbox::take_mcp_audit`]) — never to an unrelated open call (FR-027).
+//! **Processes an MCP server spawns are not attributed** — their events stay in the tool scope's
+//! stream, in whichever call is open — until MCP servers get their own scope (018-subagent-scopes).
+//! The `tgid` is matched in bee's PID namespace; see the sandbox's `McpAttribution` for the limits.
+//!
 //! The loops (`run_loop`, `run_exchange`) still take the session's parts — its registry, sandbox and
 //! escalation — rather than the session itself; routing them through `Session` would rewrite both
 //! loops again for no change in behaviour.
@@ -16,6 +23,8 @@ pub mod spec;
 
 pub use parts::http_advisory;
 pub use spec::{refuse_unsupported, BuildError, Enforcement, EntryPoint, SessionSpec};
+
+use spec::SystemParts;
 
 use std::sync::Arc;
 
@@ -136,7 +145,7 @@ impl Session {
 impl Drop for Session {
     /// A session dropped without [`Session::shutdown`] — an error path — still releases its parts in
     /// the same order, as far as that can be done without awaiting: MCP servers, then the scopes. The
-    /// proxy worker is reaped when its handle drops.
+    /// proxy worker is reaped when its handle drops; the CA bundle is deleted here.
     fn drop(&mut self) {
         if self.closed {
             return;
@@ -148,7 +157,9 @@ impl Drop for Session {
         drop(self.mcp.take());
         self.stage("interceptor");
         #[cfg(feature = "intercept")]
-        drop(self.http.take());
+        if let Some(h) = self.http.take() {
+            h.remove_ca_bundle();
+        }
         self.stage("scopes");
         let _ = self.sandbox.teardown();
     }
@@ -157,7 +168,36 @@ impl Drop for Session {
 /// Build a session from `spec` (contracts/session-builder.md). `report` receives the lines an operator
 /// should see while it is built — skill warnings, grant outcomes, the advisory banner — in the
 /// wording the headless progress stream has always used. Every refusal happens before a scope exists.
-pub async fn build(mut spec: SessionSpec, report: &dyn Fn(&str)) -> Result<Session, BuildError> {
+pub async fn build(spec: SessionSpec, report: &dyn Fn(&str)) -> Result<Session, BuildError> {
+    build_from(spec, report, SystemParts::default()).await
+}
+
+/// [`build`], with the proxy worker run from `worker_exe` — a test binary is not `bee` — and `hosts`
+/// resolved before the system resolver, for `[policy.http]` and the worker alike (024 T048). Host
+/// enforcement only: a kernel session's scopes are compiled against the real system.
+#[cfg(feature = "test-support")]
+pub async fn build_with(
+    spec: SessionSpec,
+    report: &dyn Fn(&str),
+    worker_exe: std::path::PathBuf,
+    hosts: Vec<(String, std::net::IpAddr)>,
+) -> Result<Session, BuildError> {
+    build_from(
+        spec,
+        report,
+        SystemParts {
+            worker_exe: Some(worker_exe),
+            hosts,
+        },
+    )
+    .await
+}
+
+async fn build_from(
+    mut spec: SessionSpec,
+    report: &dyn Fn(&str),
+    #[cfg_attr(not(feature = "intercept"), allow(unused_variables))] system: SystemParts,
+) -> Result<Session, BuildError> {
     // A sandbox the entry point built is torn down if the session is refused, so its scope does not
     // outlive the refusal.
     let prebuilt = spec.prebuilt_sandbox.take();
@@ -171,6 +211,11 @@ pub async fn build(mut spec: SessionSpec, report: &dyn Fn(&str)) -> Result<Sessi
     // 1. Refuse what this entry point cannot provide.
     if let Err(e) = refuse_unsupported(&spec) {
         return refuse(e);
+    }
+    if spec.enforcement == Enforcement::Kernel && !system.is_default() {
+        return refuse(BuildError(
+            "a test's worker binary and host names apply to host enforcement only".into(),
+        ));
     }
 
     // 2. Skills, the same discovery for every entry point. A malformed skill warns; it never aborts.
@@ -244,7 +289,9 @@ pub async fn build(mut spec: SessionSpec, report: &dyn Fn(&str)) -> Result<Sessi
         // A concurrent batch's scope, already created on its shared engine. `[policy.http]` was
         // refused above, so there is no proxy to prepare.
         Some(sandbox) => (sandbox, None),
-        None => parts::build_sandbox(&spec, &grants.policy, &scope_id).map_err(BuildError)?,
+        None => {
+            parts::build_sandbox(&spec, &grants.policy, &scope_id, &system).map_err(BuildError)?
+        }
     };
 
     // 8. The proxy worker, in its sidecar scope or advisory, and the HTTP tools' handle on it.
@@ -264,6 +311,7 @@ pub async fn build(mut spec: SessionSpec, report: &dyn Fn(&str)) -> Result<Sessi
                 &session_id,
                 &spec.workdir,
                 enforcement,
+                crate::intercept::session::worker_resolver(system.hosts.clone()),
             )
             .await
             {
@@ -288,6 +336,7 @@ pub async fn build(mut spec: SessionSpec, report: &dyn Fn(&str)) -> Result<Sessi
     let mcp = if spec.mcp.enabled {
         let bridge = Arc::new(crate::mcp::McpBridge::connect(spec.mcp.clone(), &sandbox).await);
         bridge.register_into(&mut registry);
+        sandbox.set_mcp_servers(bridge.server_tgids());
         Some(bridge)
     } else {
         None

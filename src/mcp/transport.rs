@@ -29,11 +29,12 @@ pub fn mcp_call(name: &str) -> crate::sandbox::CallContext {
 /// Spawn a stdio MCP server as a sandboxed child and wrap it as an rmcp child-process transport.
 ///
 /// `stderr` is discarded (stdout is the JSON-RPC framing channel); the child is killed on drop.
-/// Returns the transport ready to hand to `().serve(...)`.
+/// Returns the transport ready to hand to `().serve(...)`, and the child's `tgid`: the server's own
+/// kernel events are attributed to it by that (024 FR-027, research R8).
 pub fn spawn_stdio(
     sandbox: &Sandbox,
     config: &McpServerConfig,
-) -> Result<TokioChildProcess, String> {
+) -> Result<(TokioChildProcess, Option<u32>), String> {
     let command = config
         .command
         .as_deref()
@@ -63,6 +64,9 @@ pub fn spawn_stdio(
     TokioChildProcess::builder(cmd)
         .stderr(Stdio::null())
         .spawn()
-        .map(|(proc, _stderr)| proc)
+        .map(|(proc, _stderr)| {
+            let tgid = proc.id();
+            (proc, tgid)
+        })
         .map_err(|e| format!("mcp server '{}': spawn {command}: {e}", config.name))
 }

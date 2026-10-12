@@ -164,7 +164,7 @@ async fn an_egress_host_is_refused_with_egress_only() {
             ),
             &[("app.test", "127.0.0.9")],
         ),
-        &[],
+        &[("app.test", "127.0.0.9")],
         TOOLS,
     )
     .await;

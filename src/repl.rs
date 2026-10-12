@@ -966,6 +966,7 @@ fn build_transcript(
 ) -> EpisodeTranscript {
     EpisodeTranscript {
         consents: Vec::new(),
+        mcp_audit: Default::default(),
         http_scope: None,
         scenario_id: "repl".to_string(),
         model_id: model_id.to_string(),
@@ -1455,6 +1456,8 @@ pub async fn run_repl(
                         usage_total,
                     );
                     transcript.consents = operator.map(|op| op.log()).unwrap_or_default();
+                    // Each MCP server's own kernel events so far (024 FR-027).
+                    transcript.mcp_audit = sandbox.mcp_audit().clone();
                     match std::fs::write(&path, transcript.to_json()) {
                         Ok(()) => output.info(&format!("saved transcript to {path}")),
                         Err(e) => output.error(&format!("could not write {path}: {e}")),
@@ -1577,6 +1580,7 @@ pub async fn run_repl(
         usage_total,
     );
     transcript.consents = operator.map(|op| op.log()).unwrap_or_default();
+    transcript.mcp_audit = sandbox.finish_mcp_audit().await;
     ReplSession {
         conversation,
         exchanges,

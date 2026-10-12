@@ -105,6 +105,10 @@ impl Tool for McpToolProxy {
         self.name
     }
 
+    fn mcp_server(&self) -> Option<&str> {
+        Some(&self.server)
+    }
+
     fn schema(&self) -> ToolSchema {
         self.schema.clone()
     }

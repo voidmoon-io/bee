@@ -15,7 +15,7 @@ use bee::sandbox::Sandbox;
 use bee::tools::{ToolDeps, ToolRegistry, UnknownTool};
 use bee_core::{Access, Mode, Policy};
 
-#[cfg(feature = "intercept")]
+#[cfg(all(feature = "intercept", feature = "test-support"))]
 #[path = "support/harness.rs"]
 mod harness;
 
@@ -213,6 +213,7 @@ async fn scan_holds_the_session_grants() {
 #[cfg(feature = "intercept")]
 mod http {
     use super::*;
+    #[cfg(feature = "test-support")]
     use crate::harness;
 
     #[tokio::test]
@@ -233,6 +234,8 @@ mod http {
         );
     }
 
+    // The harness builds its session with `session::build_with` (`test-support`).
+    #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn a_granted_http_tool_reaches_the_session_interceptor() {
         let mut s = harness::Session::start(
@@ -241,9 +244,10 @@ mod http {
             &["bash"],
         )
         .await;
-        assert!(!s.registry.contains("http_scope"));
-        grant(&mut s.registry, &["http_scope"]).await;
+        assert!(!s.session.registry.contains("http_scope"));
+        grant(&mut s.session.registry, &["http_scope"]).await;
         let entry = s
+            .session
             .registry
             .surface()
             .into_iter()

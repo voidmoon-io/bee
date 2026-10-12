@@ -731,9 +731,11 @@ unchanged.
   argument parsing into the op spec + one op call + `respond`. Remove the imports between tools.
 - [X] T071 [US6] Delete `CallOrigin::Fuzz` (`src/sandbox.rs:69-70`), its arm in `src/intercept/creds.rs:146`,
   and the "or `fuzz:<run>`" text in `src/intercept/control.rs:31` (FR-038).
-- [ ] T072 [US6] Run the gate plus `cargo test --features intercept --test intercept_tools --test
+- [X] T072 [US6] Run the gate plus `cargo test --features intercept,test-support --test intercept_tools --test
   intercept_replay --test intercept_fuzz --test intercept_rules --test intercept_leads --test
   fail_closed_tools --test tool_output_framing`, all unchanged. Open PR 6.
+  (`test-support` since PR 5c: the intercept suites need it. PR 6 landed as #32; its review fixes,
+  #34, merged into #32's branch after #32 was in, so they land again as a PR off main.)
 
 **As built — PR 6:**
 

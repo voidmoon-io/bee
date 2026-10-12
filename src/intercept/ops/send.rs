@@ -86,7 +86,7 @@ pub async fn send(
         match icpt.with_store(|s| s.exchange_exists(b)) {
             Ok(true) => {}
             Ok(false) => return Err(OpError::Invalid(format!("no baseline exchange `{b}`"))),
-            Err(e) => return Err(OpError::Invalid(e.to_string())),
+            Err(e) => return Err(OpError::Failed(e.to_string())),
         }
     }
     let scope = ScopeChecker::new(icpt.http_scope());
@@ -268,12 +268,9 @@ fn redirect_target(
             .eq_ignore_ascii_case("location")
             .then(|| v.trim().to_string())
     })?;
-    let url = if loc.contains("://") {
-        loc
-    } else if loc.starts_with('/') {
-        format!("{}://{}:{}{}", from.scheme, from.host, from.port, loc)
-    } else {
-        return Some(Err(format!("relative Location `{loc}` is not followed")));
+    let url = match resolve_location(&loc, from) {
+        Ok(u) => u,
+        Err(e) => return Some(Err(e)),
     };
     // 307/308 would repeat the body; bee follows them as GET only when the original had none, so
     // simplest and safest: every hop is a GET. The hop list says so.
@@ -283,6 +280,30 @@ fn redirect_target(
         headers: Vec::new(),
         body: Vec::new(),
     }))
+}
+
+/// A `Location` value as an absolute URL, resolved against the hop it came from. Absolute and
+/// scheme-relative (`//host/…`) URLs and absolute paths are followed; a relative path is not.
+fn resolve_location(loc: &str, from: &RawTarget) -> Result<String, String> {
+    // A scheme is letters, digits, `+`, `-` and `.` before the first `://` — so a path whose query
+    // carries a URL (`/login?next=http://…`) is not mistaken for one.
+    let has_scheme = loc.split_once("://").is_some_and(|(s, _)| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    });
+    if has_scheme {
+        Ok(loc.to_string())
+    } else if loc.starts_with("//") {
+        Ok(format!("{}:{loc}", from.scheme))
+    } else if loc.starts_with('/') {
+        Ok(format!(
+            "{}://{}:{}{loc}",
+            from.scheme, from.host, from.port
+        ))
+    } else {
+        Err(format!("relative Location `{loc}` is not followed"))
+    }
 }
 
 /// The result for the last response: its preview, and the diff against `baseline` (no noise probe —
@@ -405,6 +426,24 @@ mod tests {
     fn header_injection_is_refused_in_structured_form() {
         assert!(build_request(req("GET", "http://a.test/", &[("X", "a\r\nY: b")], "")).is_err());
         assert!(build_request(req("GET", "ftp://a.test/", &[], "")).is_err());
+    }
+
+    #[test]
+    fn locations_resolve_against_the_hop() {
+        let from = RawTarget {
+            scheme: "https".into(),
+            host: "app.test".into(),
+            port: 8443,
+        };
+        let r = |l: &str| resolve_location(l, &from);
+        assert_eq!(r("http://b.test/x").unwrap(), "http://b.test/x");
+        assert_eq!(
+            r("/login?next=http://app.test/home").unwrap(),
+            "https://app.test:8443/login?next=http://app.test/home"
+        );
+        assert_eq!(r("//b.test/x").unwrap(), "https://b.test/x");
+        assert!(r("next/page").is_err());
+        assert!(r("page?u=http://x").is_err());
     }
 
     #[test]

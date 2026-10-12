@@ -85,7 +85,7 @@ jobs:
             --test call_characterization --test episode_progress_strings --test session_parity \
             --test intercept_tools --test intercept_replay --test intercept_fuzz \
             --test intercept_rules --test intercept_leads --test intercept_escalation \
-            --test intercept_har --test intercept_tls
+            --test intercept_har --test intercept_tls --test intercept_ops
 
   enforce-check:
     name: enforce type-check (best-effort)

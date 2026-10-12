@@ -447,6 +447,11 @@ name = "intercept_tls"
 path = "tests/intercept_tls.rs"
 required-features = ["intercept", "test-support"]
 
+[[test]]
+name = "intercept_ops"
+path = "tests/intercept_ops.rs"
+required-features = ["intercept", "test-support"]
+
 # 019 SC-007. Gated in the VM matrix (`http-latency`), compiled-only on host CI.
 [[bench]]
 name = "intercept_latency"

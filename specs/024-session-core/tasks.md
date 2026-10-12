@@ -790,9 +790,10 @@ unchanged.
 - **T075**: R4 now has a status note naming `run_call` and `surface()`. The file is still untracked
   on `023-codemode`.
 - **T076**: all five combinations pass `cargo +1.99.0 check --all-targets` with no warnings.
-- **T077**: full matrix 49/49 PASS on kernel 6.8.0-142, including `lease-expiry`. `lease-release`
-  still reports `PENDING`, because no release hook can be configured from the binary. **SC-010's
-  release case has therefore not run on the VM.** It is tracked as a follow-up and not claimed here.
+- **T077**: full matrix 50/50 PASS on kernel 6.8.0-142, covering both T028e lease cases (SC-010).
+  `lease-expiry` passes. `lease-release` now runs: `VmReleaseHook` releases `g0` at the top of turn 1,
+  and the kernel denies the same write again. That hook exists only in `vm-test` builds and is set by
+  `BEE_VM_RELEASE_LEASE=<turn>:<grant>`, so a release build cannot release a lease from outside.
 
 ---
 

@@ -386,13 +386,18 @@ fn escalation(
         }
     }
     let widening = spec.ceiling.is_some();
-    let hooks: Vec<Box<dyn LoopHook>> = vec![
+    #[cfg_attr(not(feature = "vm-test"), allow(unused_mut))]
+    let mut hooks: Vec<Box<dyn LoopHook>> = vec![
         Box::new(DenialEscalationHook { enabled: widening }),
         // 019 US3: a proxy refusal proposes exactly the refused host:port, within the ceiling's
         // `[policy.http]`.
         Box::new(ProxyRefusalHook { enabled: widening }),
         Box::new(SkillEscalationHook::new(skills.clone())),
     ];
+    #[cfg(feature = "vm-test")]
+    if let Some(h) = crate::grants::escalate::VmReleaseHook::from_env() {
+        hooks.push(Box::new(h));
+    }
     LoopEscalation {
         base: floor.clone(),
         ceiling,

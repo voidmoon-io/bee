@@ -147,6 +147,7 @@ impl RunArgs {
         Ok(Scenario {
             lease_turns: None,
             context: Default::default(),
+            stuck: Default::default(),
             id: "adhoc".to_string(),
             policy_path: cfg
                 .policy_path
@@ -271,6 +272,7 @@ async fn run(args: RunArgs) -> ExitCode {
                 provider_window: cfg.provider.context_window,
                 max_tokens: cfg.provider.max_tokens,
             },
+            stuck: cfg.stuck,
         },
     )
     .await;

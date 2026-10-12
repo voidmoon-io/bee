@@ -385,3 +385,43 @@ fn an_unknown_context_key_is_refused() {
     let path = f.write("user.toml", "[context]\nwindow = 1000\n");
     assert!(load(&path, Origin::User).is_err());
 }
+
+// --- [stuck] (025 US2) --------------------------------------------------------------------------
+
+#[test]
+fn stuck_merges_key_by_key_across_layers() {
+    let f = Fixture::new();
+    f.provider("p.toml");
+    let user = f.layer(
+        "user.toml",
+        Origin::User,
+        "[provider]\npath = \"p.toml\"\n[stuck]\nstop_after = 12\nremind_after = 6\n",
+    );
+    let project = f.layer(
+        "project.toml",
+        Origin::Project,
+        "[stuck]\nstop_after = 10\n",
+    );
+    let cfg = resolve_from_layers(&[user, project], &Flags::default()).unwrap();
+    assert_eq!(cfg.stuck.stop_after, Some(10), "the project wins");
+    assert_eq!(
+        cfg.stuck.remind_after,
+        Some(6),
+        "the user's other keys survive"
+    );
+}
+
+#[test]
+fn stuck_defaults_to_unset() {
+    let f = Fixture::new();
+    let provider = f.provider("p.toml");
+    let cfg = resolve_from_layers(&[], &flags_with_provider(&provider)).unwrap();
+    assert_eq!(cfg.stuck, bee::stuck::StuckConfig::default());
+}
+
+#[test]
+fn an_unknown_stuck_key_is_refused() {
+    let f = Fixture::new();
+    let path = f.write("user.toml", "[stuck]\nstop_at = 3\n");
+    assert!(load(&path, Origin::User).is_err());
+}

@@ -42,6 +42,8 @@ pub struct LoopOptions {
     /// The context settings below the scenario: user and project `[context]`, and the provider's
     /// window and reply limit (025). The scenario's own `[context]` is merged over them.
     pub context: crate::context::ContextInputs,
+    /// User and project `[stuck]` (025 US2). The scenario's own `[stuck]` is merged over it.
+    pub stuck: crate::stuck::StuckConfig,
 }
 
 impl Default for LoopOptions {
@@ -53,6 +55,7 @@ impl Default for LoopOptions {
             tool_refresh: None,
             escalation: None,
             context: crate::context::ContextInputs::default(),
+            stuck: crate::stuck::StuckConfig::default(),
         }
     }
 }
@@ -115,6 +118,7 @@ fn status_label(s: &EpisodeStatus) -> String {
         EpisodeStatus::Captured { turn } => format!("captured (turn {turn})"),
         EpisodeStatus::NotCaptured => "not_captured".into(),
         EpisodeStatus::ContextExhausted { detail } => format!("context exhausted ({detail})"),
+        EpisodeStatus::Stuck { .. } => "stuck".into(),
     }
 }
 
@@ -131,7 +135,7 @@ pub fn exit_code(status: &EpisodeStatus) -> u8 {
     match status {
         EpisodeStatus::InfraError { .. } => EXIT_SOFTWARE,
         EpisodeStatus::ApiError { .. } => EXIT_UNAVAILABLE,
-        EpisodeStatus::ContextExhausted { .. } => EXIT_INCOMPLETE,
+        EpisodeStatus::ContextExhausted { .. } | EpisodeStatus::Stuck { .. } => EXIT_INCOMPLETE,
         EpisodeStatus::Completed
         | EpisodeStatus::Timeout
         | EpisodeStatus::NoToolCalls
@@ -225,6 +229,11 @@ pub async fn run_loop(
             ctx
         }
         Err(e) => return infra_error(scenario, model, format!("invalid [context]: {e}")),
+    };
+    // Stuck detection (025 US2): every call is observed, in order, across turns.
+    let mut stuck = match opts.stuck.merge(scenario.stuck).resolve() {
+        Ok(cfg) => crate::stuck::StreakTracker::new(cfg),
+        Err(e) => return infra_error(scenario, model, format!("invalid [stuck]: {e}")),
     };
     // bee's notes for the next model call (025 FR-028), queued by stuck detection and the finish
     // reminder and recorded on the turn they precede.
@@ -505,6 +514,37 @@ pub async fn run_loop(
                 });
                 break 'outer;
             }
+
+            match stuck.observe(tc, &outcome) {
+                crate::stuck::StuckSignal::None => {}
+                crate::stuck::StuckSignal::Remind(r) => pending.push(r.into_note()),
+                crate::stuck::StuckSignal::Stop {
+                    tool,
+                    arguments,
+                    repeats,
+                } => {
+                    emit(
+                        opts,
+                        format!(
+                            "  stuck: {tool} repeated {repeats} times with the same failing result \
+                             — ending run"
+                        ),
+                    );
+                    status = EpisodeStatus::Stuck {
+                        tool,
+                        arguments,
+                        repeats,
+                    };
+                    turns.push(TranscriptTurn {
+                        notes: std::mem::take(&mut turn_notes),
+                        index,
+                        assistant_text,
+                        calls: recorded,
+                        duration_ms: ms_since(turn_start),
+                    });
+                    break 'outer;
+                }
+            }
         }
 
         turns.push(TranscriptTurn {
@@ -674,6 +714,8 @@ pub struct EpisodeOptions {
     /// User and project `[context]`, and the provider file's window and reply limit (025). The
     /// scenario's own `[context]` is merged over them.
     pub context: crate::context::ContextInputs,
+    /// User and project `[stuck]` (025 US2). The scenario's own `[stuck]` is merged over it.
+    pub stuck: crate::stuck::StuckConfig,
     /// What the episode runs under. `None`: the kernel whenever the build can enforce, else the host.
     /// `bee run --host` asks for `Host` on any build.
     pub enforcement: Option<crate::session::Enforcement>,
@@ -725,6 +767,7 @@ pub async fn run_episode_with(
             format!("episode:{}:{}", scenario.id, std::process::id()),
         ),
         context: eopts.context,
+        stuck: eopts.stuck,
         ..LoopOptions::default()
     };
 
@@ -863,6 +906,7 @@ mod mcp_cgroup_spike {
         let scn = Scenario {
             lease_turns: None,
             context: Default::default(),
+            stuck: Default::default(),
             id: "mcp-spike".into(),
             policy_path: policy,
             system_prompt: "spike".into(),

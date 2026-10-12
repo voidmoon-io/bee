@@ -259,7 +259,7 @@ at 8 identical failing calls; in the REPL, stop the exchange, not the session.
 
 ### Tests first
 
-- [ ] T020 [P] [US2] Create `tests/stuck_detection.rs` with the ten tests in quickstart.md Phase C.
+- [X] T020 [P] [US2] Create `tests/stuck_detection.rs` with the ten tests in quickstart.md Phase C.
   - Add `[[test]] name = "stuck_detection" required-features = ["test-support"]` to `Cargo.toml` in the
     same change, under the 024 R1 comment block.
   - Use `tests/support/scripted.rs` (`ScriptedTool`, `Attempt`, `ev`, `refusal`) and
@@ -267,7 +267,7 @@ at 8 identical failing calls; in the REPL, stop the exchange, not the session.
   - Gate `proxy_refused_repeat_gets_policy_reminder` on `#[cfg(feature = "intercept")]`.
   - Assert reminder text by its stable prefix (`[bee] You have called`, `[bee] … was denied`) and by
     `TranscriptTurn.notes[..].kind`.
-- [ ] T021 [P] [US2] Add unit tests in `src/stuck.rs` for the state machine in data-model.md:
+- [X] T021 [P] [US2] Add unit tests in `src/stuck.rs` for the state machine in data-model.md:
   - the key is order-independent;
   - `failing` resets on success;
   - `all_denied` clears on a non-denied call;
@@ -277,7 +277,7 @@ at 8 identical failing calls; in the REPL, stop the exchange, not the session.
 
 ### Implementation
 
-- [ ] T022 [US2] Implement `src/stuck.rs`:
+- [X] T022 [US2] Implement `src/stuck.rs`:
   - `StuckConfig` (serde, `deny_unknown_fields`, `Option` fields, `merge`, `resolve`);
   - `StreakTracker`, `StuckSignal`, `Reminder { kind: NoteKind, text: String, call: ToolCall }`;
   - `CallKey(name, serde_json::to_string(&arguments))`;
@@ -287,12 +287,12 @@ at 8 identical failing calls; in the REPL, stop the exchange, not the session.
   - reminder texts from contracts/stuck.md, with `finish_offered: bool` selecting the policy text's
     ending;
   - add `pub mod stuck;` to `src/lib.rs`.
-- [ ] T023 [US2] Add the stuck record type to `src/transcript.rs` (`HarnessNote` and
+- [X] T023 [US2] Add the stuck record type to `src/transcript.rs` (`HarnessNote` and
   `TranscriptTurn.notes` already exist from T015a):
   - `EpisodeStatus::Stuck { tool: String, arguments: serde_json::Value, repeats: u32 }`, with
     `status_label` giving `"stuck"`, batch and grid mapping it to fail, and `app/run.rs` mapping it to
     exit 3.
-- [ ] T024 [US2] Wire the episode loop:
+- [X] T024 [US2] Wire the episode loop:
   - create a `StreakTracker` from `scenario.stuck`;
   - after each `run_call` outcome is recorded, call `observe`:
     - `Remind` → push to `pending`;
@@ -301,7 +301,7 @@ at 8 identical failing calls; in the REPL, stop the exchange, not the session.
       `Stuck { .. }`, and break `'outer` after pushing the turn.
   - Add `stuck: StuckConfig` with `#[serde(default)]` to `Scenario` and its `[stuck]` table fold, as in
     T014.
-- [ ] T025 [US2] Wire the REPL:
+- [X] T025 [US2] Wire the REPL:
   - add `stuck: StuckConfig` to `ReplConfig`;
   - keep the tracker beside the `ContextManager` from T017;
   - `Remind` → push to the `pending` list from T015a;
@@ -309,12 +309,40 @@ at 8 identical failing calls; in the REPL, stop the exchange, not the session.
     return `ExchangeOutcome::Stuck { tool, repeats }`. Add the variant and handle it in every
     `ExchangeOutcome` match.
   - `/clear` calls `tracker.reset()`.
-- [ ] T026 [US2] Add the `[stuck]` table to app config (as T018) and add tests in
+- [X] T026 [US2] Add the `[stuck]` table to app config (as T018) and add tests in
   `src/app/config/tests.rs`. Run the gate. Pin the two new progress lines in
   `tests/episode_progress_strings.rs` as new tests (`the_stuck_line`, `the_reminder_line`), driven by a
   scripted failing tool.
 
 **Checkpoint**: PR C. US2 works on its own on both feature sets.
+
+**As built (PR C, 2026-10-12, on main after 024)**:
+- **Where calls are observed.** Each call is observed right after its `run_call` outcome is
+  recorded, in both loops. In the episode, the timed-out and terminal (`submit_flag`/`give_up`)
+  paths end the run first, so those calls are not observed.
+- **The REPL's config is resolved.** `ReplConfig.stuck` is a `ResolvedStuck`, not a `StuckConfig`.
+  `bee repl` resolves `[stuck]` at start-up and refuses a bad table (`EX_USAGE`), as it already does
+  for `[context]`. That way `run_exchange` never meets an invalid config partway through a session.
+  The tracker sits in `ReplState.stuck`, is built on first use, and is reset by `ReplState::reset`,
+  which is `/clear`'s path in both front-ends.
+- **A REPL stop partway through a turn.** The calls after the stopping one never run. Each still gets
+  a `[bee] not run: …` tool result (`Provenance::Harness`), so the conversation stays well formed for
+  the session's next request. The episode needs no such result, because it ends.
+- **Config layering.** The episode resolves `LoopOptions.stuck` (user and project) merged with
+  `scenario.stuck`. A bad table ends the episode as `infra_error ("invalid [stuck]: …")`. `[stuck]` is
+  not operator-only: contracts/config.md places it in project config, and it can only end a run
+  sooner or add a note.
+- **`{denial}` text.** A kernel denial reads `"{op} on {target}"`. A proxy refusal reads
+  `"a request to {host}:{port} outside the target scope"`.
+- **The 024 pins.** `episode_progress_strings`' all-lines fixture and `hooks_leases`' episode helper
+  call `scripted {}` repeatedly by construction, so they now set a `[stuck]` that never fires. No
+  expected string changed. The new lines are pinned in `the_reminder_line` and `the_stuck_line`.
+- **`granted_retry_is_not_a_denied_repeat`** denies `/tmp/x`, not `/etc/shadow`, because a protected
+  region is never grantable. It uses a one-turn lease so the same call is denied, granted and retried
+  on every turn.
+- **Gate.** All three clippy feature sets pass on Rust 1.96. On 1.99, the intercept sets also report
+  three `result_large_err` errors in `src/tools/http.rs` and `src/tools/http_fuzz.rs`. Those errors
+  are already on main and not part of this PR.
 
 ---
 

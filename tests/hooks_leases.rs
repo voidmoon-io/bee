@@ -144,6 +144,14 @@ async fn episode(
         })),
         escalation: Some(esc),
         tool_refresh: refresh,
+        // These scripts repeat one call by construction; a stuck reminder (025) would shift the
+        // positions the assertions read.
+        stuck: bee::stuck::StuckConfig {
+            denied_remind_after: Some(100),
+            remind_after: Some(100),
+            stop_after: Some(101),
+            stop: Some(false),
+        },
         ..LoopOptions::default()
     };
     let t = run_loop(

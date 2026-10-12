@@ -75,11 +75,18 @@ pub struct FileConfig {
     /// and nothing here widens what the agent may do.
     #[serde(default)]
     pub context: Option<ContextSection>,
+    /// Stuck detection (025 US2). Not operator-only, for the reason `[context]` is not: it can only
+    /// end a run sooner or remind the model, never widen what it may do.
+    #[serde(default)]
+    pub stuck: Option<StuckSection>,
 }
 
 /// The `[context]` table (025 contracts/config.md). The shape lives in the library, which also reads
 /// it from a scenario file; every key is optional, and layers merge key by key.
 pub use bee::context::ContextConfig as ContextSection;
+
+/// The `[stuck]` table (025 contracts/config.md), shared with scenario files like `[context]`.
+pub use bee::stuck::StuckConfig as StuckSection;
 
 /// The `[security]` table — where findings are recorded and how a granted scanner is configured.
 ///

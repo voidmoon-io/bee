@@ -404,6 +404,12 @@ name = "episode_progress_strings"
 path = "tests/episode_progress_strings.rs"
 required-features = ["test-support"]
 
+# 025 US2: stuck detection through both loops, on the 024 R1 scripted inputs.
+[[test]]
+name = "stuck_detection"
+path = "tests/stuck_detection.rs"
+required-features = ["test-support"]
+
 # 024 T048: the 019 intercept suites run over a session built by `session::build_with`, whose
 # test-only proxy-worker binary and host names need `test-support`.
 

@@ -367,6 +367,9 @@ pub struct EnforcedSandbox {
     proxy_port: Option<u16>,
     /// The session CA bundle the tool scope must be able to read (019 US4), re-granted on reload.
     ca_bundle: Option<std::path::PathBuf>,
+    /// Set when a reload failed and could not be rolled back: the scope's rules are then a mixture
+    /// that may be wider than any policy anyone approved, so no further tool child may start in it.
+    poisoned: Option<String>,
 }
 
 /// A tool child confined to a live bee scope whose audit events arrive via a demux subscription
@@ -444,18 +447,24 @@ impl EnforcedSandbox {
             self.scope.cgroup_id,
             self.sidecar.as_ref().map(|s| s.scope.cgroup_id),
         )?;
-        let side = self.sidecar.as_mut().expect("target implies a sidecar");
-        let new_keys = self
-            .engine
-            .reload_scope(target, &plan, &side.scope.net_keys)
-            .map_err(|e| format!("sidecar reload scope: {e}"))?;
-        side.scope.net_keys = new_keys;
-        side.plan = plan;
+        if let Some(why) = &self.poisoned {
+            return Err(format!("sidecar reload scope: already in an unknown state: {why}"));
+        }
+        if let Err(e) = self.engine.reload_scope(target, &plan) {
+            if let bee_userspace::ReloadError::Inconsistent(_) = e {
+                // The proxy scope is every tool child's egress path: unknown rules there are as
+                // unsafe as unknown rules on the tool scope itself.
+                self.poisoned = Some(format!("sidecar: {e}"));
+            }
+            return Err(format!("sidecar reload scope: {e}"));
+        }
+        self.sidecar.as_mut().expect("target implies a sidecar").plan = plan;
         Ok(())
     }
 
-    /// Compile `policy` and hand the fresh plan to `Engine::reload_scope`, updating the scope's
-    /// tracked `NET_ALLOW` keys. On any error the prior enforced maps are left in place.
+    /// Compile `policy` and hand the fresh plan to `Engine::reload_scope`. On a refused reload the
+    /// prior enforced maps are left in place; on one that could not be rolled back the sandbox is
+    /// poisoned and refuses every further tool child.
     fn reload(&mut self, policy: &bee_core::Policy) -> Result<(), String> {
         use bee_userspace::{EnforcementPlan, ScopeMode, SystemResolver};
         let resolver = SystemResolver::current();
@@ -470,12 +479,18 @@ impl EnforcedSandbox {
         }
         let plan = EnforcementPlan::prepare(&compiled, ScopeMode::Enforce)
             .map_err(|e| format!("reload plan: {e}"))?;
-        let new_keys = self
-            .engine
-            .reload_scope(self.scope.cgroup_id, &plan, &self.scope.net_keys)
-            .map_err(|e| format!("reload scope: {e}"))?;
-        self.scope.net_keys = new_keys;
-        Ok(())
+        if let Some(why) = &self.poisoned {
+            return Err(format!("reload scope: already in an unknown state: {why}"));
+        }
+        match self.engine.reload_scope(self.scope.cgroup_id, &plan) {
+            Ok(()) => Ok(()),
+            Err(e @ bee_userspace::ReloadError::Refused(_)) => Err(format!("reload scope: {e}")),
+            Err(e @ bee_userspace::ReloadError::Inconsistent(_)) => {
+                let msg = e.to_string();
+                self.poisoned = Some(msg.clone());
+                Err(format!("reload scope: {msg}"))
+            }
+        }
     }
 }
 
@@ -640,6 +655,7 @@ impl Sandbox {
             tool_audit: Vec::new(),
             proxy_port: None,
             ca_bundle: None,
+            poisoned: None,
         }))
     }
 
@@ -842,6 +858,11 @@ impl Sandbox {
             }
             #[cfg(feature = "enforce")]
             Sandbox::Enforced(e) => {
+                if let Some(why) = &e.poisoned {
+                    return Err(SpawnError::Io(io::Error::other(format!(
+                        "scope is in an unknown state after a failed reload; refusing to run: {why}"
+                    ))));
+                }
                 let join = e
                     .scope
                     .join_closure()

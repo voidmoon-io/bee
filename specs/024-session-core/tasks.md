@@ -765,18 +765,34 @@ unchanged.
 
 ## Phase 9: Polish and cross-cutting
 
-- [ ] T073 [P] Measure SC-009: compare the line counts of `src/episode.rs`, `src/repl.rs`,
+- [X] T073 [P] Measure SC-009: compare the line counts of `src/episode.rs`, `src/repl.rs`,
   `src/app/repl.rs` and `src/concurrent.rs` against `430640c`, and record the result in the final PR
   description.
-- [ ] T074 [P] Confirm `CONTEXT.md`'s Operator, Session builder, Tool surface and Call lifecycle entries
+- [X] T074 [P] Confirm `CONTEXT.md`'s Operator, Session builder, Tool surface and Call lifecycle entries
   match what shipped. Adjust the wording if names changed during implementation.
-- [ ] T075 [P] Update `specs/023-codemode/research.md` (on branch `023-codemode`) R4 to reference
+- [X] T075 [P] Update `specs/023-codemode/research.md` (on branch `023-codemode`) R4 to reference
   `src/call.rs::run_call` and `ToolRegistry::surface()` as the codemode seams.
-- [ ] T076 Run the full feature-combination build: `cargo check` with `--no-default-features`, `mcp`,
+- [X] T076 Run the full feature-combination build: `cargo check` with `--no-default-features`, `mcp`,
   `scanners`, `vm-test`, and `intercept,enforce,concurrent`. Fix any cfg gaps.
-- [ ] T077 Run the full `test/vm/remote-matrix.sh` on `ac-matrix-vm`, including the T028e lease cases, as
+- [X] T077 Run the full `test/vm/remote-matrix.sh` on `ac-matrix-vm`, including the T028e lease cases, as
   the final enforcement check (Constitution III, SC-010). This task is not complete until it has run;
   if the VM is unavailable, the feature stays open.
+
+**As built (Phase 9, 2026-10-12, main `b67eaae`)**:
+- **T073 / SC-009**: partly met. The builder half holds: the episode, REPL, `bee run` and concurrent
+  paths all call `bee::session::build`. `app::session::build` is only CLI process setup. The shrink
+  half falls short. Counting non-test lines (code above `#[cfg(test)]`) against `430640c`, the call
+  lifecycle (#28) removed 106 from `episode.rs` and 104 from `repl.rs`, short of the ~150 SC-009
+  expects. Net figures: `episode.rs` 1265 → 951 (the builder took 349 out). `repl.rs` 1409 → 1592,
+  where features added more than the refactor removed: 025's context budget added 116 and the inline
+  consent reader added 128. `app/repl.rs` went 549 → 482 and `concurrent.rs` 263 → 293.
+- **T074**: the four `CONTEXT.md` entries match the shipped names. No changes.
+- **T075**: R4 now has a status note naming `run_call` and `surface()`. The file is still untracked
+  on `023-codemode`.
+- **T076**: all five combinations pass `cargo +1.99.0 check --all-targets` with no warnings.
+- **T077**: full matrix 49/49 PASS on kernel 6.8.0-142, including `lease-expiry`. `lease-release`
+  still reports `PENDING`, because no release hook can be configured from the binary. **SC-010's
+  release case has therefore not run on the VM.** It is tracked as a follow-up and not claimed here.
 
 ---
 

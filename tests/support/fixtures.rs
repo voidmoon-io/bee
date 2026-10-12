@@ -45,6 +45,7 @@ pub fn scenario(id: &str, tools: &[&str], turn_limit: u32, timeout_secs: u64) ->
         lease_turns: None,
         context: Default::default(),
         stuck: Default::default(),
+        finish: false,
         id: id.into(),
         policy_path: "/dev/null".into(),
         system_prompt: "You are a test agent.".into(),

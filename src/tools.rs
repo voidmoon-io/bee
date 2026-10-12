@@ -15,6 +15,7 @@ pub mod bash;
 pub mod ctf;
 pub mod exec;
 pub mod files;
+pub mod finish;
 pub mod outcome;
 pub mod render;
 pub mod search;
@@ -71,6 +72,10 @@ pub const DEFAULT_TOOLS: &[&str] = &[
 /// The CTF terminal tools (US3), enabled only when a scenario lists them.
 pub const CTF_TOOLS: &[&str] = &["submit_flag", "give_up"];
 
+/// How a headless run ends (025 US3). **Not** in `DEFAULT_TOOLS`: the episode adds it to a standard
+/// run's surface itself, unless the scenario says `finish = false`.
+pub const RUN_TOOLS: &[&str] = &["finish"];
+
 /// The visualization tools (003-visual-render, US6). **Not** in `DEFAULT_TOOLS` (NFR-003): a
 /// scenario or the REPL config opts in by listing `"render"`.
 pub const RENDER_TOOLS: &[&str] = &["render"];
@@ -125,6 +130,7 @@ pub const HTTP_TOOLS: &[&str] = &[
 pub fn is_known_tool(name: &str) -> bool {
     DEFAULT_TOOLS.contains(&name)
         || CTF_TOOLS.contains(&name)
+        || RUN_TOOLS.contains(&name)
         || RENDER_TOOLS.contains(&name)
         || SKILL_TOOLS.contains(&name)
         || SEC_TOOLS.contains(&name)
@@ -584,6 +590,7 @@ fn build(name: &str, deps: &ToolDeps) -> Result<Option<Box<dyn Tool>>, UnknownTo
             None => return Ok(None),
         },
         "give_up" => Box::new(ctf::GiveUp),
+        "finish" => Box::new(finish::Finish),
         "render" => Box::new(render::RenderTool::new()),
         "search" => Box::new(search::Search),
         "skill" => match &deps.skills {

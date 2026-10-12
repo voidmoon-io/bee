@@ -281,6 +281,7 @@ fn transcript() -> EpisodeTranscript {
         http_scope: None,
         consents: Vec::new(),
         mcp_audit: Default::default(),
+        finish_offered: false,
     }
 }
 

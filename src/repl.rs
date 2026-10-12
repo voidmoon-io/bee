@@ -1034,6 +1034,7 @@ fn build_transcript(
     EpisodeTranscript {
         consents: Vec::new(),
         mcp_audit: Default::default(),
+        finish_offered: false,
         http_scope: None,
         scenario_id: "repl".to_string(),
         model_id: model_id.to_string(),

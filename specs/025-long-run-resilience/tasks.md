@@ -356,20 +356,20 @@ reminder, then ends the run as `EndedWithoutFinish`. Exit 3 for every ending tha
 
 ### Tests first
 
-- [ ] T027 [P] [US3] Create `tests/finish_tool.rs` with the nine tests in quickstart.md Phase D.
+- [X] T027 [P] [US3] Create `tests/finish_tool.rs` with the nine tests in quickstart.md Phase D.
   - The exit-code test calls the status→exit mapping. Extract it from `src/app/run.rs` into
     `pub fn exit_code(status: &EpisodeStatus, finish_offered: bool) -> u8` in the library
     (`src/episode.rs`), so it is testable. `run.rs` keeps only the `ExitCode::from`.
   - `every_status_maps_in_batch_and_grid` constructs each `EpisodeStatus` variant and asserts that
     `status_label`, `batch::Status::from_episode` and the grid mapping each return a value (no panic,
     no `_` fallthrough). Make those matches exhaustive without a `_` arm in the same PR.
-- [ ] T028 [P] [US3] Create `tests/fixtures/mock-finish.toml`: a `mock` provider whose script is one
+- [X] T028 [P] [US3] Create `tests/fixtures/mock-finish.toml`: a `mock` provider whose script is one
   `finish` call with `{"outcome":"completed","summary":"said hello"}`. Check `MockStep` in
   `src/config.rs` for the script syntax.
 
 ### Implementation
 
-- [ ] T029 [US3] Implement `src/tools/finish.rs`:
+- [X] T029 [US3] Implement `src/tools/finish.rs`:
   - `FinishOutcome { Completed, Blocked, Abandoned }` (serde lowercase, `Display`);
   - the `Finish` tool with the exact schema and description in contracts/finish.md;
   - `call` validates (outcome known; summary non-empty after trim and ≤ 4000 chars) and returns
@@ -379,12 +379,12 @@ reminder, then ends the run as `EndedWithoutFinish`. Exit 3 for every ending tha
   - `pub mod finish;` in `src/tools.rs`;
   - add `"finish"` to `is_known_tool` and to the `register` match (024 PR2's constructor). Do **not** add
     it to `DEFAULT_TOOLS`.
-- [ ] T030 [US3] Add `#[serde(default = "default_true")] finish: bool` to `Scenario`. In `validate`,
+- [X] T030 [US3] Add `#[serde(default = "default_true")] finish: bool` to `Scenario`. In `validate`,
   `mode == Ctf && tools.contains("finish")` is an error: "finish is not available in ctf mode; ctf runs
   end with submit_flag or give_up". Update every `Scenario { .. }` literal
   (`grep -rn "Scenario {" src tests`), setting `finish: false` in `tests/support/fixtures.rs::scenario`
   and in any fixture that characterizes the old ending (plan risk 1).
-- [ ] T031 [US3] Add the record changes to `src/transcript.rs`:
+- [X] T031 [US3] Add the record changes to `src/transcript.rs`:
   - `EpisodeStatus::Finished { outcome: FinishOutcome, summary: String, turn: u32 }` and
     `EndedWithoutFinish`;
   - `status_label` gives `"finished ({outcome})"` and `"ended without finish"`;
@@ -397,7 +397,7 @@ reminder, then ends the run as `EndedWithoutFinish`. Exit 3 for every ending tha
     after a `serde_json::Value` round trip. Also assert that a scripted run with `finish: false` that
     crosses no threshold serializes without any new key: no `notes`, `compactions`, `summary_usage`,
     `finish_offered` or `not_run`.
-- [ ] T032 [US3] Wire the episode loop:
+- [X] T032 [US3] Wire the episode loop:
   - in `run_episode_with` (and `concurrent.rs`), register `finish` when
     `scenario.mode == Standard && scenario.finish`; once 024 PR5 has landed, the Session builder does
     this for `OperatorKind::Autonomous`;
@@ -412,15 +412,41 @@ reminder, then ends the run as `EndedWithoutFinish`. Exit 3 for every ending tha
     `pending` list from T015a, and `continue`; on the second, set `EndedWithoutFinish` and break;
   - when not offered, keep today's `Completed` / `NoToolCalls`;
   - after the `done:` progress line, emit `  summary: {preview(summary, 200)}` for `Finished`.
-- [ ] T033 [US3] In `src/app/run.rs`, replace the status match with `bee::episode::exit_code(..)`
+- [X] T033 [US3] In `src/app/run.rs`, replace the status match with `bee::episode::exit_code(..)`
   (T027). Document exit 3 in `bee run`'s `--help` long text (clap `after_help` in `src/main.rs` or
   wherever `run`'s command is defined).
-- [ ] T034 [US3] Audit the existing tests for the text-only ending (plan risk 1):
+- [X] T034 [US3] Audit the existing tests for the text-only ending (plan risk 1):
   `grep -rln "text_turn\|Turn::text\|EndTurn" tests src | xargs grep -l "run_loop\|run_episode"`. For each
   scenario that pins `Completed` / `NoToolCalls`, set `finish = false` (TOML) or `finish: false`
   (literal), with a one-line comment that it characterizes the pre-finish ending. Run the gate.
 
 **Checkpoint**: PR D. US3 works on its own; REPL and CTF behaviour unchanged.
+
+**As built (PR D, 2026-10-12, stacked on PR C)**:
+- **Who is offered `finish`.** `episode::offers_finish(&Scenario)` is true for a standard-mode
+  scenario with `finish` on. `spec_from_scenario` uses it to add `finish` to the session's tools,
+  which covers `bee run`, the batch and the concurrent runner. The **loop** treats `finish` as offered
+  when the registry has it (and the mode is standard), not when the scenario says so. A loop driven
+  with a hand-built registry, as most host tests are, therefore keeps its old ending unless it
+  registers `Finish`, so plan risk 1 was confined to tests that run through the full episode path.
+  The Session builder does not decide by `OperatorKind` as the task text anticipated: the REPL is
+  never given `finish` because it never goes through `spec_from_scenario`.
+- **Ad-hoc `bee run --task`** builds its scenario with `finish: true`. It is an autonomous standard
+  run, and has no file to opt out with.
+- **`exit_code(status, finish_offered)`** is in the library (`episode.rs`). `bee run` passes
+  `transcript.finish_offered`. A batch still exits 0 or 65 whatever each episode's status was, and
+  `bee run --help` says so in its new exit-status table.
+- **`status_label` is now `pub`.** The batch summary uses `viz::grid::Status::from_episode`, so
+  "batch and grid" is one mapping. `every_status_maps_in_batch_and_grid` guards it with an exhaustive
+  `match`.
+- **`transcript-pre025.json`** was written by `bee run --host` at `5fdaed3`, the last main before 025,
+  from a mock run (`list_directory`, then text).
+- **Opt-out audit (T034).** `finish = false` was added to `tests/run_command.rs`' scenario helper, the
+  `intercept_session` and `intercept_tls` scenarios, and every `[scenario]` in
+  `test/vm/remote-matrix.sh`. Each is commented as characterizing the pre-finish ending. The ad-hoc
+  tests (`an_ad_hoc_task_runs_without_a_scenario_file`, `fail_closed`'s host test) now script a
+  `finish` call, since an ad-hoc run cannot opt out. `tests/support/fixtures.rs::scenario` sets
+  `finish: false`, as the task asked.
 
 ---
 

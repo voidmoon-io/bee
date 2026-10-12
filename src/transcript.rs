@@ -64,6 +64,14 @@ pub enum EpisodeStatus {
         arguments: serde_json::Value,
         repeats: u32,
     },
+    /// The model called `finish` (025 US3). `turn` is the 0-based turn it was called on.
+    Finished {
+        outcome: crate::tools::finish::FinishOutcome,
+        summary: String,
+        turn: u32,
+    },
+    /// `finish` was offered, and the model ended with a second text-only turn instead (025 FR-035).
+    EndedWithoutFinish,
 }
 
 /// One recorded tool call within a turn: the request, the result, and the audit events the kernel
@@ -97,6 +105,9 @@ pub struct RecordedCall {
     /// An attempt hit the time limit. When it was a retry, the attempt before it stands (FR-025).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub timed_out: bool,
+    /// The call came after `finish` in the same turn and was never run (025 FR-034).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub not_run: bool,
     /// A hook refused the call before it ran (024 FR-031); the tool never executed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refused_by_hook: Option<String>,
@@ -212,6 +223,9 @@ pub struct EpisodeTranscript {
     /// Processes a server spawns are not attributed and stay in the calls' audit.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub mcp_audit: std::collections::BTreeMap<String, Vec<AuditEvent>>,
+    /// The run was offered `finish` (025 US3), so ending without it is an incomplete run.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub finish_offered: bool,
 }
 
 impl EpisodeTranscript {
@@ -297,6 +311,7 @@ impl EpisodeTranscript {
         EpisodeTranscript {
             consents: Vec::new(),
             mcp_audit: Default::default(),
+            finish_offered: false,
             http_scope: None,
             scenario_id,
             model_id,

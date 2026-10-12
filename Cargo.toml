@@ -410,6 +410,18 @@ name = "stuck_detection"
 path = "tests/stuck_detection.rs"
 required-features = ["test-support"]
 
+# 025 US3: the finish tool through the episode loop.
+[[test]]
+name = "finish_tool"
+path = "tests/finish_tool.rs"
+required-features = ["test-support"]
+
+# 025 FR-039: pre-025 transcripts still read, and unused 025 features write nothing.
+[[test]]
+name = "transcript_compat"
+path = "tests/transcript_compat.rs"
+required-features = ["test-support"]
+
 # 024 T048: the 019 intercept suites run over a session built by `session::build_with`, whose
 # test-only proxy-worker binary and host names need `test-support`.
 

@@ -174,7 +174,7 @@ async fn stops_at_eight_failing() {
         |l| l == "  stuck: scripted repeated 8 times with the same failing result — ending run"
     ));
     assert_eq!(
-        bee::episode::exit_code(&e.t.status),
+        bee::episode::exit_code(&e.t.status, false),
         bee::episode::EXIT_INCOMPLETE
     );
     let n = notes(&e.t.turns);

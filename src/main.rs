@@ -43,6 +43,7 @@ enum Cmd {
     /// Run a headless harness session: one agent episode, a batch of them, or a concurrent batch.
     // Boxed because the session commands carry a far larger argument set than the diagnostics, and
     // an unboxed variant would make every `Cmd` the size of the biggest one.
+    #[command(after_long_help = app::run::EXIT_CODES)]
     Run(Box<app::run::RunArgs>),
     /// Chat interactively with a sandboxed coding agent, inline or full-screen.
     Repl(Box<app::repl::ReplArgs>),

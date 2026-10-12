@@ -17,6 +17,20 @@ use crate::app::session::{self, EX_DATAERR, EX_IOERR, EX_SOFTWARE, EX_USAGE};
 
 const CMD: &str = "bee run";
 
+/// `bee run --help`'s exit-code table (025 contracts/finish.md).
+pub const EXIT_CODES: &str = "\
+Exit status:
+  0   the run completed: `finish` with outcome \"completed\", or, where finish is not offered
+      (a CTF, or a scenario with `finish = false`), the run ended normally
+  3   the run ended without completing its task: `finish` with outcome \"blocked\" or
+      \"abandoned\", a second text-only turn without `finish`, stuck repeating a failing call,
+      the context budget exhausted, or the time or turn limit reached while finish was offered
+  64  usage error (bad flags, scenario or configuration)
+  65  a batch had episodes that could not run (a batch exits 0 or 65, whatever each episode's status)
+  69  the provider failed
+  70  bee could not set the run up
+  74  I/O error writing the transcript";
+
 #[derive(Args, Debug)]
 pub struct RunArgs {
     /// Scenario TOML (policy + task + limits). Omit and use --task for an ad-hoc run.
@@ -148,6 +162,8 @@ impl RunArgs {
             lease_turns: None,
             context: Default::default(),
             stuck: Default::default(),
+            // An ad-hoc task is an autonomous standard run: it ends through `finish` (025 US3).
+            finish: true,
             id: "adhoc".to_string(),
             policy_path: cfg
                 .policy_path
@@ -288,7 +304,10 @@ async fn run(args: RunArgs) -> ExitCode {
         None => println!("{json}"),
     }
 
-    ExitCode::from(bee::episode::exit_code(&transcript.status))
+    ExitCode::from(bee::episode::exit_code(
+        &transcript.status,
+        transcript.finish_offered,
+    ))
 }
 
 /// The `[policy.http]` gate for a single episode (019 T043/T044). The episode path re-checks; this

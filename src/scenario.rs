@@ -70,6 +70,11 @@ pub struct Scenario {
     pub tools: Vec<String>,
     #[serde(default)]
     pub mode: ScoringMode,
+    /// Whether a standard-mode run is offered `finish` and must end through it (025 US3). Default on;
+    /// `false` keeps the pre-025 ending, where a text-only turn completes the run. Never offered in
+    /// CTF mode, nor in the REPL.
+    #[serde(default = "default_true")]
+    pub finish: bool,
     #[serde(default)]
     pub workdir: WorkdirSetup,
     /// MCP client policy (004-mcp-client). Sourced from the **top-level** `[mcp]` table (a sibling of
@@ -115,6 +120,10 @@ fn is_default_context(c: &crate::context::ContextConfig) -> bool {
 
 fn is_default_stuck(c: &crate::stuck::StuckConfig) -> bool {
     *c == crate::stuck::StuckConfig::default()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_tools() -> Vec<String> {
@@ -244,6 +253,13 @@ impl Scenario {
                 if !self.tools.iter().any(|t| t == "submit_flag") {
                     return Err(ConfigError::Invalid(
                         "mode = \"ctf\" requires \"submit_flag\" in the tools list".into(),
+                    ));
+                }
+                if self.tools.iter().any(|t| t == "finish") {
+                    return Err(ConfigError::Invalid(
+                        "finish is not available in ctf mode; ctf runs end with submit_flag or \
+                         give_up"
+                            .into(),
                     ));
                 }
             }

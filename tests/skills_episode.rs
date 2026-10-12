@@ -50,6 +50,7 @@ fn scenario(skills: Vec<PathBuf>) -> Scenario {
         lease_turns: None,
         context: Default::default(),
         stuck: Default::default(),
+        finish: false,
         id: "skills-ep".into(),
         policy_path: "/dev/null".into(),
         system_prompt: "You are a test agent.".into(),

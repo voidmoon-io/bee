@@ -311,6 +311,7 @@ mod tests {
         Scenario {
             lease_turns: None,
             context: Default::default(),
+            stuck: Default::default(),
             id: id.into(),
             policy_path,
             system_prompt: "test".into(),

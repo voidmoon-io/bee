@@ -19,6 +19,7 @@ fn ctf_scenario(turn_limit: u32) -> Scenario {
     Scenario {
         lease_turns: None,
         context: Default::default(),
+        stuck: Default::default(),
         id: "ctf-test".into(),
         policy_path: "/dev/null".into(),
         system_prompt: "You are a red-team agent.".into(),

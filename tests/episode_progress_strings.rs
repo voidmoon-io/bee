@@ -67,7 +67,27 @@ async fn progress(
     ceiling: Policy,
     setup: impl FnOnce(&mut Sandbox, &FakeCallHooks),
 ) -> Vec<String> {
-    progress_with(turns, attempts, hooks, ceiling, setup, false).await
+    progress_with(
+        turns,
+        attempts,
+        hooks,
+        ceiling,
+        setup,
+        false,
+        Default::default(),
+    )
+    .await
+}
+
+/// Stuck detection that never fires within these short scripts, for the pins that predate it (025):
+/// their fixture repeats `scripted {}`, which is a streak only by accident.
+fn no_stuck() -> bee::stuck::StuckConfig {
+    bee::stuck::StuckConfig {
+        denied_remind_after: Some(100),
+        remind_after: Some(100),
+        stop_after: Some(101),
+        stop: Some(false),
+    }
 }
 
 /// [`progress`], optionally with the Autonomous operator reporting its decisions on the same sink,
@@ -79,6 +99,7 @@ async fn progress_with(
     ceiling: Policy,
     setup: impl FnOnce(&mut Sandbox, &FakeCallHooks),
     consent_lines: bool,
+    stuck: bee::stuck::StuckConfig,
 ) -> Vec<String> {
     let audit = Arc::new(ScriptedAudit::default());
     let mut sb = Sandbox::host_scripted(Vec::new(), audit.clone());
@@ -108,6 +129,7 @@ async fn progress_with(
             operator,
             default_ttl: Ttl::Forever,
         }),
+        stuck,
         ..LoopOptions::default()
     };
     let mut turns = turns;
@@ -178,6 +200,7 @@ async fn every_line(consent_lines: bool) -> Vec<String> {
             hooks.push("c5", vec![refusal("c5", "10.0.0.9", 80)]);
         },
         consent_lines,
+        no_stuck(),
     )
     .await
 }
@@ -279,5 +302,79 @@ async fn the_proxy_escalation_line() {
         "  text: all done",
         "done: completed · 2 turns · Nms",
     ];
+    assert_eq!(lines, expected);
+}
+
+/// One turn's lines for a `scripted` call with `{}` arguments and a one-line result.
+fn call_lines(index: u32, result: &str) -> Vec<String> {
+    vec![
+        format!("turn {index}"),
+        "  call scripted {}".into(),
+        format!("  result {result}"),
+    ]
+}
+
+const REMINDER: &str = "  [bee] You have called scripted with the same arguments 5 times in a row";
+
+/// 025 US2: the reminder line, emitted where the note joins the conversation — before the next
+/// model turn.
+#[tokio::test]
+async fn the_reminder_line() {
+    let lines = progress(
+        (0..5)
+            .map(|i| tool_turn(None, &[(&format!("c{i}"), SCRIPTED)]))
+            .collect(),
+        Vec::new(),
+        Vec::new(),
+        policy(&[]),
+        |_, _| {},
+    )
+    .await;
+    let mut expected =
+        vec!["episode 'progress' · mock/scripted · tools: scripted,bash".to_string()];
+    for i in 0..5 {
+        expected.extend(call_lines(i, "ok: unscripted"));
+    }
+    expected.push(format!(
+        "{REMINDER}. Repeating it is unlikely to give a different result. Try a different \
+         approach: check your assumptions, inspect the error, or use another tool."
+    ));
+    expected.extend([
+        "turn 5".to_string(),
+        "  text: all done".into(),
+        "done: completed · 6 turns · Nms".into(),
+    ]);
+    assert_eq!(lines, expected);
+}
+
+/// 025 US2: the stuck line, and the status it ends the run with.
+#[tokio::test]
+async fn the_stuck_line() {
+    let lines = progress(
+        (0..8)
+            .map(|i| tool_turn(None, &[(&format!("c{i}"), SCRIPTED)]))
+            .collect(),
+        (0..8).map(|_| Attempt::error("nope")).collect(),
+        Vec::new(),
+        policy(&[]),
+        |_, _| {},
+    )
+    .await;
+    let mut expected =
+        vec!["episode 'progress' · mock/scripted · tools: scripted,bash".to_string()];
+    for i in 0..8 {
+        if i == 5 {
+            expected.push(format!(
+                "{REMINDER}, and it failed each time. Repeating it is unlikely to give a different \
+                 result. Try a different approach: check your assumptions, inspect the error, or use \
+                 another tool."
+            ));
+        }
+        expected.extend(call_lines(i, "ERR: nope"));
+    }
+    expected.extend([
+        "  stuck: scripted repeated 8 times with the same failing result — ending run".to_string(),
+        "done: stuck · 8 turns · Nms".into(),
+    ]);
     assert_eq!(lines, expected);
 }

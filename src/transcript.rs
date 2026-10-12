@@ -58,6 +58,12 @@ pub enum EpisodeStatus {
     /// The next request could not be brought within the model's context budget (025 FR-002,
     /// FR-014), or the provider refused one as too long.
     ContextExhausted { detail: String },
+    /// The same failing call was made `repeats` times in a row, and the run was ended (025 FR-027).
+    Stuck {
+        tool: String,
+        arguments: serde_json::Value,
+        repeats: u32,
+    },
 }
 
 /// One recorded tool call within a turn: the request, the result, and the audit events the kernel

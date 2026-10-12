@@ -99,6 +99,10 @@ pub struct Scenario {
     /// like `[mcp]` and `[security]`, and merged over the user's and project's `[context]`.
     #[serde(default, skip_serializing_if = "is_default_context")]
     pub context: crate::context::ContextConfig,
+    /// Stuck detection (025 US2). Sourced from the **top-level** `[stuck]` table, like `[context]`,
+    /// and merged over the user's and project's `[stuck]`.
+    #[serde(default, skip_serializing_if = "is_default_stuck")]
+    pub stuck: crate::stuck::StuckConfig,
     /// How many model turns a capability granted mid-episode lasts before it expires and the scope
     /// narrows again (007 US4, 024 FR-029). Absent: a grant lasts for the rest of the episode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -107,6 +111,10 @@ pub struct Scenario {
 
 fn is_default_context(c: &crate::context::ContextConfig) -> bool {
     *c == crate::context::ContextConfig::default()
+}
+
+fn is_default_stuck(c: &crate::stuck::StuckConfig) -> bool {
+    *c == crate::stuck::StuckConfig::default()
 }
 
 fn default_tools() -> Vec<String> {
@@ -126,6 +134,9 @@ struct ScenarioFile {
     /// The top-level `[context]` table (025), folded the same way.
     #[serde(default)]
     context: Option<crate::context::ContextConfig>,
+    /// The top-level `[stuck]` table (025 US2), folded the same way.
+    #[serde(default)]
+    stuck: Option<crate::stuck::StuckConfig>,
 }
 
 impl Scenario {
@@ -148,6 +159,9 @@ impl Scenario {
         }
         if let Some(context) = file.context {
             s.context = context;
+        }
+        if let Some(stuck) = file.stuck {
+            s.stuck = stuck;
         }
         // Resolve a relative policy_path against the scenario file's directory for portability.
         if s.policy_path.is_relative() {

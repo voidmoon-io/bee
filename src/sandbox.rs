@@ -448,7 +448,9 @@ impl EnforcedSandbox {
             self.sidecar.as_ref().map(|s| s.scope.cgroup_id),
         )?;
         if let Some(why) = &self.poisoned {
-            return Err(format!("sidecar reload scope: already in an unknown state: {why}"));
+            return Err(format!(
+                "sidecar reload scope: already in an unknown state: {why}"
+            ));
         }
         if let Err(e) = self.engine.reload_scope(target, &plan) {
             if let bee_userspace::ReloadError::Inconsistent(_) = e {
@@ -458,7 +460,10 @@ impl EnforcedSandbox {
             }
             return Err(format!("sidecar reload scope: {e}"));
         }
-        self.sidecar.as_mut().expect("target implies a sidecar").plan = plan;
+        self.sidecar
+            .as_mut()
+            .expect("target implies a sidecar")
+            .plan = plan;
         Ok(())
     }
 

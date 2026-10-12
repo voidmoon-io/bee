@@ -14,6 +14,7 @@ fn scenario() -> Scenario {
     Scenario {
         lease_turns: None,
         context: Default::default(),
+        stuck: Default::default(),
         id: "cred".into(),
         policy_path: "/dev/null".into(),
         system_prompt: "sys".into(),

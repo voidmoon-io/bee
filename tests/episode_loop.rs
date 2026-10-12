@@ -14,6 +14,7 @@ fn scenario(turn_limit: u32) -> Scenario {
     Scenario {
         lease_turns: None,
         context: Default::default(),
+        stuck: Default::default(),
         id: "loop-test".into(),
         policy_path: "/dev/null".into(),
         system_prompt: "You are a test agent.".into(),

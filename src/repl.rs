@@ -94,6 +94,9 @@ pub struct ReplConfig {
     /// The context settings below the session (025): user and project `[context]`, and the provider
     /// file's window and reply limit.
     pub context: crate::context::ContextInputs,
+    /// Stuck detection (025 US2), already validated: the front-end resolves `[stuck]` at start-up so a
+    /// bad table is refused before the first message.
+    pub stuck: crate::stuck::ResolvedStuck,
     /// State that outlives one exchange (025): the context manager and bee's queued notes. Behind a
     /// lock for the reason [`ReplEscalation`] is: [`run_exchange`] takes `&ReplConfig`. Never held
     /// across an `.await`.
@@ -108,6 +111,10 @@ pub struct ReplState {
     pub context: Option<crate::context::ContextManager>,
     /// bee's notes for the next model call, recorded on the turn they precede (025 FR-028).
     pub pending: Vec<crate::transcript::HarnessNote>,
+    /// The current streak of identical calls (025 US2). Built on first use from
+    /// [`ReplConfig::stuck`]. Spans exchanges — a streak can cross user messages — and `/clear`
+    /// forgets it.
+    pub stuck: Option<crate::stuck::StreakTracker>,
     /// Model turns since the session began (024 D3): what lease lifetimes are counted in, and the turn
     /// a call is stamped with. Monotonic across exchanges, and not reset by `/clear` — a lease
     /// outlives the conversation that asked for it.
@@ -120,8 +127,15 @@ impl ReplState {
         ReplState {
             context: Some(context),
             pending: Vec::new(),
+            stuck: None,
             model_turns: 0,
         }
+    }
+
+    /// The streak tracker, built from `cfg` if there is none yet.
+    fn stuck_for(&mut self, cfg: crate::stuck::ResolvedStuck) -> &mut crate::stuck::StreakTracker {
+        self.stuck
+            .get_or_insert_with(|| crate::stuck::StreakTracker::new(cfg))
     }
 
     /// The context manager, built from `inputs` for `model_id` if there is none yet.
@@ -144,6 +158,9 @@ impl ReplState {
             c.reset();
         }
         self.pending.clear();
+        if let Some(t) = &mut self.stuck {
+            t.reset();
+        }
     }
 }
 
@@ -191,6 +208,7 @@ impl Default for ReplConfig {
             escalation: None,
             http_pane: None,
             context: crate::context::ContextInputs::default(),
+            stuck: crate::stuck::ResolvedStuck::default(),
             state: Mutex::new(ReplState::default()),
         }
     }
@@ -287,6 +305,9 @@ pub enum ExchangeOutcome {
     ApiError(String),
     /// The next request could not be brought within the context budget (025 FR-002, FR-014).
     ContextExhausted(String),
+    /// The same failing call was repeated until stuck detection ended the exchange (025 FR-029). The
+    /// session continues.
+    Stuck { tool: String, repeats: u32 },
 }
 
 /// The result of running one user→agent exchange (used by [`run_repl`] and by tests).
@@ -852,6 +873,52 @@ pub async fn run_exchange(
             // The session's audit keeps the denial a retry replaced (FR-021).
             audit_all.extend(outcome.audit_trail().cloned());
             recorded.push(outcome.to_recorded(tc));
+
+            let signal = lock_state(config)
+                .stuck_for(config.stuck)
+                .observe(tc, &outcome);
+            match signal {
+                crate::stuck::StuckSignal::None => {}
+                crate::stuck::StuckSignal::Remind(r) => {
+                    lock_state(config).pending.push(r.into_note())
+                }
+                crate::stuck::StuckSignal::Stop { tool, repeats, .. } => {
+                    output.error(&format!(
+                        "stopped: {tool} was repeated {repeats} times with the same failing result"
+                    ));
+                    // The session goes on, so the conversation must stay well formed: every call the
+                    // model made gets a result, including the ones this stop kept from running.
+                    let ran = recorded.len();
+                    for skipped in &turn.tool_calls[ran..] {
+                        conversation.push(Message::ToolResult {
+                            call_id: skipped.id.clone(),
+                            name: skipped.name.clone(),
+                            content: format!(
+                                "[bee] not run: the exchange was stopped after {tool} was repeated \
+                                 {repeats} times"
+                            ),
+                            is_error: true,
+                            provenance: crate::provider::Provenance::Harness,
+                        });
+                    }
+                    turns.push(TranscriptTurn {
+                        notes: std::mem::take(&mut turn_notes),
+                        index: turns.len() as u32,
+                        assistant_text,
+                        calls: recorded,
+                        duration_ms: turn_start.elapsed().as_millis() as u64,
+                    });
+                    return ExchangeResult {
+                        outcome: ExchangeOutcome::Stuck { tool, repeats },
+                        model_calls,
+                        tool_calls,
+                        denials,
+                        turns,
+                        audit: audit_all,
+                        usage: usage_total,
+                    };
+                }
+            }
         }
 
         turns.push(TranscriptTurn {

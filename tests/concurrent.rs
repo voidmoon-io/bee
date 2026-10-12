@@ -17,6 +17,7 @@ fn scenario() -> Scenario {
     Scenario {
         lease_turns: None,
         context: Default::default(),
+        stuck: Default::default(),
         id: "conc".into(),
         policy_path: "/dev/null".into(),
         system_prompt: "test agent".into(),

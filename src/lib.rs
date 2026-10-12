@@ -73,6 +73,7 @@ pub mod security;
 // The Session builder: one assembly of a session for every entry point (024 FR-006).
 pub mod session;
 pub mod skills;
+pub mod stuck;
 pub mod tools;
 pub mod transcript;
 // The top of a model turn: lease expiry, release, MCP refresh (024 FR-028–FR-030).

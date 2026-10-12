@@ -104,6 +104,8 @@ pub struct EffectiveConfig {
     /// `[context]` from every layer, merged key by key (025). Validated when a session starts, against
     /// the model's window.
     pub context: file::ContextSection,
+    /// `[stuck]` from every layer, merged key by key (025 US2). Validated when a session starts.
+    pub stuck: file::StuckSection,
 }
 
 /// One thing bee needs and does not have, with the places it could come from.
@@ -189,6 +191,7 @@ struct Merged {
     animations: Option<bool>,
     security: Option<file::SecuritySection>,
     context: file::ContextSection,
+    stuck: file::StuckSection,
 }
 
 impl Merged {
@@ -254,6 +257,9 @@ impl Merged {
             }
             if let Some(c) = c.context {
                 m.context = m.context.merge(c);
+            }
+            if let Some(s) = c.stuck {
+                m.stuck = m.stuck.merge(s);
             }
         }
 
@@ -413,6 +419,7 @@ pub fn resolve_from_layers(
         visual,
         security: m.security.unwrap_or_default(),
         context: m.context,
+        stuck: m.stuck,
     })
 }
 

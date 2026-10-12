@@ -180,6 +180,14 @@ async fn repl(args: ReplArgs) -> ExitCode {
             return ExitCode::from(EX_USAGE);
         }
     };
+    // Stuck detection (025 US2), refused here for the same reason.
+    let stuck = match cfg.stuck.resolve() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{CMD}: invalid [stuck]: {e}");
+            return ExitCode::from(EX_USAGE);
+        }
+    };
 
     // MCP servers come from the configured file; a bad one is a usage error before anything starts.
     let mcp = match &cfg.mcp_config {
@@ -304,6 +312,7 @@ async fn repl(args: ReplArgs) -> ExitCode {
             .as_ref()
             .map(|h| bee::intercept::pane::pane_source(h.interceptor.clone())),
         context: context_inputs,
+        stuck,
         state: std::sync::Mutex::new(bee::repl::ReplState::with_context(context)),
         ..ReplConfig::default()
     };

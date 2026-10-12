@@ -25,7 +25,8 @@ impl Status {
             | EpisodeStatus::ApiError { .. }
             | EpisodeStatus::InfraError { .. }
             | EpisodeStatus::NotCaptured
-            | EpisodeStatus::ContextExhausted { .. } => Status::Fail,
+            | EpisodeStatus::ContextExhausted { .. }
+            | EpisodeStatus::Stuck { .. } => Status::Fail,
         }
     }
 }

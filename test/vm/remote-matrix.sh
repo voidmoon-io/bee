@@ -425,6 +425,7 @@ mode = "enforce"
 EOF
   cat >"$WORK/ep-deny.scn.toml" <<EOF
 [scenario]
+finish        = false  # 025: these cases pin the pre-finish ending ("completed")
 id            = "episode-file-deny"
 policy_path   = "$WORK/ep-deny.policy.toml"
 system_prompt = "You are a sandboxed agent."
@@ -468,6 +469,7 @@ mode = "enforce"
 EOF
   cat >"$WORK/ep-allow.scn.toml" <<EOF
 [scenario]
+finish        = false  # 025: these cases pin the pre-finish ending ("completed")
 id            = "episode-allow"
 policy_path   = "$WORK/ep-allow.policy.toml"
 system_prompt = "You are a sandboxed agent."
@@ -545,6 +547,7 @@ EOF
   rm -f /home/ubuntu/skgrant/out.txt
   cat >"$WORK/sk-allow.scn.toml" <<EOF
 [scenario]
+finish        = false  # 025: these cases pin the pre-finish ending ("completed")
 id            = "skill-grant-allow"
 policy_path   = "$WORK/sk-base.policy.toml"
 ceiling_policy_path = "$WORK/sk-ceiling.policy.toml"
@@ -573,6 +576,7 @@ EOF
   rm -f /home/ubuntu/skgrant/out.txt
   cat >"$WORK/sk-deny.scn.toml" <<EOF
 [scenario]
+finish        = false  # 025: these cases pin the pre-finish ending ("completed")
 id            = "skill-grant-deny"
 policy_path   = "$WORK/sk-base.policy.toml"
 system_prompt = "You are a sandboxed agent."
@@ -635,6 +639,7 @@ EOF
   rm -f /home/ubuntu/dyngrant/out.txt
   cat >"$WORK/dyn-allow.scn.toml" <<EOF
 [scenario]
+finish        = false  # 025: these cases pin the pre-finish ending ("completed")
 id            = "reload-widen-allow"
 policy_path   = "$WORK/dyn-base.policy.toml"
 ceiling_policy_path = "$WORK/dyn-ceiling.policy.toml"
@@ -662,6 +667,7 @@ EOF
   rm -f /home/ubuntu/dyngrant/out.txt
   cat >"$WORK/dyn-deny.scn.toml" <<EOF
 [scenario]
+finish        = false  # 025: these cases pin the pre-finish ending ("completed")
 id            = "reload-beyond-ceiling"
 policy_path   = "$WORK/dyn-base.policy.toml"
 ceiling_policy_path = "$WORK/dyn-base.policy.toml"
@@ -704,6 +710,7 @@ EOF
   rm -f /home/ubuntu/dyngrant/out.txt
   cat >"$WORK/lease.scn.toml" <<EOF
 [scenario]
+finish        = false  # 025: these cases pin the pre-finish ending ("completed")
 id            = "lease-expiry"
 policy_path   = "$WORK/dyn-base.policy.toml"
 ceiling_policy_path = "$WORK/dyn-ceiling.policy.toml"
@@ -831,6 +838,7 @@ EOF
   scan_scenario() { # file  policy
     cat >"$1" <<EOF
 [scenario]
+finish        = false  # 025: these cases pin the pre-finish ending ("completed")
 id            = "scanner-escape"
 policy_path   = "$2"
 system_prompt = "You are a sandboxed agent."
@@ -896,6 +904,7 @@ EOF
   mkdir -p "$WORK/iso-scn" "$WORK/iso-prov"
   cat >"$WORK/iso-scn/iso.scn.toml" <<EOF
 [scenario]
+finish        = false  # 025: these cases pin the pre-finish ending ("completed")
 id            = "iso"
 policy_path   = "$WORK/iso.policy.toml"
 system_prompt = "You are a sandboxed agent."

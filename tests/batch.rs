@@ -204,6 +204,7 @@ fn enforcement_trace_extracts_audit() {
         escalations: Vec::new(),
         retried: false,
         timed_out: false,
+        not_run: false,
         refused_by_hook: None,
         proxy_events: Vec::new(),
         call: ToolCall {
@@ -217,6 +218,9 @@ fn enforcement_trace_extracts_audit() {
     let transcript = EpisodeTranscript {
         consents: Vec::new(),
         mcp_audit: Default::default(),
+        finish_offered: false,
+        compactions: Vec::new(),
+        summary_usage: None,
         http_scope: None,
         scenario_id: "s".into(),
         model_id: "mock/x".into(),

@@ -27,6 +27,7 @@ fn render_call(id: &str, target: RenderTarget, spec: RenderSpec) -> RecordedCall
         escalations: Vec::new(),
         retried: false,
         timed_out: false,
+        not_run: false,
         refused_by_hook: None,
         proxy_events: Vec::new(),
         call: ToolCall {
@@ -53,6 +54,9 @@ fn transcript(turns: Vec<TranscriptTurn>) -> EpisodeTranscript {
     EpisodeTranscript {
         consents: Vec::new(),
         mcp_audit: Default::default(),
+        finish_offered: false,
+        compactions: Vec::new(),
+        summary_usage: None,
         http_scope: None,
         scenario_id: "s".into(),
         model_id: "mock/x".into(),
@@ -120,6 +124,7 @@ fn ops_call(id: &str, ops: Vec<bee::render_spec::PanelOp>) -> RecordedCall {
         escalations: Vec::new(),
         retried: false,
         timed_out: false,
+        not_run: false,
         refused_by_hook: None,
         proxy_events: Vec::new(),
         call: ToolCall {

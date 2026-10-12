@@ -356,20 +356,20 @@ reminder, then ends the run as `EndedWithoutFinish`. Exit 3 for every ending tha
 
 ### Tests first
 
-- [ ] T027 [P] [US3] Create `tests/finish_tool.rs` with the nine tests in quickstart.md Phase D.
+- [X] T027 [P] [US3] Create `tests/finish_tool.rs` with the nine tests in quickstart.md Phase D.
   - The exit-code test calls the status→exit mapping. Extract it from `src/app/run.rs` into
     `pub fn exit_code(status: &EpisodeStatus, finish_offered: bool) -> u8` in the library
     (`src/episode.rs`), so it is testable. `run.rs` keeps only the `ExitCode::from`.
   - `every_status_maps_in_batch_and_grid` constructs each `EpisodeStatus` variant and asserts that
     `status_label`, `batch::Status::from_episode` and the grid mapping each return a value (no panic,
     no `_` fallthrough). Make those matches exhaustive without a `_` arm in the same PR.
-- [ ] T028 [P] [US3] Create `tests/fixtures/mock-finish.toml`: a `mock` provider whose script is one
+- [X] T028 [P] [US3] Create `tests/fixtures/mock-finish.toml`: a `mock` provider whose script is one
   `finish` call with `{"outcome":"completed","summary":"said hello"}`. Check `MockStep` in
   `src/config.rs` for the script syntax.
 
 ### Implementation
 
-- [ ] T029 [US3] Implement `src/tools/finish.rs`:
+- [X] T029 [US3] Implement `src/tools/finish.rs`:
   - `FinishOutcome { Completed, Blocked, Abandoned }` (serde lowercase, `Display`);
   - the `Finish` tool with the exact schema and description in contracts/finish.md;
   - `call` validates (outcome known; summary non-empty after trim and ≤ 4000 chars) and returns
@@ -379,12 +379,12 @@ reminder, then ends the run as `EndedWithoutFinish`. Exit 3 for every ending tha
   - `pub mod finish;` in `src/tools.rs`;
   - add `"finish"` to `is_known_tool` and to the `register` match (024 PR2's constructor). Do **not** add
     it to `DEFAULT_TOOLS`.
-- [ ] T030 [US3] Add `#[serde(default = "default_true")] finish: bool` to `Scenario`. In `validate`,
+- [X] T030 [US3] Add `#[serde(default = "default_true")] finish: bool` to `Scenario`. In `validate`,
   `mode == Ctf && tools.contains("finish")` is an error: "finish is not available in ctf mode; ctf runs
   end with submit_flag or give_up". Update every `Scenario { .. }` literal
   (`grep -rn "Scenario {" src tests`), setting `finish: false` in `tests/support/fixtures.rs::scenario`
   and in any fixture that characterizes the old ending (plan risk 1).
-- [ ] T031 [US3] Add the record changes to `src/transcript.rs`:
+- [X] T031 [US3] Add the record changes to `src/transcript.rs`:
   - `EpisodeStatus::Finished { outcome: FinishOutcome, summary: String, turn: u32 }` and
     `EndedWithoutFinish`;
   - `status_label` gives `"finished ({outcome})"` and `"ended without finish"`;
@@ -397,7 +397,7 @@ reminder, then ends the run as `EndedWithoutFinish`. Exit 3 for every ending tha
     after a `serde_json::Value` round trip. Also assert that a scripted run with `finish: false` that
     crosses no threshold serializes without any new key: no `notes`, `compactions`, `summary_usage`,
     `finish_offered` or `not_run`.
-- [ ] T032 [US3] Wire the episode loop:
+- [X] T032 [US3] Wire the episode loop:
   - in `run_episode_with` (and `concurrent.rs`), register `finish` when
     `scenario.mode == Standard && scenario.finish`; once 024 PR5 has landed, the Session builder does
     this for `OperatorKind::Autonomous`;
@@ -412,15 +412,41 @@ reminder, then ends the run as `EndedWithoutFinish`. Exit 3 for every ending tha
     `pending` list from T015a, and `continue`; on the second, set `EndedWithoutFinish` and break;
   - when not offered, keep today's `Completed` / `NoToolCalls`;
   - after the `done:` progress line, emit `  summary: {preview(summary, 200)}` for `Finished`.
-- [ ] T033 [US3] In `src/app/run.rs`, replace the status match with `bee::episode::exit_code(..)`
+- [X] T033 [US3] In `src/app/run.rs`, replace the status match with `bee::episode::exit_code(..)`
   (T027). Document exit 3 in `bee run`'s `--help` long text (clap `after_help` in `src/main.rs` or
   wherever `run`'s command is defined).
-- [ ] T034 [US3] Audit the existing tests for the text-only ending (plan risk 1):
+- [X] T034 [US3] Audit the existing tests for the text-only ending (plan risk 1):
   `grep -rln "text_turn\|Turn::text\|EndTurn" tests src | xargs grep -l "run_loop\|run_episode"`. For each
   scenario that pins `Completed` / `NoToolCalls`, set `finish = false` (TOML) or `finish: false`
   (literal), with a one-line comment that it characterizes the pre-finish ending. Run the gate.
 
 **Checkpoint**: PR D. US3 works on its own; REPL and CTF behaviour unchanged.
+
+**As built (PR D, 2026-10-12, stacked on PR C)**:
+- **Who is offered `finish`.** `episode::offers_finish(&Scenario)` is true for a standard-mode
+  scenario with `finish` on. `spec_from_scenario` uses it to add `finish` to the session's tools,
+  which covers `bee run`, the batch and the concurrent runner. The **loop** treats `finish` as offered
+  when the registry has it (and the mode is standard), not when the scenario says so. A loop driven
+  with a hand-built registry, as most host tests are, therefore keeps its old ending unless it
+  registers `Finish`, so plan risk 1 was confined to tests that run through the full episode path.
+  The Session builder does not decide by `OperatorKind` as the task text anticipated: the REPL is
+  never given `finish` because it never goes through `spec_from_scenario`.
+- **Ad-hoc `bee run --task`** builds its scenario with `finish: true`. It is an autonomous standard
+  run, and has no file to opt out with.
+- **`exit_code(status, finish_offered)`** is in the library (`episode.rs`). `bee run` passes
+  `transcript.finish_offered`. A batch still exits 0 or 65 whatever each episode's status was, and
+  `bee run --help` says so in its new exit-status table.
+- **`status_label` is now `pub`.** The batch summary uses `viz::grid::Status::from_episode`, so
+  "batch and grid" is one mapping. `every_status_maps_in_batch_and_grid` guards it with an exhaustive
+  `match`.
+- **`transcript-pre025.json`** was written by `bee run --host` at `5fdaed3`, the last main before 025,
+  from a mock run (`list_directory`, then text).
+- **Opt-out audit (T034).** `finish = false` was added to `tests/run_command.rs`' scenario helper, the
+  `intercept_session` and `intercept_tls` scenarios, and every `[scenario]` in
+  `test/vm/remote-matrix.sh`. Each is commented as characterizing the pre-finish ending. The ad-hoc
+  tests (`an_ad_hoc_task_runs_without_a_scenario_file`, `fail_closed`'s host test) now script a
+  `finish` call, since an ad-hoc run cannot opt out. `tests/support/fixtures.rs::scenario` sets
+  `finish: false`, as the task asked.
 
 ---
 
@@ -435,7 +461,7 @@ Default stays **off**.
 
 ### Tests first
 
-- [ ] T035 [P] [US1] Create `tests/context_compaction.rs` with the sixteen tests in quickstart.md Phase E.
+- [X] T035 [P] [US1] Create `tests/context_compaction.rs` with the sixteen tests in quickstart.md Phase E.
   - Add its `[[test]]` entry with `required-features = ["test-support"]`.
   - Use `MockModel::from_fn`. A call with an empty `tools` slice is the summary call: reply with a fixed
     summary, or with an error to test the fallback. Otherwise script the agent.
@@ -448,7 +474,7 @@ Default stays **off**.
   - `record_identical_with_and_without` runs the same script twice (compaction on/off, budget large
     enough for "off" to fit) and compares `serde_json::to_value` of the two transcripts, minus
     `compactions` and `summary_usage`.
-- [ ] T036 [P] [US1] Add unit tests in `src/context/compact.rs`:
+- [X] T036 [P] [US1] Add unit tests in `src/context/compact.rs`:
   - turn segmentation (R4), including notes and steering between turns;
   - recent-window sizing (floor of two turns, and everything since the last `Assistant`);
   - stub text for each `NoteOutcome`, matching contracts/context.md byte for byte;
@@ -456,11 +482,11 @@ Default stays **off**.
 
 ### Implementation
 
-- [ ] T037 [US1] Implement `CallNote`, `NoteOutcome` and `CallNote::from_outcome(&ToolCall, &CallOutcome)`
+- [X] T037 [US1] Implement `CallNote`, `NoteOutcome` and `CallNote::from_outcome(&ToolCall, &CallOutcome)`
   in `src/context/compact.rs` (data-model.md: denials capped at 5 plus "and N more"). In both loops,
   call `ctx.note_call(id, CallNote::from_outcome(..))` beside the `cap` call from T016/T017, including
   for `not_run` calls (`NotRun`) and hook refusals.
-- [ ] T038 [US1] Implement the regions in `src/context/compact.rs`:
+- [X] T038 [US1] Implement the regions in `src/context/compact.rs`:
   - `segment(&Conversation, preamble_len) -> Vec<TurnSpan>`;
   - `recent_start(spans, ratio, budget, share) -> usize`;
   - bee-inserted messages (the summary and the removal marker) always sit directly after the preamble.
@@ -473,7 +499,7 @@ Default stays **off**.
   - `remove(convo, spans, target) -> u32` removes whole turns and puts the marker in the head, replacing
     any earlier marker and updating `head_len`. Summarizing folds an existing marker into the new summary,
     so the head is at most one summary plus one marker.
-- [ ] T039 [US1] Implement `src/context/summary.rs`:
+- [X] T039 [US1] Implement `src/context/summary.rs`:
   - the system prompt and user-message rendering from contracts/context.md, with tool results rendered
     through `framing::frame_untrusted` and capped at 2 KiB each;
   - `SummaryState`;
@@ -483,7 +509,7 @@ Default stays **off**.
   - Reject a reply over `summary_share` of the budget.
   - Build the summary message text, with a stable nonce keyed `bee:summary#{generation}`. Do this
     through `frame_untrusted` with a nonce drawn once per generation and stored in `SummaryState`.
-- [ ] T040 [US1] Complete `ContextManager::prepare` in `src/context/mod.rs` to the sequence in
+- [X] T040 [US1] Complete `ContextManager::prepare` in `src/context/mod.rs` to the sequence in
   contracts/context.md: elide → summarize → remove on failure → `ContextExhausted`.
   - Produce at most one `CompactionEvent` per kind, with token estimates before and after.
   - Add the summary usage to `summary_usage` and return it in `Prepared`, so the loops add it to
@@ -491,26 +517,59 @@ Default stays **off**.
   - Add `pub mod compact; pub mod summary;`.
   - `prepare` keeps no `MutexGuard` across `.await`; the future must be `Send`. Add a
     `fn _assert_send()` compile check.
-- [ ] T041 [US1] Record and show compactions:
+- [X] T041 [US1] Record and show compactions:
   - add `CompactionKind`, `CompactionEvent`, `EpisodeTranscript.compactions` and
     `EpisodeTranscript.summary_usage` to `src/transcript.rs`;
   - both loops drain `ctx.take_events()` each turn into the transcript (episode) or `ExchangeResult`
     (REPL);
   - emit the progress and info lines from contracts/context.md;
   - pin those lines as new tests in `tests/episode_progress_strings.rs`.
-- [ ] T042 [US1] Run the gate with compaction off (the default). The full suite must be unchanged apart
+- [X] T042 [US1] Run the gate with compaction off (the default). The full suite must be unchanged apart
   from the new tests.
 
 **Checkpoint**: PR E. US1 works on its own when switched on.
+
+**As built (PR E, 2026-10-12)**:
+- **Head tracking.** The head is tracked as two flags, `head_summary` and `head_marker`, not a
+  `head_len` count. Its order is fixed: the summary first, then the marker. Turns are numbered by
+  `turns_gone`, so a summary's `turns a–b` are conversation turn numbers.
+- **`segment` and the first turn.** `segment` gives anything before the first `Assistant` (turn 0's
+  notes) to the first turn, so the middle is always made of whole turns.
+- **How much to fold.** Summarization folds the oldest middle turns until the request *without them*
+  reaches the target, or the whole middle is folded. The removal fallback removes the same turns.
+- **`CompactionEvent.turns: Option<(u32, u32)>`** is new beside the data-model fields. The progress
+  line for a summary needs the turn range.
+- **The REPL.** The `ContextManager` is taken out of `ReplState` for `prepare`'s await and put back
+  after, so no lock is held across it. A summary call in the REPL gets 120 s
+  (`SUMMARY_TIMEOUT`). `ExchangeResult.compactions` carries the events, and the session transcript
+  (`/save`) collects them. Its `summary_usage` is the sum of the events' usage.
+- **`budget::message_bytes`** was split out of `estimate_bytes`, so spans are measured exactly as
+  requests are.
+- **Progress-line sizes** are written to one decimal (`6.0k`) and pinned in
+  `episode_progress_strings::the_context_lines`.
+- **The tests' model** is a test-local `Model`, not `MockModel::from_fn`, because `from_fn` cannot
+  return a provider error, and the removal fallback needs one. It recognises the summary call by its
+  system prompt and asserts the contracts/context.md invariants on every agent request. A mutation
+  check, eliding inside the recent window, was caught by `elides_before_summarizing`.
+
+**Phase 7, as built**:
+- **T043.** The `CONTEXT.md` glossary gained entries for context budget, preamble, recent window,
+  middle region, elision, summarization, compaction, streak and finish tool.
+- **T044.** No `docs/` file documents configuration. The README does, so the `[context]` and
+  `[stuck]` tables, the window precedence and the finish/exit-code rules went into a new README
+  section, "Long runs".
+- **T045 and T046 are not done.** The SC-010 comparison needs a real model and provider key. The
+  mock provider cannot show whether compaction costs completions. Until that report exists,
+  `compaction` stays off by default.
 
 ---
 
 ## Phase 7: Polish and the default flip
 
-- [ ] T043 [P] Update `CONTEXT.md` (repo root; the glossary 024 extended) with the spec's terms: context
+- [X] T043 [P] Update `CONTEXT.md` (repo root; the glossary 024 extended) with the spec's terms: context
   budget, preamble, recent window, middle region, elision, summarization, compaction, streak, finish
   tool.
-- [ ] T044 [P] Document `[context]` and `[stuck]` in the user-facing config docs (find them with
+- [X] T044 [P] Document `[context]` and `[stuck]` in the user-facing config docs (find them with
   `grep -rln "\[session\]" docs README.md`), with the defaults table from data-model.md and the
   window precedence from contracts/config.md.
 - [ ] T045 Run the SC-010 comparison (quickstart "SC-010"):

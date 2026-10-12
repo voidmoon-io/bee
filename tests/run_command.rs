@@ -25,6 +25,18 @@ fn mock_provider(dir: &Path, name: &str, reply: &str) -> PathBuf {
     )
 }
 
+/// A scripted provider that ends its run with `finish` — how an ad-hoc `--task` run ends (025 US3).
+fn finishing_provider(dir: &Path, name: &str) -> PathBuf {
+    write(
+        dir,
+        name,
+        "[provider]\nprovider = \"mock\"\n\n[[provider.script]]\ntool = \"finish\"\n\
+         args = { outcome = \"completed\", summary = \"said hello\" }\n",
+    )
+}
+
+/// A scenario whose run ends at its first text turn: `finish = false` characterizes the pre-finish
+/// ending these transport tests were written against (025 T034).
 fn scenario(dir: &Path, name: &str, id: &str, task: &str) -> PathBuf {
     write(
         dir,
@@ -37,7 +49,8 @@ fn scenario(dir: &Path, name: &str, id: &str, task: &str) -> PathBuf {
              task = \"{task}\"\n\
              turn_limit = 2\n\
              timeout_secs = 10\n\
-             tools = []\n"
+             tools = []\n\
+             finish = false\n"
         ),
     )
 }
@@ -93,7 +106,7 @@ fn an_ad_hoc_task_runs_without_a_scenario_file() {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    let provider = mock_provider(dir.path(), "p.toml", "Nothing to do.");
+    let provider = finishing_provider(dir.path(), "p.toml");
 
     let out = bee_run(&[
         "--task",

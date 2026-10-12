@@ -76,24 +76,25 @@ impl ContextBudget {
 /// adapter sends, minus its fixed JSON structure. Calibration absorbs the difference.
 pub fn estimate_bytes(convo: &Conversation, tools: &[ToolSchema]) -> usize {
     let tools_bytes = serde_json::to_vec(tools).map_or(0, |v| v.len());
-    let messages: usize = convo
-        .messages
-        .iter()
-        .map(|m| match m {
-            Message::User { text } => text.len(),
-            Message::Assistant { text, tool_calls } => {
-                text.as_ref().map_or(0, String::len)
-                    + tool_calls
-                        .iter()
-                        .map(|c| c.id.len() + c.name.len() + c.arguments.to_string().len())
-                        .sum::<usize>()
-            }
-            Message::ToolResult {
-                call_id, content, ..
-            } => call_id.len() + content.len() + RESULT_OVERHEAD,
-        })
-        .sum();
+    let messages: usize = convo.messages.iter().map(message_bytes).sum();
     convo.system.len() + UNTRUSTED_DATA_CLAUSE.len() + tools_bytes + messages
+}
+
+/// The bytes one message adds to a request, as [`estimate_bytes`] counts them.
+pub fn message_bytes(m: &Message) -> usize {
+    match m {
+        Message::User { text } => text.len(),
+        Message::Assistant { text, tool_calls } => {
+            text.as_ref().map_or(0, String::len)
+                + tool_calls
+                    .iter()
+                    .map(|c| c.id.len() + c.name.len() + c.arguments.to_string().len())
+                    .sum::<usize>()
+        }
+        Message::ToolResult {
+            call_id, content, ..
+        } => call_id.len() + content.len() + RESULT_OVERHEAD,
+    }
 }
 
 /// Bytes to estimated tokens at `ratio` bytes per token, rounded up.

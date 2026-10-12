@@ -1,0 +1,9 @@
+# 025 US3 (quickstart Phase D): a mock provider that ends its run the way an autonomous run must,
+# with one `finish` call.
+#   bee run --task "say hello" --provider tests/fixtures/mock-finish.toml --host; echo "exit=$?"
+[provider]
+provider = "mock"
+
+[[provider.script]]
+tool = "finish"
+args = { outcome = "completed", summary = "said hello" }

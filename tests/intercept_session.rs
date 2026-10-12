@@ -35,7 +35,8 @@ fn scenario(dir: &Path, policy: &str, tools: &str) -> PathBuf {
         &format!(
             "[scenario]\nid = \"http-session\"\npolicy_path = \"policy.toml\"\n\
              system_prompt = \"test\"\ntask = \"t\"\nturn_limit = 4\ntimeout_secs = 60\n\
-             tools = [{tools}]\n"
+             tools = [{tools}]\n\
+             finish = false\n"
         ),
     )
 }

@@ -149,6 +149,7 @@ impl CallOutcome {
             escalations: self.escalations.clone(),
             retried: self.retried,
             timed_out: self.timed_out,
+            not_run: false,
             refused_by_hook: self.refused_by_hook.clone(),
         }
     }

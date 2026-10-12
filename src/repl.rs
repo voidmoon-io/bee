@@ -310,6 +310,9 @@ pub enum ExchangeOutcome {
     Stuck { tool: String, repeats: u32 },
 }
 
+/// The longest a summary call made while preparing a REPL request may take (025).
+const SUMMARY_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// The result of running one user→agent exchange (used by [`run_repl`] and by tests).
 pub struct ExchangeResult {
     /// Why the exchange ended.
@@ -326,6 +329,8 @@ pub struct ExchangeResult {
     pub audit: Vec<AuditEvent>,
     /// Token usage summed across this exchange's model calls, when the provider reports it.
     pub usage: Option<Usage>,
+    /// Compactions of the conversation during this exchange (025 FR-017).
+    pub compactions: Vec<crate::transcript::CompactionEvent>,
 }
 
 /// The session record produced when the REPL exits.
@@ -592,6 +597,7 @@ pub async fn run_exchange(
     let mut tool_calls = 0u32;
     let mut denials = 0u32;
     let mut usage_total: Option<Usage> = None;
+    let mut compactions: Vec<crate::transcript::CompactionEvent> = Vec::new();
 
     for _step in 0..config.agent_turn_budget {
         // Fold in any steering the user typed since the last model call — the agent catches it now.
@@ -643,14 +649,40 @@ pub async fn run_exchange(
             turn_notes.push(note);
         }
 
-        // The context budget (025): never send a request over it.
-        let prepared = {
+        // The context budget (025): compact if it is on and called for, and never send a request
+        // over the budget. The manager leaves the state for the await, so no lock is held across it.
+        let ctx = {
             let mut state = lock_state(config);
-            state
-                .context_for(&config.context, model.id())
-                .map_err(|e| format!("invalid [context]: {e}"))
-                .and_then(|ctx| ctx.prepare(conversation, &schemas).map_err(|e| e.detail))
+            match state.context_for(&config.context, model.id()) {
+                Ok(_) => Ok(state.context.take().expect("just built")),
+                Err(e) => Err(e),
+            }
         };
+        let prepared = match ctx {
+            Err(e) => Err(format!("invalid [context]: {e}")),
+            Ok(mut ctx) => {
+                let r = ctx
+                    .prepare(
+                        conversation,
+                        &schemas,
+                        model,
+                        Instant::now() + SUMMARY_TIMEOUT,
+                        model_turn,
+                    )
+                    .await;
+                for e in ctx.take_events() {
+                    output.info(&crate::context::describe(&e, ctx.budget().tokens()));
+                    compactions.push(e);
+                }
+                lock_state(config).context = Some(ctx);
+                r.map_err(|e| e.detail)
+            }
+        };
+        if let Ok(p) = &prepared {
+            if let Some(u) = p.summary_usage {
+                usage_total = Some(usage_total.map_or(u, |acc| acc + u));
+            }
+        }
         let prepared = match prepared {
             Ok(p) => p,
             Err(detail) => {
@@ -663,6 +695,7 @@ pub async fn run_exchange(
                     turns,
                     audit: audit_all,
                     usage: usage_total,
+                    compactions,
                 };
             }
         };
@@ -696,6 +729,7 @@ pub async fn run_exchange(
                         turns,
                         audit: audit_all,
                         usage: usage_total,
+                        compactions,
                     };
                 }
             };
@@ -721,6 +755,7 @@ pub async fn run_exchange(
                     turns,
                     audit: audit_all,
                     usage: usage_total,
+                    compactions,
                 };
             }
         };
@@ -768,6 +803,7 @@ pub async fn run_exchange(
                     turns,
                     audit: audit_all,
                     usage: usage_total,
+                    compactions,
                 };
             }
             continue;
@@ -858,9 +894,16 @@ pub async fn run_exchange(
                 output.panel_op(op);
             }
 
-            // The model sees the capped result; the record keeps the tool's own (025 FR-022).
-            let content = match lock_state(config).context.as_ref() {
-                Some(ctx) => ctx.cap(&result.content, result.original_len),
+            // The model sees the capped result; the record keeps the tool's own (025 FR-022). What
+            // its stub would say is noted now, while the call's audit is at hand (R5).
+            let content = match lock_state(config).context.as_mut() {
+                Some(ctx) => {
+                    ctx.note_call(
+                        &tc.id,
+                        crate::context::compact::CallNote::from_outcome(tc, &outcome),
+                    );
+                    ctx.cap(&result.content, result.original_len)
+                }
                 None => result.content.clone(),
             };
             conversation.push(Message::ToolResult {
@@ -890,6 +933,12 @@ pub async fn run_exchange(
                     // model made gets a result, including the ones this stop kept from running.
                     let ran = recorded.len();
                     for skipped in &turn.tool_calls[ran..] {
+                        if let Some(ctx) = lock_state(config).context.as_mut() {
+                            ctx.note_call(
+                                &skipped.id,
+                                crate::context::compact::CallNote::not_run(skipped),
+                            );
+                        }
                         conversation.push(Message::ToolResult {
                             call_id: skipped.id.clone(),
                             name: skipped.name.clone(),
@@ -916,6 +965,7 @@ pub async fn run_exchange(
                         turns,
                         audit: audit_all,
                         usage: usage_total,
+                        compactions,
                     };
                 }
             }
@@ -942,6 +992,7 @@ pub async fn run_exchange(
         turns,
         audit: audit_all,
         usage: usage_total,
+        compactions,
     }
 }
 
@@ -1030,10 +1081,17 @@ fn build_transcript(
     turns: &[TranscriptTurn],
     audit_trail: &[AuditEvent],
     usage: Option<Usage>,
+    compactions: &[crate::transcript::CompactionEvent],
 ) -> EpisodeTranscript {
     EpisodeTranscript {
         consents: Vec::new(),
         mcp_audit: Default::default(),
+        finish_offered: false,
+        compactions: compactions.to_vec(),
+        summary_usage: compactions
+            .iter()
+            .filter_map(|e| e.usage)
+            .reduce(|a, b| a + b),
         http_scope: None,
         scenario_id: "repl".to_string(),
         model_id: model_id.to_string(),
@@ -1336,6 +1394,7 @@ pub async fn run_repl(
     };
     let mut turns: Vec<TranscriptTurn> = Vec::new();
     let mut audit_trail: Vec<AuditEvent> = Vec::new();
+    let mut compactions: Vec<crate::transcript::CompactionEvent> = Vec::new();
     let mut usage_total: Option<Usage> = None;
     let mut exchanges = 0u32;
     let mut total_tool_calls = 0u32;
@@ -1354,6 +1413,7 @@ pub async fn run_repl(
                 &turns,
                 &audit_trail,
                 usage_total,
+                &compactions,
             );
             return ReplSession {
                 conversation,
@@ -1521,6 +1581,7 @@ pub async fn run_repl(
                         &turns,
                         &audit_trail,
                         usage_total,
+                        &compactions,
                     );
                     transcript.consents = operator.map(|op| op.log()).unwrap_or_default();
                     // Each MCP server's own kernel events so far (024 FR-027).
@@ -1625,6 +1686,7 @@ pub async fn run_repl(
             turns.push(t);
         }
         audit_trail.extend(result.audit);
+        compactions.extend(result.compactions);
 
         if quit_after {
             break;
@@ -1645,6 +1707,7 @@ pub async fn run_repl(
         &turns,
         &audit_trail,
         usage_total,
+        &compactions,
     );
     transcript.consents = operator.map(|op| op.log()).unwrap_or_default();
     transcript.mcp_audit = sandbox.finish_mcp_audit().await;
@@ -2002,6 +2065,7 @@ mod tests {
     fn footer_reads_cleanly() {
         let result = ExchangeResult {
             outcome: ExchangeOutcome::Responded,
+            compactions: Vec::new(),
             model_calls: 2,
             tool_calls: 1,
             denials: 0,
@@ -2034,6 +2098,7 @@ mod tests {
         // First turn: cache written but not yet read.
         let write_only = ExchangeResult {
             outcome: ExchangeOutcome::Responded,
+            compactions: Vec::new(),
             model_calls: 1,
             tool_calls: 0,
             denials: 0,
@@ -2069,6 +2134,7 @@ mod tests {
     fn footer_omits_cost_for_unpriced_model() {
         let result = ExchangeResult {
             outcome: ExchangeOutcome::Responded,
+            compactions: Vec::new(),
             model_calls: 1,
             tool_calls: 0,
             denials: 0,

@@ -378,3 +378,38 @@ async fn the_stuck_line() {
     ]);
     assert_eq!(lines, expected);
 }
+
+/// 025 US1: the context lines (contracts/context.md "Progress and info lines"). The loop prints each
+/// as `  {line}`; context_compaction checks that it does.
+#[test]
+fn the_context_lines() {
+    use bee::transcript::{CompactionEvent, CompactionKind};
+    let event = |kind, items, turns, error: Option<&str>| CompactionEvent {
+        turn: 9,
+        kind,
+        items,
+        turns,
+        before_tokens: 6_012,
+        after_tokens: 3_480,
+        usage: None,
+        error: error.map(str::to_string),
+    };
+    let d = |e: &CompactionEvent| bee::context::describe(e, 7_004);
+    assert_eq!(
+        d(&event(CompactionKind::Elided, 4, None, None)),
+        "context: elided 4 results (6.0k → 3.5k tokens of 7.0k)"
+    );
+    assert_eq!(
+        d(&event(CompactionKind::Summarized, 11, Some((0, 10)), None)),
+        "context: summarized turns 0–10 (6.0k → 3.5k tokens of 7.0k)"
+    );
+    assert_eq!(
+        d(&event(
+            CompactionKind::Removed,
+            11,
+            Some((0, 10)),
+            Some("provider rejected request: down")
+        )),
+        "context: removed 11 turns after summary failure: provider rejected request: down"
+    );
+}

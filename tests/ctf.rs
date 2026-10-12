@@ -20,6 +20,7 @@ fn ctf_scenario(turn_limit: u32) -> Scenario {
         lease_turns: None,
         context: Default::default(),
         stuck: Default::default(),
+        finish: false,
         id: "ctf-test".into(),
         policy_path: "/dev/null".into(),
         system_prompt: "You are a red-team agent.".into(),
@@ -188,6 +189,7 @@ fn score_report_counts_techniques() {
             escalations: Vec::new(),
             retried: false,
             timed_out: false,
+            not_run: false,
             refused_by_hook: None,
             proxy_events: Vec::new(),
             call: ToolCall {
@@ -210,6 +212,9 @@ fn score_report_counts_techniques() {
     let transcript = EpisodeTranscript {
         consents: Vec::new(),
         mcp_audit: Default::default(),
+        finish_offered: false,
+        compactions: Vec::new(),
+        summary_usage: None,
         http_scope: None,
         scenario_id: "s".into(),
         model_id: "mock/x".into(),

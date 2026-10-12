@@ -22,7 +22,9 @@ fn mock_provider(dir: &Path) -> PathBuf {
     write(
         dir,
         "p.toml",
-        "[provider]\nprovider = \"mock\"\n\n[[provider.script]]\ntext = \"hi\"\n",
+        // An ad-hoc `--task` run ends through `finish` (025 US3).
+        "[provider]\nprovider = \"mock\"\n\n[[provider.script]]\ntool = \"finish\"\n\
+         args = { outcome = \"completed\", summary = \"hi\" }\n",
     )
 }
 

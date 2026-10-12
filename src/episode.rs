@@ -108,7 +108,8 @@ fn emit_turn_start(opts: &LoopOptions, report: &crate::turn::TurnStartReport) {
     }
 }
 
-fn status_label(s: &EpisodeStatus) -> String {
+/// The words the `done:` progress line and the batch summary use for `s`.
+pub fn status_label(s: &EpisodeStatus) -> String {
     match s {
         EpisodeStatus::Completed => "completed".into(),
         EpisodeStatus::Timeout => "timeout".into(),
@@ -119,6 +120,8 @@ fn status_label(s: &EpisodeStatus) -> String {
         EpisodeStatus::NotCaptured => "not_captured".into(),
         EpisodeStatus::ContextExhausted { detail } => format!("context exhausted ({detail})"),
         EpisodeStatus::Stuck { .. } => "stuck".into(),
+        EpisodeStatus::Finished { outcome, .. } => format!("finished ({outcome})"),
+        EpisodeStatus::EndedWithoutFinish => "ended without finish".into(),
     }
 }
 
@@ -129,13 +132,23 @@ const EXIT_UNAVAILABLE: u8 = 69;
 /// `EX_SOFTWARE` (sysexits): bee could not set the episode up.
 const EXIT_SOFTWARE: u8 = 70;
 
-/// The process exit code for an episode that ended with `status`. In the library, not the CLI, so the
-/// mapping is testable and an embedder gets the same answer (Constitution V).
-pub fn exit_code(status: &EpisodeStatus) -> u8 {
+/// The process exit code for an episode that ended with `status` (contracts/finish.md). In the
+/// library, not the CLI, so the mapping is testable and an embedder gets the same answer
+/// (Constitution V). When `finish` was offered, only `finish` with outcome `completed` is success: a
+/// run that timed out had not finished its task.
+pub fn exit_code(status: &EpisodeStatus, finish_offered: bool) -> u8 {
+    use crate::tools::finish::FinishOutcome;
     match status {
         EpisodeStatus::InfraError { .. } => EXIT_SOFTWARE,
         EpisodeStatus::ApiError { .. } => EXIT_UNAVAILABLE,
-        EpisodeStatus::ContextExhausted { .. } | EpisodeStatus::Stuck { .. } => EXIT_INCOMPLETE,
+        EpisodeStatus::ContextExhausted { .. }
+        | EpisodeStatus::Stuck { .. }
+        | EpisodeStatus::EndedWithoutFinish => EXIT_INCOMPLETE,
+        EpisodeStatus::Finished { outcome, .. } => match outcome {
+            FinishOutcome::Completed => 0,
+            FinishOutcome::Blocked | FinishOutcome::Abandoned => EXIT_INCOMPLETE,
+        },
+        EpisodeStatus::Timeout if finish_offered => EXIT_INCOMPLETE,
         EpisodeStatus::Completed
         | EpisodeStatus::Timeout
         | EpisodeStatus::NoToolCalls
@@ -155,7 +168,7 @@ fn rfc3339(t: OffsetDateTime) -> String {
 
 /// One provider round-trip with bounded exponential backoff on transient errors (FR-017). Never
 /// sleeps past `deadline`. Returns a human-readable detail string on terminal failure.
-async fn complete_with_retry(
+pub(crate) async fn complete_with_retry(
     model: &dyn Model,
     convo: &Conversation,
     schemas: &[crate::provider::ToolSchema],
@@ -230,9 +243,15 @@ pub async fn run_loop(
         }
         Err(e) => return infra_error(scenario, model, format!("invalid [context]: {e}")),
     };
+    // 025 US3: a standard run whose surface has `finish` must end through it. The surface decides,
+    // so a loop driven with a hand-built registry keeps its old ending unless it registers `finish`.
+    let finish_offered = scenario.mode == ScoringMode::Standard && registry.contains("finish");
+    // Whether the one reminder to call `finish` has been sent (FR-035).
+    let mut finish_reminded = false;
+
     // Stuck detection (025 US2): every call is observed, in order, across turns.
     let mut stuck = match opts.stuck.merge(scenario.stuck).resolve() {
-        Ok(cfg) => crate::stuck::StreakTracker::new(cfg),
+        Ok(cfg) => crate::stuck::StreakTracker::new(cfg).with_finish_offered(finish_offered),
         Err(e) => return infra_error(scenario, model, format!("invalid [stuck]: {e}")),
     };
     // bee's notes for the next model call (025 FR-028), queued by stuck detection and the finish
@@ -243,6 +262,8 @@ pub async fn run_loop(
     let mut audit_trail = Vec::new();
     let mut usage_total: Option<Usage> = None;
     let mut any_tool_called = false;
+    let mut compactions: Vec<crate::transcript::CompactionEvent> = Vec::new();
+    let mut summary_usage: Option<Usage> = None;
 
     // Dynamic capability grants (007-dynamic-grants): the mutable active policy, present only when
     // escalation is configured. Starts at `base`, bounded by `ceiling`.
@@ -298,13 +319,29 @@ pub async fn run_loop(
             turn_notes.push(note);
         }
 
-        let prepared = match ctx.prepare(&convo, &schemas) {
+        // The context budget (025): compact if it is on and called for, and never send a request
+        // over the budget. A summary call's cost is the session's too (FR-013).
+        let prepared = ctx
+            .prepare(&mut convo, &schemas, model, deadline, index)
+            .await;
+        for e in ctx.take_events() {
+            emit(
+                opts,
+                format!("  {}", crate::context::describe(&e, ctx.budget().tokens())),
+            );
+            compactions.push(e);
+        }
+        let prepared = match prepared {
             Ok(p) => p,
             Err(e) => {
                 status = EpisodeStatus::ContextExhausted { detail: e.detail };
                 break;
             }
         };
+        if let Some(u) = prepared.summary_usage {
+            usage_total = Some(usage_total.map_or(u, |acc| acc + u));
+            summary_usage = Some(summary_usage.map_or(u, |acc| acc + u));
+        }
 
         let call_start = Instant::now();
         let turn =
@@ -371,6 +408,17 @@ pub async fn run_loop(
                 text: assistant_text,
                 tool_calls: Vec::new(),
             });
+            // With `finish` offered, prose does not end the run: the first time, the model is told
+            // how a run ends; the second time, the run ends without finishing (FR-035).
+            if finish_offered {
+                if finish_reminded {
+                    status = EpisodeStatus::EndedWithoutFinish;
+                    break;
+                }
+                finish_reminded = true;
+                pending.push(HarnessNote::new(NoteKind::FinishRequired, FINISH_REMINDER));
+                continue;
+            }
             status = if any_tool_called {
                 EpisodeStatus::Completed
             } else {
@@ -385,7 +433,7 @@ pub async fn run_loop(
         });
 
         let mut recorded: Vec<RecordedCall> = Vec::new();
-        for tc in &turn.tool_calls {
+        for (at, tc) in turn.tool_calls.iter().enumerate() {
             any_tool_called = true;
 
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -480,17 +528,33 @@ pub async fn run_loop(
                 is_error: result.is_error,
                 provenance: result.provenance.clone(),
             });
+            ctx.note_call(
+                &tc.id,
+                crate::context::compact::CallNote::from_outcome(tc, &outcome),
+            );
 
             // A terminal tool (`submit_flag`/`give_up`, US3) ends the episode immediately. The loop
             // stays tool-name-agnostic except for the one distinction that decides the status:
             // `submit_flag` with a non-error (correct) result ⇒ Captured, anything else ⇒ NotCaptured.
             if result.terminal {
-                status = if tc.name == "submit_flag" && !result.is_error {
-                    EpisodeStatus::Captured { turn: index }
-                } else {
-                    EpisodeStatus::NotCaptured
+                status = match tc.name.as_str() {
+                    "submit_flag" if !result.is_error => EpisodeStatus::Captured { turn: index },
+                    // `finish` is terminal only for arguments it accepted, so they parse here.
+                    "finish" => match crate::tools::finish::parse(&tc.arguments) {
+                        Some((outcome, summary)) => EpisodeStatus::Finished {
+                            outcome,
+                            summary,
+                            turn: index,
+                        },
+                        None => EpisodeStatus::EndedWithoutFinish,
+                    },
+                    _ => EpisodeStatus::NotCaptured,
                 };
                 recorded.push(outcome.to_recorded(tc));
+                // Calls after a terminal one in the same turn are recorded, never run (FR-034).
+                for skipped in &turn.tool_calls[at + 1..] {
+                    recorded.push(not_run(skipped));
+                }
                 turns.push(TranscriptTurn {
                     notes: std::mem::take(&mut turn_notes),
                     index,
@@ -565,11 +629,17 @@ pub async fn run_loop(
             ms_since(start)
         ),
     );
+    if let EpisodeStatus::Finished { summary, .. } = &status {
+        emit(opts, format!("  summary: {}", preview(summary, 200)));
+    }
 
     let ended_at = OffsetDateTime::now_utc();
     EpisodeTranscript {
         consents: Vec::new(),
         mcp_audit: Default::default(),
+        finish_offered,
+        compactions,
+        summary_usage,
         http_scope: None,
         scenario_id: scenario.id.clone(),
         model_id: model.id().to_string(),
@@ -586,12 +656,37 @@ pub async fn run_loop(
     }
 }
 
+/// What the model is told the first time it ends a turn with prose while `finish` is offered
+/// (contracts/finish.md).
+pub const FINISH_REMINDER: &str = "[bee] This run ends only when you call finish. If the task is \
+    done, call finish with outcome \"completed\" and a summary; otherwise continue working.";
+
+/// The record of a call that came after a terminal one in the same turn: it was never run.
+fn not_run(call: &crate::provider::ToolCall) -> RecordedCall {
+    RecordedCall {
+        call: call.clone(),
+        result: crate::tools::ToolResult::error("not run: the run had already finished"),
+        audit: Vec::new(),
+        proxy_events: Vec::new(),
+        denied_attempt_audit: Vec::new(),
+        denied_attempt_proxy_events: Vec::new(),
+        escalations: Vec::new(),
+        retried: false,
+        timed_out: false,
+        not_run: true,
+        refused_by_hook: None,
+    }
+}
+
 /// Build an `infra_error` transcript (setup failed; the loop never ran).
 fn infra_error(scenario: &Scenario, model: &dyn Model, detail: String) -> EpisodeTranscript {
     let now = rfc3339(OffsetDateTime::now_utc());
     EpisodeTranscript {
         consents: Vec::new(),
         mcp_audit: Default::default(),
+        finish_offered: false,
+        compactions: Vec::new(),
+        summary_usage: None,
         http_scope: None,
         scenario_id: scenario.id.clone(),
         model_id: model.id().to_string(),
@@ -821,6 +916,12 @@ pub async fn run_episode_with(
     transcript
 }
 
+/// Whether a headless run of `scenario` is offered `finish` (025 US3, contracts/finish.md): a
+/// standard-mode run, unless the scenario opts out. A CTF run ends with its own terminal tools.
+pub fn offers_finish(scenario: &Scenario) -> bool {
+    scenario.mode == ScoringMode::Standard && scenario.finish
+}
+
 /// The session a scenario asks for. A `policy_path` that does not parse (the `/dev/null` placeholder
 /// of a host run) is no policy: nothing to widen, nothing to grant. An unreadable ceiling is the
 /// policy itself — widening is still on, and widens nothing.
@@ -849,7 +950,13 @@ pub(crate) fn spec_from_scenario(
         } else {
             crate::session::Enforcement::Host
         }),
-        tools: scenario.tools.clone(),
+        tools: {
+            let mut tools = scenario.tools.clone();
+            if offers_finish(scenario) && !tools.iter().any(|t| t == "finish") {
+                tools.push("finish".into());
+            }
+            tools
+        },
         ctf_flag: scenario.workdir.flag.as_ref().map(|f| f.value.clone()),
         skill_roots: scenario.skills.clone(),
         mcp: scenario.mcp.clone(),
@@ -907,6 +1014,7 @@ mod mcp_cgroup_spike {
             lease_turns: None,
             context: Default::default(),
             stuck: Default::default(),
+            finish: false,
             id: "mcp-spike".into(),
             policy_path: policy,
             system_prompt: "spike".into(),

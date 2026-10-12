@@ -261,7 +261,7 @@ async fn oversize_request_ends_context_exhausted() {
         "no request over budget was sent"
     );
     assert_eq!(
-        bee::episode::exit_code(&t.status),
+        bee::episode::exit_code(&t.status, false),
         bee::episode::EXIT_INCOMPLETE
     );
 }

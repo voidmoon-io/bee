@@ -343,7 +343,7 @@ fn the_bundle_holds_system_roots_plus_one_ca_and_no_key_anywhere() {
     let s = w(
         "s.toml",
         "[scenario]\nid = \"tls\"\npolicy_path = \"policy.toml\"\nsystem_prompt = \"t\"\ntask = \"t\"\n\
-         turn_limit = 4\ntimeout_secs = 60\ntools = [\"bash\"]\n"
+         turn_limit = 4\ntimeout_secs = 60\ntools = [\"bash\"]\nfinish = false\n"
             .into(),
     );
     let probe =

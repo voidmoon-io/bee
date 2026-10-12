@@ -727,10 +727,26 @@ EOF
     emit lease-expiry FAIL "denied attempts=$denied_attempts; $(grep -o 'lease expired[^"]*' "$WORK/lease.log" | head -1)"
   fi
 
-  # lease-release — a `Deescalate` hook releasing the lease narrows through the same turn-start step
-  # as expiry. No hook can be configured from the `bee` binary, so the case is pending until one can
-  # (024 PR 4). Host coverage: tests/hooks_leases.rs.
-  echo "RESULT|lease-release|PENDING|needs a configurable release hook; narrowing path shared with lease-expiry"
+  # lease-release — the same two writes, but the grant does not expire: a `Deescalate` hook releases
+  # it at the top of turn 1 (024 SC-010). The hook is the vm-test build's `VmReleaseHook`, set by
+  # `BEE_VM_RELEASE_LEASE`. After the release the scope is reloaded narrower, so turn 1's write is
+  # kernel-denied again before it is re-escalated. Without the release it succeeds first time.
+  sed -e 's/^id .*/id            = "lease-release"/' -e '/^lease_turns/d' \
+    "$WORK/lease.scn.toml" >"$WORK/release.scn.toml"
+  rm -f /home/ubuntu/dyngrant/out.txt
+  sudo env BEE_VM_RELEASE_LEASE=1:g0 "$BEE" run --scenario "$WORK/release.scn.toml" \
+    --provider "$WORK/lease.prov.toml" --out "$WORK/release.json" >"$WORK/release.log" 2>&1
+  t="$WORK/release.json"
+  denied_attempts=$(grep -c '"denied_attempt_audit"' "$t" 2>/dev/null || echo 0)
+  if [ -f "$t" ] \
+     && grep -q 'lease released: g0' "$WORK/release.log" \
+     && ! grep -q 'lease expired' "$WORK/release.log" \
+     && [ "$denied_attempts" -eq 2 ] \
+     && [ "$(cat /home/ubuntu/dyngrant/out.txt 2>/dev/null)" = "turn 1" ]; then
+    emit lease-release PASS "lease released at turn 1; the kernel denied the same write again"
+  else
+    emit lease-release FAIL "denied attempts=$denied_attempts; $(grep -o 'lease [a-z]*: [^"]*' "$WORK/release.log" | head -1)"
+  fi
   rm -rf /home/ubuntu/dynwork /home/ubuntu/dyngrant
 else
   emit episode-file-deny FAIL "bee not shipped to $BEE"

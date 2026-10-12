@@ -181,6 +181,48 @@ impl LoopHook for ProxyRefusalHook {
     }
 }
 
+/// VM-test builds only: release lease `grant` at the top of model turn `turn`, as a real
+/// [`Flow::Deescalate`] hook would. Set from outside by `BEE_VM_RELEASE_LEASE=<turn>:<grant>`, so the
+/// BPF-LSM matrix can prove that a release narrows the kernel (024 SC-010, `lease-release`).
+#[cfg(feature = "vm-test")]
+pub struct VmReleaseHook {
+    pub turn: u32,
+    pub grant: crate::grants::GrantId,
+}
+
+#[cfg(feature = "vm-test")]
+impl VmReleaseHook {
+    /// The hook `BEE_VM_RELEASE_LEASE` asks for, if it is set and well formed.
+    pub fn from_env() -> Option<Self> {
+        Self::parse(&std::env::var("BEE_VM_RELEASE_LEASE").ok()?)
+    }
+
+    fn parse(v: &str) -> Option<Self> {
+        let (turn, grant) = v.split_once(':')?;
+        Some(VmReleaseHook {
+            turn: turn.parse().ok()?,
+            grant: grant.to_string(),
+        })
+    }
+}
+
+#[cfg(feature = "vm-test")]
+#[async_trait::async_trait]
+impl LoopHook for VmReleaseHook {
+    fn observes(&self, kind: StepEventKind) -> bool {
+        kind == StepEventKind::TurnStart
+    }
+
+    async fn on_event(&self, ev: &StepEvent<'_>) -> Flow {
+        match ev {
+            StepEvent::TurnStart { turn } if *turn == self.turn => {
+                Flow::Deescalate(self.grant.clone())
+            }
+            _ => Flow::Continue,
+        }
+    }
+}
+
 /// Build a [`GrantDelta`] from a [`SkillRequires`] block (proactive path). Errors on a malformed
 /// access word so a bad skill is refused, not silently narrowed.
 pub fn delta_from_requires(req: &SkillRequires) -> Result<GrantDelta, String> {
@@ -448,5 +490,23 @@ mod tests {
     async fn disabled_denial_hook_does_not_observe() {
         let hook = DenialEscalationHook { enabled: false };
         assert!(!hook.observes(StepEventKind::KernelDenial));
+    }
+
+    #[cfg(feature = "vm-test")]
+    #[tokio::test]
+    async fn vm_release_hook_releases_its_lease_at_its_turn_only() {
+        assert!(VmReleaseHook::parse("1").is_none(), "no grant");
+        assert!(VmReleaseHook::parse("x:g0").is_none(), "no turn");
+        let hook = VmReleaseHook::parse("1:g0").expect("well formed");
+        assert!(hook.observes(StepEventKind::TurnStart));
+        assert!(!hook.observes(StepEventKind::KernelDenial));
+        assert_eq!(
+            hook.on_event(&StepEvent::TurnStart { turn: 0 }).await,
+            Flow::Continue
+        );
+        assert_eq!(
+            hook.on_event(&StepEvent::TurnStart { turn: 1 }).await,
+            Flow::Deescalate("g0".into())
+        );
     }
 }

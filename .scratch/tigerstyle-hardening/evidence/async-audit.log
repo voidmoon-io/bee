@@ -81,4 +81,3 @@ test resolve::tests::resolve_exec_rejects_missing ... ok
 test spawn::tests::resolves_absolute_and_path ... ok
 
 test result: ok. 45 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
-

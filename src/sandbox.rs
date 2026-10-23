@@ -59,6 +59,9 @@ pub struct EnforcedSandbox {
     pub scope: bee_userspace::Scope,
     pub reader: bee_userspace::events::AuditReader,
     strip_env: Vec<String>,
+    /// Set when a reload failed and could not be rolled back: the scope's rules are then a mixture
+    /// that may be wider than any policy anyone approved, so no further tool child may start in it.
+    poisoned: Option<String>,
 }
 
 /// A tool child confined to a live bee scope whose audit events arrive via a demux subscription
@@ -101,8 +104,9 @@ impl Sandbox {
 
 #[cfg(feature = "enforce")]
 impl EnforcedSandbox {
-    /// Compile `policy` and hand the fresh plan to `Engine::reload_scope`, updating the scope's
-    /// tracked `NET_ALLOW` keys. On any error the prior enforced maps are left in place.
+    /// Compile `policy` and hand the fresh plan to `Engine::reload_scope`. On a refused reload the
+    /// prior enforced maps are left in place; on one that could not be rolled back the sandbox is
+    /// poisoned and refuses every further tool child.
     fn reload(&mut self, policy: &bee_core::Policy) -> Result<(), String> {
         use bee_userspace::{EnforcementPlan, ScopeMode, SystemResolver};
         let resolver = SystemResolver::current();
@@ -111,12 +115,18 @@ impl EnforcedSandbox {
             .map_err(|e| format!("reload compile: {e}"))?;
         let plan = EnforcementPlan::prepare(&compiled, ScopeMode::Enforce)
             .map_err(|e| format!("reload plan: {e}"))?;
-        let new_keys = self
-            .engine
-            .reload_scope(self.scope.cgroup_id, &plan, &self.scope.net_keys)
-            .map_err(|e| format!("reload scope: {e}"))?;
-        self.scope.net_keys = new_keys;
-        Ok(())
+        if let Some(why) = &self.poisoned {
+            return Err(format!("reload scope: already in an unknown state: {why}"));
+        }
+        match self.engine.reload_scope(self.scope.cgroup_id, &plan) {
+            Ok(()) => Ok(()),
+            Err(e @ bee_userspace::ReloadError::Refused(_)) => Err(format!("reload scope: {e}")),
+            Err(e @ bee_userspace::ReloadError::Inconsistent(_)) => {
+                let msg = e.to_string();
+                self.poisoned = Some(msg.clone());
+                Err(format!("reload scope: {msg}"))
+            }
+        }
     }
 }
 
@@ -151,6 +161,7 @@ impl Sandbox {
             scope,
             reader,
             strip_env,
+            poisoned: None,
         }))
     }
 
@@ -192,6 +203,11 @@ impl Sandbox {
             }
             #[cfg(feature = "enforce")]
             Sandbox::Enforced(e) => {
+                if let Some(why) = &e.poisoned {
+                    return Err(SpawnError::Io(io::Error::other(format!(
+                        "scope is in an unknown state after a failed reload; refusing to run: {why}"
+                    ))));
+                }
                 let join = e
                     .scope
                     .join_closure()

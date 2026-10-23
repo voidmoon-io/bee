@@ -102,7 +102,7 @@ async fn run(case: &Case, timeout: TimeoutPolicy) -> Ran {
         .with_timeout(Duration::from_secs(5)),
         default_ttl: Ttl::Forever,
     };
-    let mut active = ActivePolicy::new(case.base.clone(), case.ceiling.clone());
+    let mut active = ActivePolicy::new(case.base.clone(), case.ceiling.clone()).unwrap();
     let call = ToolCall {
         id: "c1".into(),
         name: SCRIPTED.into(),
@@ -295,13 +295,12 @@ async fn no_retry_starts_when_no_time_is_left() {
         Attempt::error("EACCES").with_audit(vec![denial("/tmp/x")]),
         Attempt::ok("written"),
     ]);
-    // A deadline already reached. The first attempt is ready at once (a zero timeout still polls
-    // it), is denied, and the widening is granted — but nothing is left for a retry.
+    // An expired budget must not poll even an immediately-ready tool or consent handler.
     let r = run(&case, TimeoutPolicy::Deadline(Instant::now())).await;
-    assert_eq!(escalations(&r.out), vec![(kernel("/tmp/x"), "granted")]);
-    assert_eq!(r.attempts, 1, "no retry started");
+    assert!(r.out.timed_out);
+    assert!(r.out.escalations.is_empty());
+    assert_eq!((r.asked, r.attempts), (0, 0));
     assert!(!r.out.retried);
-    assert_eq!(r.out.result.content, "EACCES");
 }
 
 #[cfg(feature = "intercept")]
@@ -311,8 +310,8 @@ mod proxy {
 
     fn proxy_case(attempts: Vec<Attempt>) -> Case {
         let mut case = Case::new(attempts);
-        case.base = http_policy(&[]);
-        case.ceiling = http_policy(&["10.0.0.9:80"]);
+        case.base = http_policy(&["10.0.0.1:80"]);
+        case.ceiling = http_policy(&["10.0.0.1:80", "10.0.0.9:80"]);
         case.proxy = vec![vec![refusal("c1", "10.0.0.9", 80)], Vec::new()];
         case
     }
@@ -381,4 +380,83 @@ mod proxy {
         assert!(r.out.proxy_events.iter().any(|e| e.kind.is_refusal()));
         assert!(r.out.denied_attempt_proxy_events.is_empty());
     }
+}
+
+/// Cancellation after the tool policy changes but before the proxy acknowledges must prevent
+/// further execution: neither a lease nor tool membership may claim that update committed.
+#[tokio::test]
+async fn canceled_proxy_policy_update_stops_future_dispatch() {
+    use bee::grants::escalate::escalate;
+    use bee::grants::{GrantDelta, GrantOrigin};
+    use bee::sandbox::HttpScopeHook;
+    use std::sync::atomic::AtomicBool;
+
+    struct PendingScope(AtomicBool);
+    impl HttpScopeHook for PendingScope {
+        fn compile(
+            &self,
+            policy: &Policy,
+        ) -> Result<(bee_core::CompiledPolicy, bee_core::compiler::HttpScope), String> {
+            FakeHttpScope::default().compile(policy)
+        }
+        fn update<'a>(
+            &'a self,
+            _: bee_core::compiler::HttpScope,
+        ) -> futures_util::future::BoxFuture<'a, Result<(), String>> {
+            self.0.store(true, Ordering::SeqCst);
+            Box::pin(std::future::pending())
+        }
+    }
+
+    let base = fixtures::http_policy(&["10.0.0.1:80"]);
+    let ceiling = fixtures::http_policy(&["10.0.0.1:80", "10.0.0.9:80"]);
+    let mut active = ActivePolicy::new(base.clone(), ceiling).unwrap();
+    let hook = Arc::new(PendingScope(AtomicBool::new(false)));
+    let mut sandbox = Sandbox::host(vec![]);
+    sandbox.set_http_scope_hook(hook.clone());
+    let mut registry = bee::tools::registry_for(&["bash".into()], None);
+    let operator = bee::operator::Operator::with_consent(
+        bee::operator::OperatorKind::Autonomous,
+        RecordingConsent::new(true),
+    );
+    let update = escalate(
+        &mut active,
+        GrantOrigin::Explicit,
+        GrantDelta {
+            http_targets: vec!["10.0.0.9:80".into()],
+            tools: vec!["give_up".into()],
+            ..Default::default()
+        },
+        Ttl::Forever,
+        0,
+        &operator,
+        &mut sandbox,
+        &mut registry,
+    );
+    assert!(tokio::time::timeout(Duration::from_millis(20), update)
+        .await
+        .is_err());
+    assert!(hook.0.load(Ordering::SeqCst));
+    assert!(active.leases().is_empty());
+    assert_eq!(active.active(), &base);
+    assert!(!registry.contains("give_up"));
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("must-not-run");
+    let result = registry
+        .execute(
+            &ToolCall {
+                id: "after-cancel".into(),
+                name: "bash".into(),
+                arguments: serde_json::json!({"command": format!("touch '{}'", marker.display())}),
+            },
+            &sandbox,
+        )
+        .await;
+    assert!(result.is_error);
+    assert!(
+        result.content.contains("policy update canceled"),
+        "{}",
+        result.content
+    );
+    assert!(!marker.exists());
 }

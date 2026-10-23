@@ -180,12 +180,12 @@ pub struct ReplEscalation {
 
 impl ReplEscalation {
     /// Build session state from an escalation config, starting the active policy at its `base`.
-    pub fn new(config: crate::grants::escalate::LoopEscalation) -> Self {
-        let active = crate::grants::ActivePolicy::new(config.base.clone(), config.ceiling.clone());
-        ReplEscalation {
+    pub fn new(config: crate::grants::escalate::LoopEscalation) -> Result<Self, String> {
+        let active = crate::grants::ActivePolicy::new(config.base.clone(), config.ceiling.clone())?;
+        Ok(ReplEscalation {
             config,
             active: tokio::sync::Mutex::new(active),
-        }
+        })
     }
 }
 
@@ -303,11 +303,15 @@ pub enum ExchangeOutcome {
     BudgetExhausted,
     /// A provider error (after retries) ended the exchange.
     ApiError(String),
+    Terminated(String),
     /// The next request could not be brought within the context budget (025 FR-002, FR-014).
     ContextExhausted(String),
     /// The same failing call was repeated until stuck detection ended the exchange (025 FR-029). The
     /// session continues.
-    Stuck { tool: String, repeats: u32 },
+    Stuck {
+        tool: String,
+        repeats: u32,
+    },
 }
 
 /// The longest a summary call made while preparing a REPL request may take (025).
@@ -599,6 +603,26 @@ pub async fn run_exchange(
     let mut usage_total: Option<Usage> = None;
     let mut compactions: Vec<crate::transcript::CompactionEvent> = Vec::new();
 
+    macro_rules! terminate {
+        ($reason:expr) => {{
+            return ExchangeResult {
+                outcome: ExchangeOutcome::Terminated($reason),
+                model_calls,
+                tool_calls,
+                denials,
+                turns,
+                audit: audit_all,
+                usage: usage_total,
+                compactions,
+            };
+        }};
+    }
+    if let Some(esc) = &config.escalation {
+        let active = esc.active.lock().await;
+        if let Err(e) = esc.config.initialize(&active, sandbox) {
+            terminate!(e);
+        }
+    }
     for _step in 0..config.agent_turn_budget {
         // Fold in any steering the user typed since the last model call — the agent catches it now.
         drain_steering(steering, conversation, output);
@@ -608,7 +632,12 @@ pub async fn run_exchange(
         let model_turn = {
             let mut state = lock_state(config);
             let t = state.model_turns;
-            state.model_turns += 1;
+            state.model_turns = match state.model_turns.checked_add(1) {
+                Some(n) => n,
+                None => {
+                    terminate!("session turn counter exhausted".into());
+                }
+            };
             t
         };
         {
@@ -629,8 +658,28 @@ pub async fn run_exchange(
             )
             .await;
             report_turn_start(output, &report);
+            if let Some(e) = report.narrow_error {
+                terminate!(e);
+            }
         }
         let schemas = registry.schemas();
+        if let Some(esc) = &config.escalation {
+            let mut active = esc.active.lock().await;
+            if let Err(e) = crate::grants::escalate::lifecycle_step(
+                &esc.config,
+                &mut active,
+                crate::hooks::StepEvent::BeforeModelCall {
+                    convo: conversation,
+                    schemas: &schemas,
+                },
+                sandbox,
+                registry,
+            )
+            .await
+            {
+                terminate!(e);
+            }
+        }
 
         // Harness notes for this turn (019 US8: "N new passive leads", 025 reminders) — bee's own
         // words, recorded on the turn they precede.
@@ -849,6 +898,26 @@ pub async fn run_exchange(
             )
             .await;
             drop(active_guard);
+            if let Some(warning) = sandbox.audit_warning() {
+                output.error(&warning);
+            }
+            if let Some(detail) = outcome
+                .terminated
+                .as_ref()
+                .cloned()
+                .or_else(|| sandbox.check_cleanup().err())
+            {
+                audit_all.extend(outcome.audit_trail().cloned());
+                recorded.push(outcome.to_recorded(tc));
+                turns.push(TranscriptTurn {
+                    index: turns.len() as u32,
+                    assistant_text,
+                    calls: recorded,
+                    duration_ms: turn_start.elapsed().as_millis() as u64,
+                    notes: turn_notes,
+                });
+                terminate!(detail);
+            }
             for rec in &outcome.escalations {
                 let subject = match &rec.trigger {
                     crate::call::Trigger::Proactive => "capability".to_string(),
@@ -1084,6 +1153,7 @@ fn build_transcript(
     compactions: &[crate::transcript::CompactionEvent],
 ) -> EpisodeTranscript {
     EpisodeTranscript {
+        audit_health: Default::default(),
         consents: Vec::new(),
         mcp_audit: Default::default(),
         finish_offered: false,
@@ -1586,6 +1656,7 @@ pub async fn run_repl(
                     transcript.consents = operator.map(|op| op.log()).unwrap_or_default();
                     // Each MCP server's own kernel events so far (024 FR-027).
                     transcript.mcp_audit = sandbox.mcp_audit().clone();
+                    transcript.audit_health = sandbox.audit_health();
                     match std::fs::write(&path, transcript.to_json()) {
                         Ok(()) => output.info(&format!("saved transcript to {path}")),
                         Err(e) => output.error(&format!("could not write {path}: {e}")),
@@ -1711,6 +1782,7 @@ pub async fn run_repl(
     );
     transcript.consents = operator.map(|op| op.log()).unwrap_or_default();
     transcript.mcp_audit = sandbox.finish_mcp_audit().await;
+    transcript.audit_health = sandbox.audit_health();
     ReplSession {
         conversation,
         exchanges,

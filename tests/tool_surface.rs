@@ -21,6 +21,7 @@ mod harness;
 
 fn policy(fs: &[(&str, Access)]) -> Policy {
     let mut p = Policy {
+        defaults: Default::default(),
         name: "p".into(),
         description: None,
         mode: Mode::Enforce,
@@ -46,7 +47,7 @@ fn call(name: &str, arguments: serde_json::Value) -> ToolCall {
 
 /// Grant `tools` mid-session through `escalate`, the way a kernel denial or a skill requirement does.
 async fn grant(registry: &mut ToolRegistry, tools: &[&str]) {
-    let mut active = ActivePolicy::new(policy(&[]), policy(&[("/tmp", Access::Write)]));
+    let mut active = ActivePolicy::new(policy(&[]), policy(&[("/tmp", Access::Write)])).unwrap();
     let mut delta = GrantDelta::default();
     delta
         .filesystem

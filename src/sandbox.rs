@@ -143,10 +143,48 @@ pub trait CallHooks: Send + Sync {
     }
 }
 
+#[derive(Default)]
+struct AuditState {
+    retained: usize,
+    health: crate::transcript::AuditHealth,
+    warned: bool,
+}
+
+/// A canceled cross-layer policy update must stop further dispatch.
+pub(crate) struct PolicyUpdateGuard(Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>);
+impl PolicyUpdateGuard {
+    pub(crate) fn finish(mut self) {
+        self.0.take();
+    }
+}
+impl Drop for PolicyUpdateGuard {
+    fn drop(&mut self) {
+        if let Some(state) = self.0.take() {
+            *state.lock().expect("cleanup state") =
+                Some("policy update canceled before both layers committed".into());
+        }
+    }
+}
+
+impl AuditState {
+    fn retain(&mut self, events: &mut Vec<AuditEvent>) {
+        const EVENTS_MAX: usize = 4096;
+        let keep = events.len().min(EVENTS_MAX.saturating_sub(self.retained));
+        self.health.retention_dropped = self
+            .health
+            .retention_dropped
+            .saturating_add((events.len() - keep) as u64);
+        self.retained += keep;
+        events.truncate(keep);
+    }
+}
+
 /// Everything that decides a tool child's environment: what is stripped, and what — for the current
 /// call — is added back.
 #[derive(Default)]
 struct ChildEnv {
+    cleanup_error: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    audit_state: Box<std::sync::Mutex<AuditState>>,
     strip_env: Vec<String>,
     call: Option<CallContext>,
     provider: Option<EnvProvider>,
@@ -397,6 +435,15 @@ impl Sandbox {
     /// engine — so it returns an error (fail-closed: escalation refuses rather than under-enforce).
     #[cfg_attr(not(feature = "enforce"), allow(unused_variables))]
     pub fn reload(&mut self, policy: &bee_core::Policy) -> Result<(), String> {
+        self.check_cleanup()?;
+        #[cfg(feature = "enforce")]
+        if let Some(path) = self.scope_path() {
+            let events =
+                std::fs::read_to_string(path.join("cgroup.events")).map_err(|e| e.to_string())?;
+            if !events.lines().any(|l| l == "populated 0") {
+                return Err("policy reload requires an empty scope; a child or persistent service is still running".into());
+            }
+        }
         match self {
             Sandbox::Host(_) => Ok(()),
             #[cfg(feature = "enforce")]
@@ -414,24 +461,28 @@ impl Sandbox {
 impl EnforcedSandbox {
     /// Drain the ring once: return the tool scope's events, buffer the sidecar's (019 P4).
     fn drain_into_buffers(&mut self) -> Vec<AuditEvent> {
-        let tool_cg = self.scope.cgroup_id;
+        let mut batch = Vec::new();
+        let exhausted = self.reader.drain(&mut |ev| batch.push(ev));
+        {
+            let mut state = self.env.audit_state.lock().expect("audit state");
+            state.health.drain_limited |= !exhausted;
+            state.retain(&mut batch);
+        }
         let side = self
             .sidecar
             .as_ref()
-            .map(|s| (s.scope.cgroup_id, s.label.clone()));
+            .map(|s| (s.scope.cgroup_id, s.label.as_str()));
         let mut tool = Vec::new();
-        let sidecar_buf = &mut self.sidecar_audit;
-        self.reader.drain(&mut |ev| {
-            let routed = route_audit(&ev, tool_cg, side.as_ref().map(|(c, l)| (*c, l.as_str())));
-            match routed {
+        for ev in batch {
+            match route_audit(&ev, self.scope.cgroup_id, side) {
                 Some(TaggedAudit {
                     event,
                     scope_label: None,
                 }) => tool.push(event),
-                Some(TaggedAudit { event, .. }) => sidecar_buf.push(event),
-                None => {}
+                Some(TaggedAudit { event, .. }) => self.sidecar_audit.push(event),
+                None => (),
             }
-        });
+        }
         tool
     }
 
@@ -613,9 +664,9 @@ impl Sandbox {
         #[cfg(feature = "enforce")]
         if let (Err(e), Some(p)) = (&updated, previous) {
             if let Err(r) = self.reload_sidecar_plan(&p) {
-                return Err(format!(
-                    "{e}; and the proxy scope rollback also failed: {r}"
-                ));
+                let detail = format!("{e}; and the proxy scope rollback also failed: {r}");
+                self.cleanup_failed(detail.clone());
+                return Err(detail);
             }
         }
         updated
@@ -806,7 +857,11 @@ impl Sandbox {
             #[cfg(feature = "test-support")]
             Sandbox::Host(HostSandbox {
                 scripted: Some(s), ..
-            }) => s.pop_proxy(),
+            }) => {
+                let mut events = s.pop_proxy();
+                self.retain_audit(&mut events);
+                events
+            }
             _ => Vec::new(),
         }
     }
@@ -854,6 +909,8 @@ impl Sandbox {
         program: &str,
         args: &[String],
     ) -> Result<Command, SpawnError> {
+        self.check_cleanup()
+            .map_err(|e| SpawnError::Io(io::Error::other(e)))?;
         match self {
             Sandbox::Host(h) => {
                 // No cgroup join; hardening + env strip only.
@@ -887,6 +944,118 @@ impl Sandbox {
                 Ok(cmd)
             }
         }
+    }
+
+    fn audit_state(&self) -> &std::sync::Mutex<AuditState> {
+        &self.child_env().audit_state
+    }
+
+    pub fn audit_health(&self) -> crate::transcript::AuditHealth {
+        #[allow(unused_mut)]
+        let mut health = self
+            .audit_state()
+            .lock()
+            .expect("audit state")
+            .health
+            .clone();
+        #[cfg(feature = "concurrent")]
+        if let Self::Concurrent(c) = self {
+            use std::sync::atomic::Ordering;
+            health.queue_dropped = c.subscription.dropped.load(Ordering::Relaxed);
+            health.stream_failed = c.subscription.stream_failed.load(Ordering::Relaxed);
+        }
+        health
+    }
+
+    pub(crate) fn audit_warning(&self) -> Option<String> {
+        let health = self.audit_health();
+        let mut state = self.audit_state().lock().expect("audit state");
+        if health.incomplete() && !state.warned {
+            state.warned = true;
+            Some(format!("audit evidence incomplete: {} queue drops, {} retention drops, stream failed={}, drain limited={}", health.queue_dropped, health.retention_dropped, health.stream_failed, health.drain_limited))
+        } else {
+            None
+        }
+    }
+
+    /// Bound retained events over the sandbox's entire lifetime, including REPL exchanges.
+    pub(crate) fn retain_audit(&self, events: &mut Vec<AuditEvent>) {
+        self.audit_state()
+            .lock()
+            .expect("audit state")
+            .retain(events);
+    }
+
+    fn cleanup_error(&self) -> &std::sync::Mutex<Option<String>> {
+        &self.child_env().cleanup_error
+    }
+
+    pub fn check_cleanup(&self) -> Result<(), String> {
+        #[cfg(feature = "enforce")]
+        if let Self::Enforced(e) = self {
+            if let Some(reason) = &e.poisoned {
+                return Err(reason.clone());
+            }
+        }
+        match &*self.cleanup_error().lock().expect("cleanup state") {
+            Some(error) => Err(error.clone()),
+            None => Ok(()),
+        }
+    }
+
+    pub(crate) fn policy_update_guard(&self) -> PolicyUpdateGuard {
+        PolicyUpdateGuard(Some(self.child_env().cleanup_error.clone()))
+    }
+
+    pub(crate) fn cleanup_failed(&self, error: String) {
+        *self.cleanup_error().lock().expect("cleanup state") = Some(error);
+    }
+
+    #[cfg(feature = "enforce")]
+    pub(crate) fn scope_path(&self) -> Option<&std::path::Path> {
+        match self {
+            Self::Host(_) => None,
+            Self::Enforced(e) => Some(&e.scope.path),
+            #[cfg(feature = "concurrent")]
+            Self::Concurrent(c) => Some(&c.scope.path),
+        }
+    }
+
+    /// Short-lived tools own a child cgroup. Persistent transports use `tool_command` instead.
+    pub(crate) fn invocation_command(
+        &self,
+        program: &str,
+        args: &[String],
+    ) -> Result<(Command, Option<std::path::PathBuf>), SpawnError> {
+        self.check_cleanup()
+            .map_err(|e| SpawnError::Io(io::Error::other(e)))?;
+        #[cfg(feature = "enforce")]
+        if let Some(parent) = self.scope_path() {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            // Check poisoning before creating any resources.
+            let _ = self.tool_command(program, args)?;
+            let path = parent.join(format!("call-{}", NEXT.fetch_add(1, Ordering::Relaxed)));
+            std::fs::create_dir(&path)?;
+            let result = (|| {
+                let _kill = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(path.join("cgroup.kill"))?;
+                let procs = bee_userspace::cgroup::procs_path_c(&path)?;
+                let join = move || bee_userspace::cgroup::raw_join_self(&procs);
+                let mut cmd = hardened_command(program, args, Some(join))?;
+                self.child_env().apply(&mut cmd, None)?;
+                Ok(cmd)
+            })();
+            return match result {
+                Ok(cmd) => Ok((cmd, Some(path))),
+                Err(e) => {
+                    let _ = std::fs::remove_dir(path);
+                    Err(e)
+                }
+            };
+        }
+        self.tool_command(program, args).map(|cmd| (cmd, None))
     }
 
     /// Give the async audit path a moment to deliver this call's events before a drain. No-op for
@@ -955,7 +1124,7 @@ impl Sandbox {
     }
 
     fn drain_scope_audit(&mut self) -> Vec<AuditEvent> {
-        match self {
+        let mut out = match self {
             #[cfg(feature = "test-support")]
             Sandbox::Host(HostSandbox {
                 scripted: Some(s), ..
@@ -973,22 +1142,28 @@ impl Sandbox {
                 // anyway as a fail-safe against cross-contamination (SC-004).
                 let cg = c.scope.cgroup_id;
                 let mut out = Vec::new();
-                while let Ok(ev) = c.subscription.rx.try_recv() {
+                for _ in 0..1024 {
+                    let Ok(ev) = c.subscription.rx.try_recv() else {
+                        break;
+                    };
                     if ev.cgroup_id == cg {
                         out.push(ev);
                     }
                 }
                 out
             }
+        };
+        #[cfg(feature = "enforce")]
+        if matches!(self, Self::Enforced(_)) {
+            return out;
         }
+        self.retain_audit(&mut out);
+        out
     }
 
     /// Kill everything left in the scope and tear down its cgroup (no-op for `Host`).
     ///
-    /// A failure here is reported, never swallowed. Teardown is followed by the engine being
-    /// dropped, which detaches the LSM programs — so a scope that could not be emptied means a
-    /// surviving process just lost its enforcement, and that has to be visible to the operator
-    /// rather than inferred later from an `EBUSY` nobody saw.
+    /// Engine drop retries failed cleanup and retains links until process exit if scopes remain live.
     pub fn teardown(&self) -> Result<(), String> {
         #[cfg(feature = "enforce")]
         if let Sandbox::Enforced(e) = self {
@@ -1202,5 +1377,51 @@ mod tests {
         plain_sorted.sort();
         assert_eq!(plain_sorted, want);
         assert_eq!(plain, with_ctx);
+    }
+}
+
+#[cfg(test)]
+mod hardening_tests {
+    use super::*;
+
+    fn event() -> AuditEvent {
+        AuditEvent {
+            ts: String::new(),
+            scope_id: None,
+            cgroup_id: 0,
+            pid: None,
+            tgid: None,
+            op: "file_open".into(),
+            decision: "denied".into(),
+            errno: 13,
+            target: "/denied".into(),
+        }
+    }
+
+    #[test]
+    fn retention_budget_spans_calls_and_marks_evidence_incomplete() {
+        let sandbox = Sandbox::host(vec![]);
+        let mut first = vec![event(); 5000];
+        sandbox.retain_audit(&mut first);
+        assert_eq!(first.len(), 4096);
+        let mut second = vec![event(); 10];
+        sandbox.retain_audit(&mut second);
+        assert!(second.is_empty());
+        let health = sandbox.audit_health();
+        assert_eq!(health.retention_dropped, 914);
+        assert!(health.incomplete());
+        let mut transcript = crate::transcript::EpisodeTranscript::setup_error(
+            "s".into(),
+            "m".into(),
+            crate::transcript::EpisodeStatus::Captured { turn: 0 },
+        );
+        transcript.audit_health = health;
+        let score = crate::transcript::ScoreReport::from_transcript(&transcript);
+        assert!(score.evidence_incomplete);
+        assert!(!score.flag_captured);
+        let mut json = serde_json::to_value(&transcript).unwrap();
+        json.as_object_mut().unwrap().remove("audit_health");
+        let legacy: crate::transcript::EpisodeTranscript = serde_json::from_value(json).unwrap();
+        assert_eq!(legacy.audit_health, Default::default());
     }
 }

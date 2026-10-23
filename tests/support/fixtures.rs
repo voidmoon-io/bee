@@ -11,6 +11,7 @@ use bee_core::{Access, Mode, Policy};
 /// An enforce-mode policy granting exactly `fs`.
 pub fn policy(fs: &[(&str, Access)]) -> Policy {
     let mut p = Policy {
+        defaults: Default::default(),
         name: "p".into(),
         description: None,
         mode: Mode::Enforce,

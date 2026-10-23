@@ -71,15 +71,86 @@ struct NotifyHandler {
     cfg: McpServerConfig,
     tools: SharedTools,
     dirty: Arc<AtomicBool>,
+    refreshing: tokio::sync::Mutex<()>,
 }
 
 impl ClientHandler for NotifyHandler {
     async fn on_tool_list_changed(&self, context: NotificationContext<RoleClient>) {
-        if let Ok(tools) = context.peer.list_all_tools().await {
-            *self.tools.lock().expect("mcp tools lock") = filter_tools(&self.cfg, &tools);
-            self.dirty.store(true, Ordering::SeqCst);
+        let Ok(_refresh) = self.refreshing.try_lock() else {
+            return;
+        };
+        let deadline = tokio::time::Instant::now() + STDIO_STARTUP_TIMEOUT;
+        match discover_tools(&context.peer, deadline).await {
+            Ok(tools) => {
+                *self.tools.lock().expect("mcp tools lock") = filter_tools(&self.cfg, &tools)
+            }
+            Err(error) => {
+                self.tools.lock().expect("mcp tools lock").clear();
+                eprintln!("MCP tool refresh failed for {}: {error}", self.cfg.name);
+            }
+        }
+        self.dirty.store(true, Ordering::SeqCst);
+    }
+}
+
+// Bounds apply to discovery after transport decoding; rmcp's HTTP response decoder has its own
+// allocation behavior and this does not claim a wire-level memory limit.
+const DISCOVERY_PAGES: usize = 32;
+const DISCOVERY_TOOLS: usize = 1024;
+const DISCOVERY_BYTES: usize = 4 * 1024 * 1024;
+
+struct DiscoveryBudget(usize);
+
+impl std::io::Write for DiscoveryBudget {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 = self
+            .0
+            .checked_sub(bytes.len())
+            .ok_or_else(|| std::io::Error::other("MCP discovery byte budget exceeded"))?;
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+async fn discover_tools(
+    peer: &Peer<RoleClient>,
+    deadline: tokio::time::Instant,
+) -> Result<Vec<RmcpTool>, String> {
+    let mut cursor = None;
+    let mut cursors = std::collections::BTreeSet::new();
+    let mut tools = Vec::new();
+    let mut budget = DiscoveryBudget(DISCOVERY_BYTES);
+    for _ in 0..DISCOVERY_PAGES {
+        let params = cursor
+            .take()
+            .map(|cursor| rmcp::model::PaginatedRequestParams::default().with_cursor(Some(cursor)));
+        let page = tokio::time::timeout_at(deadline, peer.list_tools(params))
+            .await
+            .map_err(|_| "MCP discovery deadline exceeded".to_string())?
+            .map_err(|e| e.to_string())?;
+        if tools.len().saturating_add(page.tools.len()) > DISCOVERY_TOOLS {
+            return Err("MCP discovery tool count exceeded".into());
+        }
+        for tool in &page.tools {
+            serde_json::to_writer(&mut budget, tool).map_err(|e| e.to_string())?;
+        }
+        tools.extend(page.tools);
+        match page.next_cursor {
+            None => return Ok(tools),
+            Some(next) => {
+                if next.len() > 4096 {
+                    return Err("MCP discovery cursor exceeds byte budget".into());
+                }
+                if !cursors.insert(next.clone()) {
+                    return Err("MCP discovery repeated a cursor".into());
+                }
+                cursor = Some(next);
+            }
         }
     }
+    Err("MCP discovery page count exceeded".into())
 }
 
 /// Lifecycle state of a configured MCP server.
@@ -283,8 +354,9 @@ async fn finalize_connection(
     cfg: &McpServerConfig,
     running: RunningService<RoleClient, NotifyHandler>,
     shared: SharedTools,
+    deadline: tokio::time::Instant,
 ) -> ConnectedServer {
-    let tools = match running.list_all_tools().await {
+    let tools = match discover_tools(running.peer(), deadline).await {
         Ok(t) => t,
         Err(e) => return failed_server(cfg, format!("list_tools failed: {e}")),
     };
@@ -309,6 +381,7 @@ fn handler_for(cfg: &McpServerConfig, dirty: Arc<AtomicBool>) -> (NotifyHandler,
         cfg: cfg.clone(),
         tools: shared.clone(),
         dirty,
+        refreshing: tokio::sync::Mutex::new(()),
     };
     (handler, shared)
 }
@@ -321,18 +394,24 @@ async fn connect_stdio(
     sandbox: &Sandbox,
     dirty: Arc<AtomicBool>,
 ) -> ConnectedServer {
+    let deadline = tokio::time::Instant::now() + STDIO_STARTUP_TIMEOUT;
     // Under interception the server gets its own proxy credential for its lifetime, issued (and
     // acknowledged) before it can make a request (019 T042). A no-op without `[policy.http]`.
-    sandbox
-        .begin_side_call(&super::transport::mcp_call(&cfg.name))
-        .await;
+    if tokio::time::timeout_at(
+        deadline,
+        sandbox.begin_side_call(&super::transport::mcp_call(&cfg.name)),
+    )
+    .await
+    .is_err()
+    {
+        return failed_server(cfg, "MCP credential setup deadline exceeded".into());
+    }
     let (transport, tgid) = match spawn_stdio(sandbox, cfg) {
         Ok(t) => t,
         Err(e) => return failed_server(cfg, e),
     };
     let (handler, shared) = handler_for(cfg, dirty);
-    let running = match tokio::time::timeout(STDIO_STARTUP_TIMEOUT, handler.serve(transport)).await
-    {
+    let running = match tokio::time::timeout_at(deadline, handler.serve(transport)).await {
         Ok(Ok(r)) => r,
         Ok(Err(e)) => return failed_server(cfg, format!("initialize failed: {e}")),
         Err(_) => {
@@ -347,7 +426,7 @@ async fn connect_stdio(
     };
     ConnectedServer {
         tgid,
-        ..finalize_connection(cfg, running, shared).await
+        ..finalize_connection(cfg, running, shared, deadline).await
     }
 }
 
@@ -381,10 +460,10 @@ async fn connect_remote(
         }
     }
 
+    let deadline = tokio::time::Instant::now() + REMOTE_STARTUP_TIMEOUT;
     let transport = StreamableHttpClientTransport::from_config(config);
     let (handler, shared) = handler_for(cfg, dirty);
-    let running = match tokio::time::timeout(REMOTE_STARTUP_TIMEOUT, handler.serve(transport)).await
-    {
+    let running = match tokio::time::timeout_at(deadline, handler.serve(transport)).await {
         Ok(Ok(r)) => r,
         Ok(Err(e)) => return failed_server(cfg, format!("initialize failed: {e}")),
         Err(_) => {
@@ -397,7 +476,7 @@ async fn connect_remote(
             )
         }
     };
-    finalize_connection(cfg, running, shared).await
+    finalize_connection(cfg, running, shared, deadline).await
 }
 
 /// The bridge's tools change when a server sends `tools/list_changed`; turn start refreshes them
@@ -416,6 +495,71 @@ impl crate::turn::ToolRefresh for McpBridge {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn discovery_fixture(mode: &'static str) -> RunningService<RoleClient, ()> {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let (client, server) = tokio::io::duplex(4096);
+        tokio::spawn(async move {
+            let (read, mut write) = tokio::io::split(server);
+            let mut lines = BufReader::new(read).lines();
+            while let Some(line) = lines.next_line().await.unwrap() {
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                let Some(id) = request.get("id") else {
+                    continue;
+                };
+                let result = if request["method"] == "initialize" {
+                    serde_json::json!({"protocolVersion": "2025-06-18", "capabilities": {"tools": {}}, "serverInfo": {"name": "fixture", "version": "1"}})
+                } else if mode == "stall" {
+                    continue;
+                } else if mode == "repeat" {
+                    serde_json::json!({"tools": [], "nextCursor": "same"})
+                } else if mode == "oversize" {
+                    let tool =
+                        serde_json::json!({"name": "tool", "inputSchema": {"type": "object"}});
+                    serde_json::json!({"tools": vec![tool; DISCOVERY_TOOLS + 1]})
+                } else {
+                    serde_json::json!({"tools": []})
+                };
+                let response = serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result});
+                if write
+                    .write_all(format!("{response}\n").as_bytes())
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        ().serve(client).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn discovery_limits_apply_after_a_successful_handshake() {
+        for (mode, expected) in [
+            ("stall", "deadline"),
+            ("repeat", "cursor"),
+            ("oversize", "count"),
+        ] {
+            let service = discovery_fixture(mode).await;
+            let error = discover_tools(
+                service.peer(),
+                tokio::time::Instant::now() + Duration::from_millis(100),
+            )
+            .await
+            .unwrap_err();
+            assert!(error.contains(expected), "{mode}: {error}");
+            service.cancel().await.unwrap();
+        }
+        let service = discovery_fixture("empty").await;
+        assert!(discover_tools(
+            service.peer(),
+            tokio::time::Instant::now() + Duration::from_secs(1)
+        )
+        .await
+        .unwrap()
+        .is_empty());
+        service.cancel().await.unwrap();
+    }
 
     #[test]
     fn disabled_bridge_registers_nothing() {

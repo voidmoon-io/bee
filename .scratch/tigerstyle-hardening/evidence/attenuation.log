@@ -1,0 +1,15 @@
+   Compiling hashbrown v0.17.1
+   Compiling tokio v1.53.0
+   Compiling indexmap v2.14.0
+   Compiling toml_edit v0.22.27
+   Compiling toml v0.8.23
+   Compiling bee-core v0.1.0 (/home/jg/git/bee/crates/core)
+   Compiling bee-userspace v0.1.0 (/home/jg/git/bee/crates/userspace)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.46s
+     Running tests/attenuation_semantics.rs (target/debug/deps/attenuation_semantics-f490ba6eda646252)
+
+running 2 tests
+test narrowing_write_to_read_preserves_unmatched_write_denial ... ok
+test accepted_children_never_gain_sampled_write_authority ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

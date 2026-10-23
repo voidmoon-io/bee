@@ -93,20 +93,20 @@ impl Policy {
     /// Close what the request left unsaid. Every rule added here is a parent rule, so the result is
     /// still ⊆ `self`; what changes is that the child can no longer *widen by omission*.
     fn inherit_restrictions(&self, mut child: Policy) -> Policy {
+        child.defaults.deny_unmatched_writes |= self.denies_unmatched_writes();
+
         // Filesystem. A child that states no path rules inherits the parent's map wholesale: the
         // alternative — an empty rule set — is read downstream as "no filesystem enforcement",
         // which is the widening this exists to stop. A child that does state rules keeps them, but
-        // re-acquires every parent `deny`: `check_filesystem` only forces a child to replicate the
-        // restrictions that fall *inside* a region it re-granted, so a parent deny the child never
-        // went near would otherwise simply evaporate.
+        // re-acquires every parent read-only/deny restriction. Otherwise a region the child never
+        // went near could become writable through the root's unmatched-path behavior.
         if child.filesystem.is_empty() {
             child.filesystem = self.filesystem.clone();
         } else {
             for (raw, &access) in &self.filesystem {
-                if access == Access::Deny {
-                    // A validated child cannot already hold a *grant* at a denied region —
-                    // `check_prefix_grant` rejects that outright — so this never demotes a grant.
-                    child.filesystem.entry(raw.clone()).or_insert(Access::Deny);
+                if access != Access::Write {
+                    // Keep an explicit child restriction; otherwise preserve the parent's access.
+                    child.filesystem.entry(raw.clone()).or_insert(access);
                 }
             }
         }

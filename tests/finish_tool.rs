@@ -419,6 +419,9 @@ fn every_status() -> Vec<EpisodeStatus> {
             turn: 0,
         },
         EpisodeStatus::EndedWithoutFinish,
+        EpisodeStatus::Terminated {
+            detail: "hook stop".into(),
+        },
     ];
     for s in &all {
         match s {
@@ -429,6 +432,7 @@ fn every_status() -> Vec<EpisodeStatus> {
             | EpisodeStatus::InfraError { .. }
             | EpisodeStatus::Captured { .. }
             | EpisodeStatus::NotCaptured
+            | EpisodeStatus::Terminated { .. }
             | EpisodeStatus::ContextExhausted { .. }
             | EpisodeStatus::Stuck { .. }
             | EpisodeStatus::Finished { .. }

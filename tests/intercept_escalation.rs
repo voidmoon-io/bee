@@ -117,7 +117,7 @@ struct Fixture {
 impl Fixture {
     /// The session's active policy, from its escalation floor and ceiling.
     fn active(&self) -> ActivePolicy {
-        ActivePolicy::new(self.e.base.clone(), self.e.ceiling.clone())
+        ActivePolicy::new(self.e.base.clone(), self.e.ceiling.clone()).unwrap()
     }
 }
 
@@ -310,7 +310,7 @@ proptest! {
     ) {
         let all: Vec<String> = (0..10).map(|i| format!("10.0.0.{i}:443")).collect();
         let ceiling = policy_with(&all[..ceiling_n]);
-        let mut active = ActivePolicy::new(policy_with(&[]), ceiling.clone());
+        let mut active = ActivePolicy::new(policy_with(&all[..ceiling_n.min(1)]), ceiling.clone()).unwrap();
         for (turn, i) in asks.into_iter().enumerate() {
             let _ = active.try_apply(
                 GrantOrigin::Explicit,

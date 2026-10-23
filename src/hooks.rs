@@ -22,6 +22,15 @@ use crate::provider::ToolCall;
 pub enum StepEvent<'a> {
     /// The top of a model turn — where leases expire and hooks may release them (007 US4, FR-028).
     TurnStart { turn: u32 },
+    BeforeModelCall {
+        convo: &'a crate::provider::Conversation,
+        schemas: &'a [crate::provider::ToolSchema],
+    },
+    AfterToolResult {
+        call: &'a ToolCall,
+        result: &'a crate::tools::ToolResult,
+        audit: &'a [bee_core::AuditEvent],
+    },
     /// Before a tool call executes.
     BeforeToolCall(&'a ToolCall),
     /// A drained audit event denied this call (bee-specific; the reactive-escalation trigger).
@@ -44,6 +53,8 @@ pub enum StepEvent<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepEventKind {
     TurnStart,
+    BeforeModelCall,
+    AfterToolResult,
     BeforeToolCall,
     KernelDenial,
     ProxyRefusal,
@@ -54,6 +65,8 @@ impl StepEvent<'_> {
     pub fn kind(&self) -> StepEventKind {
         match self {
             StepEvent::TurnStart { .. } => StepEventKind::TurnStart,
+            StepEvent::BeforeModelCall { .. } => StepEventKind::BeforeModelCall,
+            StepEvent::AfterToolResult { .. } => StepEventKind::AfterToolResult,
             StepEvent::BeforeToolCall(_) => StepEventKind::BeforeToolCall,
             StepEvent::KernelDenial { .. } => StepEventKind::KernelDenial,
             StepEvent::ProxyRefusal { .. } => StepEventKind::ProxyRefusal,
@@ -66,6 +79,7 @@ impl StepEvent<'_> {
 pub enum Flow {
     /// Observe only.
     Continue,
+    Terminate(String),
     /// On `BeforeToolCall`: do not run the tool; the model is told a hook declined it (FR-031). On
     /// any event: no grant is made for it, whatever another hook proposed (FR-034).
     Deny(String),
@@ -94,6 +108,7 @@ pub trait LoopHook: Send + Sync {
 /// What every hook observing one event returned, combined (contracts/hooks.md).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Dispatch {
+    pub terminate: Option<String>,
     /// The first refusal, by registration order. When set, `escalate` is `None`.
     pub deny: Option<String>,
     /// Every proposed grant, merged.
@@ -107,6 +122,9 @@ pub struct Dispatch {
 impl Dispatch {
     /// Fold `other` into this, keeping the precedence rule.
     pub fn merge(&mut self, other: Dispatch) {
+        if self.terminate.is_none() {
+            self.terminate = other.terminate;
+        }
         if self.deny.is_none() {
             self.deny = other.deny;
         }
@@ -126,6 +144,10 @@ impl Dispatch {
     fn add(&mut self, flow: Flow) {
         let one = match flow {
             Flow::Continue => return,
+            Flow::Terminate(r) => Dispatch {
+                terminate: Some(r),
+                ..Dispatch::default()
+            },
             Flow::Deny(r) => Dispatch {
                 deny: Some(r),
                 ..Dispatch::default()
@@ -157,6 +179,20 @@ pub async fn dispatch(hooks: &[Box<dyn LoopHook>], ev: &StepEvent<'_>) -> Dispat
         }
     }
     out
+}
+
+/// Hook execution is an operation with the session's configured timeout.
+pub(crate) async fn dispatch_bounded(
+    hooks: &[Box<dyn LoopHook>],
+    event: &StepEvent<'_>,
+    timeout: std::time::Duration,
+) -> Dispatch {
+    tokio::time::timeout(timeout, dispatch(hooks, event))
+        .await
+        .unwrap_or_else(|_| Dispatch {
+            terminate: Some("lifecycle hook timed out".into()),
+            ..Dispatch::default()
+        })
 }
 
 #[cfg(test)]

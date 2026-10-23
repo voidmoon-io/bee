@@ -1,0 +1,28 @@
+    Blocking waiting for file lock on build directory
+   Compiling deranged v0.5.8
+   Compiling reqwest v0.13.4
+   Compiling ast-grep-language v0.45.0
+   Compiling criterion v0.5.1
+   Compiling time v0.3.53
+   Compiling rig-core v0.40.0
+   Compiling plist v1.9.0
+   Compiling bee-core v0.1.0 (/tmp/bee-tigerstyle-pr-20261023/crates/core)
+   Compiling bee-userspace v0.1.0 (/tmp/bee-tigerstyle-pr-20261023/crates/userspace)
+   Compiling syntect v5.3.0
+   Compiling tui-markdown v0.3.9
+   Compiling bee v0.1.0 (/tmp/bee-tigerstyle-pr-20261023)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 19s
+     Running tests/finding_ledger.rs (target/debug/deps/finding_ledger-8188716882b7006e)
+
+running 9 tests
+test an_unrecognised_event_is_skipped_and_counted_not_fatal ... ok
+test a_record_missing_required_evidence_is_rejected_and_writes_nothing ... ok
+test a_finding_that_moved_lines_merges_rather_than_duplicating ... ok
+test a_false_positive_verdict_survives_rediscovery ... ok
+test the_same_finding_seen_in_two_runs_is_one_entry_with_two_sightings ... ok
+test identity_separates_its_components ... ok
+test the_ledger_round_trips_through_a_text_diff_without_loss ... ok
+test title_normalisation_collapses_cosmetic_differences ... ok
+test concurrent_writers_lose_no_events ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.24s

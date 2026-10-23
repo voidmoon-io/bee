@@ -190,15 +190,18 @@ pub struct ActivePolicy {
 impl ActivePolicy {
     /// Start at `base`, bounded by `ceiling`. Pass `base.clone()` as the ceiling for
     /// instructions-only (nothing can widen).
-    pub fn new(base: Policy, ceiling: Policy) -> Self {
+    pub fn new(base: Policy, ceiling: Policy) -> Result<Self, String> {
+        let base = ceiling
+            .derive(base)
+            .map_err(|e| format!("invalid base policy: {e}"))?;
         let active = base.clone();
-        ActivePolicy {
+        Ok(ActivePolicy {
             base,
             ceiling,
             active,
             leases: Vec::new(),
             next_id: 0,
-        }
+        })
     }
 
     /// The currently enforced policy (source of the next reload's plan).
@@ -225,12 +228,16 @@ impl ActivePolicy {
     }
 
     /// Recompute `active` from `base` plus every live lease's delta.
-    fn recompute(&mut self) {
+    fn recompute(&mut self) -> Result<(), String> {
         let mut p = self.base.clone();
         for lease in &self.leases {
             fold_delta(&mut p, &lease.delta);
         }
-        self.active = p;
+        self.active = self
+            .ceiling
+            .derive(p)
+            .map_err(|e| format!("invalid lease policy: {e}"))?;
+        Ok(())
     }
 
     /// Attenuation pre-check: would widening by `delta` stay `⊆ ceiling`? Does **not** mutate — used
@@ -293,7 +300,13 @@ impl ActivePolicy {
             out.filesystem.insert(path.clone(), want);
         }
         for e in &delta.exec {
-            if !self.active.exec.allow.contains(e) {
+            if !self
+                .active
+                .exec
+                .allow
+                .iter()
+                .any(|held| held == e || held.strip_prefix('!') == Some(e.as_str()))
+            {
                 out.exec.push(e.clone());
             }
         }
@@ -332,10 +345,19 @@ impl ActivePolicy {
         ttl: Ttl,
         turn: u32,
     ) -> Result<GrantId, String> {
+        if let Ttl::Turns(n) = ttl {
+            if n == 0 || turn.checked_add(n).is_none() {
+                return Err("invalid finite lease duration".into());
+            }
+        }
+        if self.next_id == u64::MAX {
+            return Err("grant id space exhausted".into());
+        }
         self.check_net_enforceable(&delta)?;
         let mut candidate = self.active.clone();
         fold_delta(&mut candidate, &delta);
-        self.ceiling
+        let candidate = self
+            .ceiling
             .derive(candidate)
             .map_err(|e| format!("exceeds capability ceiling: {e}"))?;
         let id = self.mint_id();
@@ -346,12 +368,12 @@ impl ActivePolicy {
             ttl,
             granted_at_turn: turn,
         });
-        self.recompute();
+        self.active = candidate;
         Ok(id)
     }
 
     /// Drop every lease expired at `turn`; returns the dropped ids (empty ⇒ no narrowing needed).
-    pub fn expire(&mut self, turn: u32) -> Vec<GrantId> {
+    pub fn expire(&mut self, turn: u32) -> Result<Vec<GrantId>, String> {
         let mut dropped = Vec::new();
         let mut kept = Vec::with_capacity(self.leases.len());
         for lease in std::mem::take(&mut self.leases) {
@@ -363,20 +385,20 @@ impl ActivePolicy {
         }
         self.leases = kept;
         if !dropped.is_empty() {
-            self.recompute();
+            self.recompute()?;
         }
-        dropped
+        Ok(dropped)
     }
 
     /// Drop the lease with `id`; returns true if one was removed (⇒ narrowing needed).
-    pub fn release(&mut self, id: &str) -> bool {
+    pub fn release(&mut self, id: &str) -> Result<bool, String> {
         let before = self.leases.len();
         self.leases.retain(|l| l.id != id);
         let dropped = self.leases.len() != before;
         if dropped {
-            self.recompute();
+            self.recompute()?;
         }
-        dropped
+        Ok(dropped)
     }
 }
 
@@ -392,6 +414,7 @@ mod tests {
             filesystem: BTreeMap::new(),
             exec: Default::default(),
             network: Default::default(),
+            defaults: Default::default(),
             exfiltration: Default::default(),
             http: None,
         };
@@ -418,7 +441,7 @@ mod tests {
         });
         let mut ceiling = base.clone();
         ceiling.network.allow.push("10.0.0.5:443".into());
-        let mut ap = ActivePolicy::new(base, ceiling);
+        let mut ap = ActivePolicy::new(base, ceiling).unwrap();
         let d = GrantDelta {
             net: vec!["10.0.0.5:443".into()],
             ..Default::default()
@@ -434,7 +457,7 @@ mod tests {
     #[test]
     fn unmet_drops_what_is_already_held_at_the_same_or_greater_access() {
         let base = policy("base", &[("/a", Access::Write), ("/b", Access::Read)]);
-        let ap = ActivePolicy::new(base.clone(), base);
+        let ap = ActivePolicy::new(base.clone(), base).unwrap();
 
         // Held at exactly the asked access, and held more permissively than asked: both satisfied.
         assert!(ap.unmet(&fs_delta("/a", Access::Write)).is_empty());
@@ -445,7 +468,7 @@ mod tests {
     #[test]
     fn unmet_keeps_an_upgrade_and_anything_unheld() {
         let base = policy("base", &[("/b", Access::Read)]);
-        let ap = ActivePolicy::new(base.clone(), base);
+        let ap = ActivePolicy::new(base.clone(), base).unwrap();
 
         // Read held, write asked — an upgrade is a widening, not a re-request.
         assert_eq!(
@@ -468,7 +491,7 @@ mod tests {
         // consent prompt; erring the other way would suppress a request whose coverage was only
         // assumed, and hand the model a capability nobody granted.
         let base = policy("base", &[("/srv", Access::Write)]);
-        let ap = ActivePolicy::new(base.clone(), base);
+        let ap = ActivePolicy::new(base.clone(), base).unwrap();
         assert_eq!(
             ap.unmet(&fs_delta("/srv/x", Access::Write))
                 .filesystem
@@ -482,7 +505,7 @@ mod tests {
         let mut base = policy("base", &[]);
         base.exec.allow = vec!["/usr/bin/git".to_string()];
         base.network.allow = vec!["example.com:443".to_string()];
-        let ap = ActivePolicy::new(base.clone(), base);
+        let ap = ActivePolicy::new(base.clone(), base).unwrap();
 
         let delta = GrantDelta {
             exec: vec!["/usr/bin/git".into(), "/usr/bin/cargo".into()],
@@ -498,7 +521,7 @@ mod tests {
     fn unmet_leaves_tools_alone_because_they_are_not_policy() {
         // Registry membership is Layer 1; `ActivePolicy` has no view of it, so the caller filters.
         let base = policy("base", &[]);
-        let ap = ActivePolicy::new(base.clone(), base);
+        let ap = ActivePolicy::new(base.clone(), base).unwrap();
         let delta = GrantDelta {
             tools: vec!["bash".into()],
             ..Default::default()
@@ -509,7 +532,7 @@ mod tests {
     #[test]
     fn starts_at_base_no_leases() {
         let base = policy("base", &[("/a", Access::Read)]);
-        let ap = ActivePolicy::new(base.clone(), base.clone());
+        let ap = ActivePolicy::new(base.clone(), base.clone()).unwrap();
         assert_eq!(ap.active().filesystem, base.filesystem);
         assert!(ap.leases().is_empty());
     }
@@ -518,7 +541,7 @@ mod tests {
     fn apply_within_ceiling_widens() {
         let base = policy("base", &[]);
         let ceiling = policy("ceiling", &[("/tmp", Access::Write)]);
-        let mut ap = ActivePolicy::new(base, ceiling);
+        let mut ap = ActivePolicy::new(base, ceiling).unwrap();
         let id = ap
             .try_apply(
                 GrantOrigin::Explicit,
@@ -536,7 +559,7 @@ mod tests {
     fn apply_beyond_ceiling_is_refused_and_noop() {
         let base = policy("base", &[]);
         let ceiling = policy("ceiling", &[("/tmp", Access::Write)]);
-        let mut ap = ActivePolicy::new(base, ceiling);
+        let mut ap = ActivePolicy::new(base, ceiling).unwrap();
         let err = ap
             .try_apply(
                 GrantOrigin::Explicit,
@@ -554,7 +577,7 @@ mod tests {
     fn expire_narrows_at_ttl() {
         let base = policy("base", &[]);
         let ceiling = policy("ceiling", &[("/tmp", Access::Write)]);
-        let mut ap = ActivePolicy::new(base, ceiling);
+        let mut ap = ActivePolicy::new(base, ceiling).unwrap();
         ap.try_apply(
             GrantOrigin::Explicit,
             fs_delta("/tmp/w", Access::Write),
@@ -564,9 +587,9 @@ mod tests {
         .unwrap();
         // Live on turn 0.
         assert!(ap.active().filesystem.contains_key("/tmp/w"));
-        assert!(ap.expire(0).is_empty(), "not yet expired");
+        assert!(ap.expire(0).unwrap().is_empty(), "not yet expired");
         // Expires at turn 1.
-        let dropped = ap.expire(1);
+        let dropped = ap.expire(1).unwrap();
         assert_eq!(dropped.len(), 1);
         assert!(!ap.active().filesystem.contains_key("/tmp/w"));
     }
@@ -575,7 +598,7 @@ mod tests {
     fn release_drops_a_named_lease() {
         let base = policy("base", &[]);
         let ceiling = policy("ceiling", &[("/tmp", Access::Write)]);
-        let mut ap = ActivePolicy::new(base, ceiling);
+        let mut ap = ActivePolicy::new(base, ceiling).unwrap();
         let id = ap
             .try_apply(
                 GrantOrigin::Explicit,
@@ -584,8 +607,8 @@ mod tests {
                 0,
             )
             .unwrap();
-        assert!(ap.release(&id));
-        assert!(!ap.release(&id), "already gone");
+        assert!(ap.release(&id).unwrap());
+        assert!(!ap.release(&id).unwrap(), "already gone");
         assert!(!ap.active().filesystem.contains_key("/tmp/w"));
     }
 
@@ -593,7 +616,7 @@ mod tests {
     fn granted_tools_union_over_live_leases() {
         let base = policy("base", &[]);
         let ceiling = policy("ceiling", &[("/tmp", Access::Write)]);
-        let mut ap = ActivePolicy::new(base, ceiling);
+        let mut ap = ActivePolicy::new(base, ceiling).unwrap();
         let mut d = fs_delta("/tmp/w", Access::Write);
         d.tools = vec!["bash".into(), "read_file".into()];
         ap.try_apply(GrantOrigin::Explicit, d, Ttl::Forever, 0)
@@ -633,7 +656,8 @@ mod tests {
                     ("/a", Access::Write), ("/b", Access::Write), ("/c", Access::Write),
                 ]);
                 let paths = ["/a/x", "/b/x", "/c/x"];
-                let mut ap = ActivePolicy::new(base.clone(), ceiling.clone());
+                let base = ceiling.derive(base).unwrap();
+                let mut ap = ActivePolicy::new(base.clone(), ceiling.clone()).unwrap();
                 let mut turn = 0u32;
 
                 for op in ops {
@@ -647,11 +671,11 @@ mod tests {
                                 turn,
                             );
                         }
-                        Op::Expire(t) => { let _ = ap.expire(t); turn = turn.max(t); }
+                        Op::Expire(t) => { let _ = ap.expire(t).unwrap(); turn = turn.max(t); }
                         Op::Release(i) => {
                             if let Some(id) = ap.leases().get(i % ap.leases().len().max(1))
                                 .map(|l| l.id.clone()) {
-                                ap.release(&id);
+                                ap.release(&id).unwrap();
                             }
                         }
                     }

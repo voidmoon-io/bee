@@ -10,6 +10,7 @@ use crate::skills::{Skill, SkillRegistry};
 /// A policy granting nothing, used when a session has none.
 pub(crate) fn empty_policy() -> Policy {
     Policy {
+        defaults: Default::default(),
         name: "none".to_string(),
         description: None,
         mode: bee_core::Mode::default(),

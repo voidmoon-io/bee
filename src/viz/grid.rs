@@ -30,6 +30,7 @@ impl Status {
             | EpisodeStatus::ApiError { .. }
             | EpisodeStatus::InfraError { .. }
             | EpisodeStatus::NotCaptured
+            | EpisodeStatus::Terminated { .. }
             | EpisodeStatus::ContextExhausted { .. }
             | EpisodeStatus::Stuck { .. }
             | EpisodeStatus::Finished { .. }

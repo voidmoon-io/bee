@@ -37,6 +37,24 @@ pub struct LoopEscalation {
     pub default_ttl: Ttl,
 }
 
+impl LoopEscalation {
+    /// The loop must install any restrictions added while validating its starting policy.
+    pub fn initialize(&self, active: &ActivePolicy, sandbox: &mut Sandbox) -> Result<(), String> {
+        if self.default_ttl == Ttl::Turns(0) {
+            return Err("a finite grant must last at least one turn".into());
+        }
+        if !active.leases().is_empty() {
+            return Ok(());
+        }
+        let mut supplied = self.base.clone();
+        supplied.defaults.deny_unmatched_writes = supplied.denies_unmatched_writes();
+        if active.active() != &supplied {
+            sandbox.reload(active.active())?;
+        }
+        Ok(())
+    }
+}
+
 /// The result of an escalation attempt.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "outcome", content = "detail", rename_all = "snake_case")]
@@ -84,7 +102,18 @@ pub async fn escalate(
     //    capabilities they already approved — once per call. Tools are registry membership rather
     //    than policy, so they are filtered against the live registry instead of the policy.
     let mut delta = active.unmet(&delta);
-    delta.tools.retain(|t| !registry.contains(t));
+    let leased_tools = active.granted_tools();
+    let has_new_authority = !delta.filesystem.is_empty()
+        || !delta.exec.is_empty()
+        || !delta.net.is_empty()
+        || !delta.http_targets.is_empty()
+        || delta.tools.iter().any(|t| !registry.contains(t));
+    if !has_new_authority {
+        return EscalateOutcome::AlreadyHeld;
+    }
+    delta
+        .tools
+        .retain(|t| !registry.contains(t) || leased_tools.contains(t));
     if delta.is_empty() {
         return EscalateOutcome::AlreadyHeld;
     }
@@ -109,28 +138,30 @@ pub async fn escalate(
     // 3. Apply the lease (re-validates ⊆ ceiling and recomputes `active`).
     let tools = delta.tools.clone();
     let http_targets = delta.http_targets.clone();
-    let id = match active.try_apply(origin, delta, ttl, turn) {
+    let mut candidate = active.clone();
+    let id = match candidate.try_apply(origin, delta, ttl, turn) {
         Ok(id) => id,
         Err(e) => return EscalateOutcome::Refused(e),
     };
 
-    // 4. Reload the live scope with the widened policy. On failure, roll the lease back (keep-prior).
-    if let Err(e) = sandbox.reload(active.active()) {
-        active.release(&id);
-        return EscalateOutcome::Refused(format!("reload failed: {e}"));
+    // Prepare both authority layers before committing lease and tool membership.
+    if candidate.active() != active.active() {
+        if let Err(e) = sandbox.reload(candidate.active()) {
+            return EscalateOutcome::Refused(format!("reload failed: {e}"));
+        }
     }
-
-    // 4b. A target-scope widening (019 US3) also reaches the proxy, atomically across both layers:
-    //     the proxy scope's kernel rules, then the worker's own scope. If the worker cannot take it,
-    //     the sidecar is rolled back to its previous plan and the lease released — the operator's
-    //     "yes" never leaves the two layers disagreeing.
     if !http_targets.is_empty() {
-        if let Err(e) = sandbox.apply_http_scope(active.active()).await {
-            active.release(&id);
-            let _ = sandbox.reload(active.active());
+        let guard = sandbox.policy_update_guard();
+        let updated = sandbox.apply_http_scope(candidate.active()).await;
+        guard.finish();
+        if let Err(e) = updated {
+            if let Err(rollback) = sandbox.reload(active.active()) {
+                sandbox.cleanup_failed(format!("grant rollback failed: {rollback}"));
+            }
             return EscalateOutcome::Refused(format!("target-scope widening failed: {e}"));
         }
     }
+    *active = candidate;
     operator.attach_lease(&record, &id);
 
     // 5. Register granted tools (Layer 1 membership), built by the one constructor with the
@@ -147,6 +178,80 @@ pub async fn escalate(
         let _ = registry.register(tool);
     }
     EscalateOutcome::Granted(id)
+}
+
+pub(crate) async fn install_narrowing(
+    active: &mut ActivePolicy,
+    candidate: ActivePolicy,
+    sandbox: &mut Sandbox,
+    registry: &mut ToolRegistry,
+) -> Result<(), String> {
+    if candidate.active() != active.active() {
+        let installed = sandbox.reload(candidate.active());
+        if let Err(e) = installed {
+            let detail = format!("mandatory policy narrowing failed: {e}");
+            sandbox.cleanup_failed(detail.clone());
+            return Err(detail);
+        }
+        if candidate.active().http != active.active().http {
+            let guard = sandbox.policy_update_guard();
+            let updated = sandbox.apply_http_scope(candidate.active()).await;
+            guard.finish();
+            if let Err(e) = updated {
+                let detail = format!("mandatory target-scope narrowing failed: {e}");
+                sandbox.cleanup_failed(detail.clone());
+                return Err(detail);
+            }
+        }
+    }
+    let before = active.granted_tools();
+    let after = candidate.granted_tools();
+    for name in before.difference(&after) {
+        registry.remove(name);
+    }
+    *active = candidate;
+    Ok(())
+}
+
+pub(crate) async fn release_leases(
+    ids: &[GrantId],
+    active: &mut ActivePolicy,
+    sandbox: &mut Sandbox,
+    registry: &mut ToolRegistry,
+) -> Result<(), String> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let mut candidate = active.clone();
+    for id in ids {
+        if !candidate.release(id)? {
+            return Err(format!("unknown grant: {id}"));
+        }
+    }
+    install_narrowing(active, candidate, sandbox, registry).await
+}
+
+/// Apply lifecycle decisions shared by model and tool-result boundaries.
+pub(crate) async fn lifecycle_step(
+    config: &LoopEscalation,
+    active: &mut ActivePolicy,
+    event: StepEvent<'_>,
+    sandbox: &mut Sandbox,
+    registry: &mut ToolRegistry,
+) -> Result<(), String> {
+    let decision =
+        crate::hooks::dispatch_bounded(&config.hooks, &event, config.operator.timeout()).await;
+    if let Some(reason) = decision.terminate {
+        return Err(reason);
+    }
+    if decision.deny.is_some()
+        || decision.escalate.is_some()
+        || decision.refresh_tools
+        || (!decision.deescalate.is_empty() && matches!(event, StepEvent::BeforeModelCall { .. }))
+    {
+        return Err(format!("unsupported hook action at {:?}", event.kind()));
+    }
+    release_leases(&decision.deescalate, active, sandbox, registry).await
 }
 
 // The escalation *steps* — dispatching `BeforeToolCall`, `KernelDenial` and `ProxyRefusal` to the
@@ -345,6 +450,7 @@ mod tests {
 
     fn policy(name: &str, fs: &[(&str, Access)]) -> Policy {
         let mut p = Policy {
+            defaults: Default::default(),
             name: name.to_string(),
             description: None,
             mode: Mode::Enforce,
@@ -376,7 +482,8 @@ mod tests {
         let mut ap = ActivePolicy::new(
             policy("base", &[]),
             policy("ceil", &[("/tmp", Access::Write)]),
-        );
+        )
+        .unwrap();
         let mut reg = ToolRegistry::new();
         let mut sb = host();
         let mut delta = fs_delta("/tmp/w", Access::Write);
@@ -413,7 +520,8 @@ mod tests {
         let mut ap = ActivePolicy::new(
             policy("base", &[]),
             policy("ceil", &[("/tmp", Access::Write)]),
-        );
+        )
+        .unwrap();
         let mut reg = ToolRegistry::new();
         let mut sb = host();
         let out = escalate(
@@ -449,7 +557,8 @@ mod tests {
         let mut ap = ActivePolicy::new(
             policy("base", &[]),
             policy("ceil", &[("/tmp", Access::Write)]),
-        );
+        )
+        .unwrap();
         let mut reg = ToolRegistry::new();
         let mut sb = host();
         let out = escalate(

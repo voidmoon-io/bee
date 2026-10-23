@@ -1,0 +1,5 @@
+    Blocking waiting for file lock on build directory
+    Checking bee-core v0.1.0 (/home/jg/git/bee/crates/core)
+   Compiling bee-userspace v0.1.0 (/home/jg/git/bee/crates/userspace)
+    Checking bee v0.1.0 (/home/jg/git/bee)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 11.89s

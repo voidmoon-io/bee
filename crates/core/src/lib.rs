@@ -21,5 +21,6 @@ pub use compiler::{
 pub use error::{AttenuationError, CompileError, PolicyError};
 pub use pattern::HostPattern;
 pub use policy::{
-    Access, ExecPolicy, ExfilPolicy, HostPort, HttpLimits, HttpPolicy, Mode, NetPolicy, Policy,
+    Access, EffectiveDefaults, ExecPolicy, ExfilPolicy, HostPort, HttpLimits, HttpPolicy, Mode,
+    NetPolicy, Policy,
 };

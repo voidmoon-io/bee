@@ -176,7 +176,7 @@ impl Policy {
             net,
             exfiltration_enabled: self.exfiltration.enabled,
             sensitive,
-            fs_write_default_deny: false,
+            fs_write_default_deny: self.denies_unmatched_writes(),
             proxy_loopback_required: self.http.as_ref().is_some_and(|h| h.is_active()),
         })
     }

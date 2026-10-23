@@ -139,9 +139,8 @@ async fn turn_limit_in_ctf_is_not_captured() {
 async fn run_episode_populates_score_for_ctf() {
     // End-to-end via run_episode: the planted flag is materialized, the agent reads and submits it,
     // and the transcript carries a score.
-    let dir = std::env::temp_dir().join(format!("bee-ctf-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let flag_path = dir.join("flag.txt");
+    let dir = tempfile::tempdir().unwrap();
+    let flag_path = dir.path().join("flag.txt");
 
     let mut scn = ctf_scenario(5);
     scn.workdir = WorkdirSetup {
@@ -152,7 +151,7 @@ async fn run_episode_populates_score_for_ctf() {
         // The flag is planted at an absolute path, so the operator's containment root has to be the
         // directory it lives in — the runner would otherwise refuse a write outside the default
         // per-episode temp root (f020).
-        root: Some(dir.clone()),
+        root: Some(dir.path().to_path_buf()),
         ..WorkdirSetup::default()
     };
 
@@ -227,6 +226,7 @@ fn score_report_counts_techniques() {
             duration_ms: 1,
         }],
         audit_trail: Vec::new(),
+        audit_health: Default::default(),
         timing: Timing::default(),
         usage: None,
         score: None,

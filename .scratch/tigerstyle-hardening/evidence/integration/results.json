@@ -1,0 +1,73 @@
+{
+  "workspace-tests": {
+    "passed": 855,
+    "ignored": 0,
+    "failures_reported": false
+  },
+  "headless-tests": {
+    "passed": 545,
+    "ignored": 0,
+    "failures_reported": false
+  },
+  "optional-tests": {
+    "passed": 888,
+    "ignored": 5,
+    "failures_reported": false
+  },
+  "shared-tests": {
+    "passed": 80,
+    "ignored": 0,
+    "failures_reported": false
+  },
+  "intercept-tests": {
+    "passed": 134,
+    "ignored": 0,
+    "failures_reported": false
+  },
+  "integration-regressions": {
+    "passed": 25,
+    "ignored": 0,
+    "failures_reported": false
+  },
+  "workspace-clippy": {
+    "passed": 0,
+    "ignored": 0,
+    "failures_reported": false
+  },
+  "headless-clippy": {
+    "passed": 0,
+    "ignored": 0,
+    "failures_reported": false
+  },
+  "combined-clippy": {
+    "passed": 0,
+    "ignored": 0,
+    "failures_reported": false
+  },
+  "parser": {
+    "passed": 0,
+    "ignored": 0,
+    "failures_reported": false
+  },
+  "kernel-regressions": {
+    "passed": 5,
+    "ignored": 0,
+    "failures_reported": false
+  },
+  "ci-toolchain-clippy": {
+    "rust": "1.99.0",
+    "features": "mcp,sec,astgrep-rust",
+    "warnings_denied": true,
+    "passed": true
+  },
+  "finding-regressions": {
+    "passed": 9,
+    "ignored": 0,
+    "failures_reported": false
+  },
+  "vm-matrix": {
+    "passed": 50,
+    "required": 50,
+    "guest_exit_status": 0
+  }
+}

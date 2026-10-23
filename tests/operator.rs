@@ -49,7 +49,7 @@ fn rig(attempts: Vec<Attempt>, ceiling: Policy, operator: Operator) -> Rig {
     Rig {
         sandbox,
         registry,
-        active: ActivePolicy::new(base.clone(), ceiling.clone()),
+        active: ActivePolicy::new(base.clone(), ceiling.clone()).unwrap(),
         config: LoopEscalation {
             base,
             ceiling,
@@ -266,6 +266,7 @@ async fn a_start_up_grant_carries_the_whole_request() {
 
 fn transcript() -> EpisodeTranscript {
     EpisodeTranscript {
+        audit_health: Default::default(),
         scenario_id: "golden".into(),
         model_id: "mock/golden".into(),
         status: EpisodeStatus::Completed,

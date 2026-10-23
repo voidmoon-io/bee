@@ -305,7 +305,18 @@ async fn repl(args: ReplArgs) -> ExitCode {
         tool_refresh: built.tool_refresh.clone(),
         skills: built.skills.clone(),
         visual: cfg.visual,
-        escalation: built.escalation.take().map(bee::repl::ReplEscalation::new),
+        escalation: match built
+            .escalation
+            .take()
+            .map(bee::repl::ReplEscalation::new)
+            .transpose()
+        {
+            Ok(escalation) => escalation,
+            Err(e) => {
+                eprintln!("bee: invalid escalation configuration: {e}");
+                return ExitCode::FAILURE;
+            }
+        },
         #[cfg(feature = "intercept")]
         http_pane: built
             .http

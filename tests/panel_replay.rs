@@ -63,6 +63,7 @@ fn transcript(turns: Vec<TranscriptTurn>) -> EpisodeTranscript {
         status: EpisodeStatus::Completed,
         turns,
         audit_trail: vec![],
+        audit_health: Default::default(),
         timing: Timing::default(),
         usage: None::<Usage>,
         score: None,

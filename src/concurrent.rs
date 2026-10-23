@@ -253,7 +253,8 @@ pub async fn run_concurrent(
             .await;
             t.consents = session.operator.take_log();
             if let Err(e) = session.shutdown().await {
-                eprintln!("bee: WARNING: {e} — a process may have outlived enforcement");
+                t.status = EpisodeStatus::InfraError { detail: e.clone() };
+                eprintln!("bee: scope cleanup failed: {e}");
             }
             if scenario.mode == ScoringMode::Ctf {
                 t.score = Some(ScoreReport::from_transcript(&t));

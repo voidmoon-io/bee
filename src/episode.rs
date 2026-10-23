@@ -112,6 +112,7 @@ fn emit_turn_start(opts: &LoopOptions, report: &crate::turn::TurnStartReport) {
 pub fn status_label(s: &EpisodeStatus) -> String {
     match s {
         EpisodeStatus::Completed => "completed".into(),
+        EpisodeStatus::Terminated { detail } => format!("terminated ({detail})"),
         EpisodeStatus::Timeout => "timeout".into(),
         EpisodeStatus::NoToolCalls => "no_tool_calls".into(),
         EpisodeStatus::ApiError { detail } => format!("api_error ({detail})"),
@@ -141,7 +142,8 @@ pub fn exit_code(status: &EpisodeStatus, finish_offered: bool) -> u8 {
     match status {
         EpisodeStatus::InfraError { .. } => EXIT_SOFTWARE,
         EpisodeStatus::ApiError { .. } => EXIT_UNAVAILABLE,
-        EpisodeStatus::ContextExhausted { .. }
+        EpisodeStatus::Terminated { .. }
+        | EpisodeStatus::ContextExhausted { .. }
         | EpisodeStatus::Stuck { .. }
         | EpisodeStatus::EndedWithoutFinish => EXIT_INCOMPLETE,
         EpisodeStatus::Finished { outcome, .. } => match outcome {
@@ -177,7 +179,13 @@ pub(crate) async fn complete_with_retry(
 ) -> Result<Turn, String> {
     let mut attempt: u32 = 0;
     loop {
-        match model.complete(convo, schemas).await {
+        if Instant::now() >= deadline {
+            return Err("episode deadline exceeded".into());
+        }
+        let reply = tokio::time::timeout_at(deadline.into(), model.complete(convo, schemas))
+            .await
+            .map_err(|_| "episode deadline exceeded".to_string())?;
+        match reply {
             Ok(turn) => return Ok(turn),
             Err(ModelError::Transient {
                 status,
@@ -190,10 +198,9 @@ pub(crate) async fn complete_with_retry(
                 }
                 let backoff = retry_after
                     .unwrap_or_else(|| Duration::from_millis(200 * 2u64.pow(attempt.min(6))));
-                if Instant::now() + backoff >= deadline {
-                    return Err(format!(
-                        "transient provider error (status {status}); deadline reached before retry"
-                    ));
+                if backoff >= deadline.saturating_duration_since(Instant::now()) {
+                    tokio::time::sleep_until(deadline.into()).await;
+                    return Err("episode deadline exceeded".into());
                 }
                 tokio::time::sleep(backoff).await;
                 attempt += 1;
@@ -267,10 +274,19 @@ pub async fn run_loop(
 
     // Dynamic capability grants (007-dynamic-grants): the mutable active policy, present only when
     // escalation is configured. Starts at `base`, bounded by `ceiling`.
-    let mut active_policy = opts
+    let mut active_policy = match opts
         .escalation
         .as_ref()
-        .map(|e| crate::grants::ActivePolicy::new(e.base.clone(), e.ceiling.clone()));
+        .map(|e| {
+            let active = crate::grants::ActivePolicy::new(e.base.clone(), e.ceiling.clone())?;
+            e.initialize(&active, sandbox)?;
+            Ok::<_, String>(active)
+        })
+        .transpose()
+    {
+        Ok(active) => active,
+        Err(e) => return infra_error(scenario, model, e),
+    };
 
     // If the loop runs out of turns without the agent stopping, it hit the turn limit (FR-007). In
     // CTF mode (US3) a turn-limit-expired episode means the agent *failed* to capture the flag, so
@@ -291,17 +307,54 @@ pub async fn run_loop(
         // The top of the model turn (024): hooks may release leases, leases whose lifetime ran out
         // expire, the scope narrows if either happened, and the MCP tools refresh if they changed.
         // Then a fresh schema snapshot for this turn.
-        let report = crate::turn::turn_start(
-            index,
-            opts.escalation.as_ref().map_or(&[], |e| e.hooks.as_slice()),
-            active_policy.as_mut(),
-            sandbox,
-            registry,
-            opts.tool_refresh.as_ref(),
+        let report = tokio::time::timeout_at(
+            deadline.into(),
+            crate::turn::turn_start(
+                index,
+                opts.escalation.as_ref().map_or(&[], |e| e.hooks.as_slice()),
+                active_policy.as_mut(),
+                sandbox,
+                registry,
+                opts.tool_refresh.as_ref(),
+            ),
         )
         .await;
+        let report = match report {
+            Ok(r) => r,
+            Err(_) => {
+                status = EpisodeStatus::Timeout;
+                break;
+            }
+        };
         emit_turn_start(opts, &report);
+        if let Some(detail) = report.narrow_error {
+            status = EpisodeStatus::Terminated { detail };
+            break;
+        }
         let schemas = registry.schemas();
+        if let (Some(config), Some(active)) = (opts.escalation.as_ref(), active_policy.as_mut()) {
+            let step = crate::grants::escalate::lifecycle_step(
+                config,
+                active,
+                crate::hooks::StepEvent::BeforeModelCall {
+                    convo: &convo,
+                    schemas: &schemas,
+                },
+                sandbox,
+                registry,
+            );
+            match tokio::time::timeout_at(deadline.into(), step).await {
+                Ok(Ok(())) => (),
+                Ok(Err(detail)) => {
+                    status = EpisodeStatus::Terminated { detail };
+                    break;
+                }
+                Err(_) => {
+                    status = EpisodeStatus::Timeout;
+                    break;
+                }
+            }
+        }
 
         // Harness notes for this turn (019 US8: "N new passive leads", 025 reminders) — bee's own
         // words, recorded on the turn they precede.
@@ -360,7 +413,9 @@ pub async fn run_loop(
                     }
                     // A provider refusal for length means the estimate ran low: report it as the
                     // budget it is, not as a provider fault (plan risk 2).
-                    status = if crate::context::is_context_overflow(&detail) {
+                    status = if Instant::now() >= deadline {
+                        EpisodeStatus::Timeout
+                    } else if crate::context::is_context_overflow(&detail) {
                         EpisodeStatus::ContextExhausted { detail }
                     } else {
                         EpisodeStatus::ApiError { detail }
@@ -480,6 +535,26 @@ pub async fn run_loop(
             )
             .await;
             audit_trail.extend(outcome.audit_trail().cloned());
+            if let Some(warning) = sandbox.audit_warning() {
+                emit(opts, warning);
+            }
+            if let Some(detail) = outcome
+                .terminated
+                .as_ref()
+                .cloned()
+                .or_else(|| sandbox.check_cleanup().err())
+            {
+                recorded.push(outcome.to_recorded(tc));
+                turns.push(TranscriptTurn {
+                    index,
+                    assistant_text,
+                    calls: recorded,
+                    duration_ms: ms_since(turn_start),
+                    notes: turn_notes,
+                });
+                status = EpisodeStatus::Terminated { detail };
+                break 'outer;
+            }
             for rec in &outcome.escalations {
                 let kind = match rec.trigger {
                     crate::call::Trigger::Proactive => "proactive",
@@ -635,6 +710,7 @@ pub async fn run_loop(
 
     let ended_at = OffsetDateTime::now_utc();
     EpisodeTranscript {
+        audit_health: sandbox.audit_health(),
         consents: Vec::new(),
         mcp_audit: Default::default(),
         finish_offered,
@@ -682,6 +758,7 @@ fn not_run(call: &crate::provider::ToolCall) -> RecordedCall {
 fn infra_error(scenario: &Scenario, model: &dyn Model, detail: String) -> EpisodeTranscript {
     let now = rfc3339(OffsetDateTime::now_utc());
     EpisodeTranscript {
+        audit_health: Default::default(),
         consents: Vec::new(),
         mcp_audit: Default::default(),
         finish_offered: false,
@@ -898,15 +975,14 @@ pub async fn run_episode_with(
     transcript.http_scope = session.http_header();
     transcript.consents = session.operator.take_log();
     transcript.mcp_audit = session.sandbox.finish_mcp_audit().await;
+    transcript.audit_health = session.sandbox.audit_health();
 
     // MCP servers, then the Interceptor, then the scopes (FR-012). A scope that will not empty means
     // something survived the episode and is about to lose its enforcement when the engine drops.
     opts.tool_refresh = None;
     if let Err(e) = session.shutdown().await {
-        emit(
-            &opts,
-            format!("WARNING: {e} — a process may have outlived enforcement"),
-        );
+        transcript.status = EpisodeStatus::InfraError { detail: e.clone() };
+        emit(&opts, format!("scope cleanup failed: {e}"));
     }
 
     // CTF episodes carry a score derived from the audit trail (US3).

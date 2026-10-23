@@ -31,8 +31,11 @@
 //! transcript, which the harness has always written directly.
 
 use std::collections::HashMap;
-use std::io::Write;
+use std::io::{BufRead, Read};
+
+mod storage;
 use std::path::{Path, PathBuf};
+use storage::Storage;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -40,10 +43,7 @@ use time::OffsetDateTime;
 
 /// The largest serialised event, in bytes, before its newline.
 ///
-/// The whole concurrency argument (FR-022) rests on a single `O_APPEND` write landing atomically,
-/// which Linux gives for a regular file when the write is at most `PIPE_BUF` — 4096 bytes. What is
-/// actually written is the event **plus** its `\n`, so a 4096-byte event writes 4097 and falls one
-/// past the guarantee. Sizing the payload below the boundary leaves room for the delimiter.
+/// Records are bounded before writing; a descriptor-held writer lock serializes appends.
 pub const MAX_EVENT_BYTES: usize = 4000;
 
 /// The ledger directory relative to the project root, when nothing overrides it.
@@ -477,79 +477,94 @@ impl Ledger {
         self.dir.join("view.json")
     }
 
-    /// Create the ledger directory if it does not exist.
-    pub fn ensure_dir(&self) -> Result<(), LedgerError> {
-        std::fs::create_dir_all(&self.dir).map_err(|source| LedgerError::Io {
+    fn io_error(&self, source: std::io::Error) -> LedgerError {
+        LedgerError::Io {
             path: self.dir.clone(),
             source,
-        })
+        }
     }
 
-    /// Append one event as a single line.
-    ///
-    /// The serialised event is bounded to [`MAX_EVENT_BYTES`] *before* the write, so the line handed
-    /// to `write_all` is small enough to land atomically under `O_APPEND` and no line is ever cut
-    /// mid-record by an interleaved writer (FR-022).
+    fn storage(&self) -> Result<Storage, LedgerError> {
+        Storage::open(&self.dir).map_err(|e| self.io_error(e))
+    }
+
+    pub fn ensure_dir(&self) -> Result<(), LedgerError> {
+        self.storage().map(|_| ())
+    }
+
+    /// Append a bounded event while holding the cross-process writer lock.
     pub fn append(&self, event: &LedgerEvent) -> Result<(), LedgerError> {
         let line = bounded_line(event)?;
-        self.ensure_dir()?;
-        let path = self.log_path();
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .map_err(|source| LedgerError::Io {
-                path: path.clone(),
-                source,
-            })?;
-        // One `write_all` of one bounded line: the whole atomicity argument in three calls.
-        f.write_all(line.as_bytes())
-            .map_err(|source| LedgerError::Io { path, source })
+        self.storage()?.append(&line).map_err(|e| self.io_error(e))
     }
 
-    /// Read the log, skipping (and counting) lines this build cannot parse.
-    pub fn events(&self) -> Result<(Vec<LedgerEvent>, usize), LedgerError> {
-        let path = self.log_path();
-        let raw = match std::fs::read_to_string(&path) {
-            Ok(r) => r,
-            // A ledger that does not exist yet is an empty ledger, not an error.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Vec::new(), 0)),
-            Err(source) => return Err(LedgerError::Io { path, source }),
+    /// Read bounded records; unknown or malformed complete lines count as skipped events.
+    fn visit(
+        &self,
+        storage: &Storage,
+        mut visit: impl FnMut(LedgerEvent),
+    ) -> Result<usize, LedgerError> {
+        let Some(file) = storage.reader().map_err(|e| self.io_error(e))? else {
+            return Ok(0);
         };
-        let mut events = Vec::new();
-        let mut skipped = 0usize;
-        for line in raw.lines() {
-            if line.trim().is_empty() {
+        let mut reader = std::io::BufReader::new(file);
+        let mut skipped = 0;
+        loop {
+            let mut line = Vec::new();
+            let n = reader
+                .by_ref()
+                .take((MAX_EVENT_BYTES + 1) as u64)
+                .read_until(b'\n', &mut line)
+                .map_err(|e| self.io_error(e))?;
+            if n == 0 {
+                break;
+            }
+            if line.last() != Some(&b'\n') {
+                // Drain oversized records in fixed chunks rather than growing the line buffer.
+                while !line.ends_with(b"\n") {
+                    line.clear();
+                    if reader
+                        .by_ref()
+                        .take((MAX_EVENT_BYTES + 1) as u64)
+                        .read_until(b'\n', &mut line)
+                        .map_err(|e| self.io_error(e))?
+                        == 0
+                    {
+                        break;
+                    }
+                }
+                skipped += 1;
                 continue;
             }
-            match serde_json::from_str::<LedgerEvent>(line) {
-                Ok(e) => events.push(e),
-                // Forward compatibility: an event kind a later bee wrote, or a line damaged by
-                // something outside this module, must not make the rest of the ledger unreadable.
-                Err(_) => skipped += 1,
+            if line.iter().all(u8::is_ascii_whitespace) {
+                continue;
+            }
+            match serde_json::from_slice(&line) {
+                Ok(event) if n <= MAX_EVENT_BYTES => visit(event),
+                _ => skipped += 1,
             }
         }
+        Ok(skipped)
+    }
+
+    pub fn events(&self) -> Result<(Vec<LedgerEvent>, usize), LedgerError> {
+        let storage = self.storage()?;
+        let mut events = Vec::new();
+        let skipped = self.visit(&storage, |event| events.push(event))?;
         Ok((events, skipped))
     }
 
-    /// Write `view` to `view.json` via a temp file and a rename, so a reader never sees half of it.
-    ///
-    /// Best-effort by design: the view is a cache and the log is the truth, so a failure here is
-    /// reported but does not fail the write that produced it.
-    pub fn materialise(&self, view: &View) -> Result<(), LedgerError> {
-        self.ensure_dir()?;
-        let json = serde_json::to_string_pretty(view).unwrap_or_else(|_| "{}".to_string());
-        let tmp = self
-            .dir
-            .join(format!("view.json.{}.tmp", std::process::id()));
-        std::fs::write(&tmp, json.as_bytes()).map_err(|source| LedgerError::Io {
-            path: tmp.clone(),
-            source,
+    fn publish(&self, storage: &Storage, view: &View) -> Result<(), LedgerError> {
+        let json = serde_json::to_vec_pretty(view).map_err(|e| LedgerError::Invalid {
+            field: "view",
+            detail: e.to_string(),
         })?;
-        std::fs::rename(&tmp, self.view_path()).map_err(|source| LedgerError::Io {
-            path: self.view_path(),
-            source,
-        })
+        storage.publish(&json).map_err(|e| self.io_error(e))
+    }
+
+    /// Publish a derived cache through an exclusively created temporary.
+    pub fn materialise(&self, view: &View) -> Result<(), LedgerError> {
+        self.publish(&self.storage()?, view)
     }
 }
 
@@ -655,46 +670,117 @@ pub fn validate(finding: &Finding) -> Result<(), LedgerError> {
 /// visible to the caller.
 pub fn record(
     ledger: &Ledger,
-    mut finding: Finding,
+    finding: Finding,
     sighting: Sighting,
 ) -> Result<FindingId, LedgerError> {
+    record_batch(ledger, vec![(finding, sighting)])?
+        .pop()
+        .expect("one input has one result")
+}
+
+fn observed_line(
+    mut finding: Finding,
+    sighting: Sighting,
+) -> Result<(FindingId, String), LedgerError> {
     finding.path = normalise_path(&finding.path);
     finding.reidentify();
     validate(&finding)?;
-
     let id = finding.id.clone();
-    // The sighting travels beside the record, not inside it: a folded entry's `sightings` is built
-    // by the fold from every event, so a record carrying its own list would double-count.
     finding.sightings.clear();
-
-    ledger.append(&LedgerEvent::Observed {
+    let line = bounded_line(&LedgerEvent::Observed {
         id: id.clone(),
         run_id: sighting.run_id.clone(),
         at: sighting.at,
         sighting,
         finding: Some(Box::new(finding)),
     })?;
-    refresh_view(ledger);
-    Ok(id)
+    Ok((id, line))
+}
+
+/// One locked append/fold/publication transaction. Per-record errors identify partial persistence;
+/// already appended events stay authoritative if a later record or cache refresh fails.
+pub fn record_batch(
+    ledger: &Ledger,
+    records: Vec<(Finding, Sighting)>,
+) -> Result<Vec<Result<FindingId, LedgerError>>, LedgerError> {
+    if records.len() > 200 {
+        return Err(LedgerError::Invalid {
+            field: "batch",
+            detail: "at most 200 findings per batch".into(),
+        });
+    }
+    let lines: Vec<_> = records
+        .into_iter()
+        .map(|(f, s)| observed_line(f, s))
+        .collect();
+    if lines.iter().all(Result::is_err) {
+        return Ok(lines.into_iter().map(|r| r.map(|(id, _)| id)).collect());
+    }
+    let storage = ledger.storage()?;
+    let mut appended = false;
+    let results = lines
+        .into_iter()
+        .map(|line| {
+            let (id, line) = line?;
+            storage.append(&line).map_err(|e| ledger.io_error(e))?;
+            appended = true;
+            Ok(id)
+        })
+        .collect();
+    if appended {
+        report_cache_error(
+            fold_locked(ledger, &storage).and_then(|view| ledger.publish(&storage, &view)),
+        );
+    }
+    Ok(results)
+}
+
+/// Only one blocking batch runs at a time. The blocking task owns its data and admission permit
+/// until it finishes, even if its async waiter is canceled; Tokio waits for it at runtime shutdown.
+pub async fn record_batch_async(
+    ledger: Ledger,
+    records: Vec<(Finding, Sighting)>,
+) -> Result<Vec<Result<FindingId, LedgerError>>, LedgerError> {
+    run_ledger_work(move || record_batch(&ledger, records)).await?
+}
+
+pub(crate) async fn run_ledger_work<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, LedgerError> {
+    static WRITER: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+    let permit = WRITER.acquire().await.map_err(|e| LedgerError::Invalid {
+        field: "ledger",
+        detail: e.to_string(),
+    })?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        work()
+    })
+    .await
+    .map_err(|e| LedgerError::Invalid {
+        field: "ledger",
+        detail: e.to_string(),
+    })
 }
 
 /// Re-fold and re-materialise the view, reporting failure without propagating it. The log has
 /// already been written by the time this runs, so the finding *is* recorded; failing the caller here
 /// would tell them otherwise.
 pub fn refresh_view(ledger: &Ledger) {
-    match fold(ledger) {
-        Ok(view) => {
-            if let Err(e) = ledger.materialise(&view) {
-                eprintln!(
-                    r#"{{"event":"ledger_view_stale","detail":{}}}"#,
-                    serde_json::to_string(&e.to_string()).unwrap_or_else(|_| "\"\"".into())
-                );
-            }
-        }
-        Err(e) => eprintln!(
-            r#"{{"event":"ledger_view_stale","detail":{}}}"#,
-            serde_json::to_string(&e.to_string()).unwrap_or_else(|_| "\"\"".into())
-        ),
+    let result = (|| {
+        let storage = ledger.storage()?;
+        let view = fold_locked(ledger, &storage)?;
+        ledger.publish(&storage, &view)
+    })();
+    report_cache_error(result);
+}
+
+fn report_cache_error(result: Result<(), LedgerError>) {
+    if let Err(e) = result {
+        eprintln!(
+            "{}",
+            serde_json::json!({"event": "ledger_view_stale", "detail": e.to_string()})
+        );
     }
 }
 
@@ -729,11 +815,15 @@ impl View {
 /// | `Adjudicated` | set the verdict; a later event replaces an earlier one |
 /// | `Scored` | set the severity |
 pub fn fold(ledger: &Ledger) -> Result<View, LedgerError> {
-    let (events, mut skipped) = ledger.events()?;
+    fold_locked(ledger, &ledger.storage()?)
+}
+
+fn fold_locked(ledger: &Ledger, storage: &Storage) -> Result<View, LedgerError> {
+    let mut skipped = 0;
     let mut order: Vec<FindingId> = Vec::new();
     let mut by_id: HashMap<FindingId, Finding> = HashMap::new();
 
-    for event in events {
+    let unreadable = ledger.visit(storage, |event| {
         match event {
             LedgerEvent::Observed {
                 id,
@@ -770,7 +860,8 @@ pub fn fold(ledger: &Ledger) -> Result<View, LedgerError> {
                 None => skipped += 1,
             },
         }
-    }
+    })?;
+    skipped += unreadable;
 
     let findings = order
         .into_iter()
@@ -818,7 +909,7 @@ mod tests {
         let line = bounded_line(&event).expect("bounding should make it fit");
         assert!(
             line.len() <= MAX_EVENT_BYTES,
-            "line is {} bytes, over the atomic-append budget",
+            "line is {} bytes, over the record byte budget",
             line.len()
         );
         assert!(line.ends_with('\n'));

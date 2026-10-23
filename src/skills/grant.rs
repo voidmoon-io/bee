@@ -112,14 +112,17 @@ pub async fn resolve_grants(
         };
 
         // 1. Attenuation ceiling — not overridable by consent. `derive` proves candidate ⊆ ceiling.
-        if let Err(e) = ceiling.derive(candidate.clone()) {
-            operator.record_unasked(request, Reason::BeyondCeiling);
-            refused.push((
-                skill.name.clone(),
-                format!("exceeds capability ceiling: {e}"),
-            ));
-            continue;
-        }
+        let candidate = match ceiling.derive(candidate) {
+            Ok(policy) => policy,
+            Err(e) => {
+                operator.record_unasked(request, Reason::BeyondCeiling);
+                refused.push((
+                    skill.name.clone(),
+                    format!("exceeds capability ceiling: {e}"),
+                ));
+                continue;
+            }
+        };
 
         // 2. Consent, only for a request that is already within the ceiling.
         let record = operator.consent(request).await;
@@ -212,6 +215,7 @@ mod tests {
             filesystem: BTreeMap::new(),
             exec: Default::default(),
             network: Default::default(),
+            defaults: Default::default(),
             exfiltration: Default::default(),
             http: None,
         };

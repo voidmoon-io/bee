@@ -1,0 +1,250 @@
+    Blocking waiting for file lock on build directory
+   Compiling bee v0.1.0 (/tmp/bee-tigerstyle-pr-20261023)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 19.40s
+     Running tests/call_characterization.rs (target/debug/deps/call_characterization-d890da31d764a340)
+
+running 11 tests
+test s4_kernel_denial_already_held ... ok
+test s1_no_denial ... ok
+test s3_kernel_denial_beyond_ceiling ... ok
+test s2_kernel_denial_granted_and_retried ... ok
+test s5_proxy_refusal_granted_and_retried ... ok
+test lease_turn_counts ... ok
+test s6a_kernel_retry_outlasts_the_budget ... ok
+test s8_late_tool_batch_on_the_sidecar_drain ... ok
+test s6c_proxy_retry_times_out ... ok
+test s7_proxy_scope_denial ... ok
+test s6b_kernel_retry_after_the_first_attempt_used_the_budget ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.01s
+
+     Running tests/call_lifecycle.rs (target/debug/deps/call_lifecycle-359689ddd94d7676)
+
+running 12 tests
+test a_late_tool_batch_belongs_to_this_call ... ok
+test a_proxy_scope_denial_is_the_proxys ... ok
+test kernel_denial_already_held_is_not_retried ... ok
+test kernel_denial_granted_then_retried ... ok
+test kernel_denial_refused_is_not_retried ... ok
+test no_retry_starts_when_no_time_is_left ... ok
+test no_denial ... ok
+test proxy::a_proxy_refusal_granted_then_retried ... ok
+test proxy::a_kernel_denial_and_a_proxy_refusal_retry_once ... ok
+test canceled_proxy_policy_update_stops_future_dispatch ... ok
+test a_retry_gets_only_what_the_first_attempt_left ... ok
+test proxy::a_proxy_retry_that_times_out_leaves_the_first_attempt ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.01s
+
+     Running tests/context_compaction.rs (target/debug/deps/context_compaction-e583d56ef761ad26)
+
+running 17 tests
+test cannot_fit_ends_context_exhausted ... ok
+test below_soft_is_untouched ... ok
+test elides_before_summarizing ... ok
+test progress_lines ... ok
+test preamble_and_recent_window_verbatim ... ok
+test stub_keeps_denial ... ok
+test stub_keeps_proxy_refusal ... ok
+test repl_clear_resets ... ok
+test summarizes_above_hard ... ok
+test calls_and_results_stay_paired ... ok
+test no_compaction_next_turn ... ok
+test five_x_budget_run_completes ... ok
+test summary_usage_counted_separately ... ok
+test summary_is_framed_untrusted_after_preamble ... ok
+test summary_failure_removes_with_marker ... ok
+test record_identical_with_and_without ... ok
+test budgets_matrix_zero_overflow ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.84s
+
+     Running tests/episode_progress_strings.rs (target/debug/deps/episode_progress_strings-968ce8227c73c508)
+
+running 6 tests
+test the_context_lines ... ok
+test the_reminder_line ... ok
+test the_stuck_line ... ok
+test the_autonomous_operator_adds_one_consent_line_per_decision ... ok
+test every_loop_line_is_byte_identical ... ok
+test the_proxy_escalation_line ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/finish_tool.rs (target/debug/deps/finish_tool-9adbb6efb31a5e5a)
+
+running 9 tests
+test exit_codes ... ok
+test invalid_finish_continues ... ok
+test finish_completed_ends_run ... ok
+test calls_after_finish_not_run ... ok
+test every_status_maps_in_batch_and_grid ... ok
+test second_text_turn_ends_without_finish ... ok
+test text_turn_gets_one_reminder ... ok
+test repl_and_ctf_do_not_offer_finish ... ok
+test scenario_opt_out_keeps_old_endings ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/hooks_leases.rs (target/debug/deps/hooks_leases-74a6e91d090b90a9)
+
+running 6 tests
+test a_refused_call_never_runs_in_the_episode ... ok
+test a_refused_call_never_runs_in_the_repl ... ok
+test a_changed_tool_source_is_refreshed_at_turn_start ... ok
+test a_lease_expires_after_two_model_turns_in_the_repl ... ok
+test a_lease_expires_after_two_model_turns_in_the_episode ... ok
+test a_released_lease_narrows_the_scope ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/intercept_escalation.rs (target/debug/deps/intercept_escalation-bccc3e0b482b5bf2)
+
+running 6 tests
+test no_model_tool_can_widen_the_scope ... ok
+test no_grant_sequence_escapes_the_ceiling ... ok
+test a_beyond_ceiling_target_is_refused_without_asking ... ok
+test an_approved_widening_asks_for_exactly_the_refused_target_then_works ... ok
+test a_declined_or_unanswered_widening_changes_nothing ... ok
+test a_worker_that_cannot_take_the_scope_rolls_the_grant_back ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.94s
+
+     Running tests/intercept_fuzz.rs (target/debug/deps/intercept_fuzz-59a616fd804ebc86)
+
+running 6 tests
+test an_out_of_scope_variant_is_refused_and_not_counted_as_a_response ... ok
+test over_the_run_limit_is_refused_before_any_request ... ok
+test bad_specs_are_invalid_args ... ok
+test a_from_template_marks_positions_and_a_project_file_is_read_in_scope ... ok
+test a_thousand_variants_cluster_and_the_two_errors_stand_out ... ok
+test the_rate_is_held_to_the_limit_and_arguments_only_lower_it ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.22s
+
+     Running tests/intercept_har.rs (target/debug/deps/intercept_har-a9e2bbca321de37f)
+
+running 1 test
+test the_export_is_har_1_2_without_credentials_and_with_sensitive_headers_flagged ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests/intercept_leads.rs (target/debug/deps/intercept_leads-88ae6d3d1bd0f741)
+
+running 1 test
+test a_reflected_parameter_becomes_a_lead_announced_once_and_listed_once ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running tests/intercept_ops.rs (target/debug/deps/intercept_ops-16e2a7c83bdf6322)
+
+running 8 tests
+test a_refused_replay_is_a_typed_refusal ... ok
+test an_invalid_edit_sends_nothing ... ok
+test an_in_scope_redirect_is_followed ... ok
+test an_out_of_scope_redirect_stops_at_that_hop ... ok
+test read_exchange_gives_the_tool_view ... ok
+test a_same_origin_redirect_with_a_url_in_its_query_is_followed ... ok
+test replay_with_an_edit_gives_the_tool_diff_shape ... ok
+test the_sitemap_op_matches_the_tool ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+
+     Running tests/intercept_replay.rs (target/debug/deps/intercept_replay-e7e8af8c3146fb60)
+
+running 5 tests
+test without_a_probe_exactly_one_request_is_sent ... ok
+test send_with_a_baseline_returns_the_same_diff_shape ... ok
+test a_json_edit_reports_the_changed_path_and_suppresses_the_volatile_ones ... ok
+test a_header_edit_shows_the_status_change ... ok
+test the_sitemap_lists_every_path_and_parameter ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+
+     Running tests/intercept_rules.rs (target/debug/deps/intercept_rules-1a02c460fb846993)
+
+running 5 tests
+test a_rule_cannot_rewrite_traffic_out_of_scope ... ok
+test a_drop_rule_answers_502_naming_the_rule ... ok
+test rules_are_session_only_and_holds_are_bounded ... ok
+test a_modify_rule_rewrites_and_keeps_the_original ... ok
+test a_hold_released_with_edits_applies_them_and_another_auto_forwards ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.13s
+
+     Running tests/intercept_tls.rs (target/debug/deps/intercept_tls-e3355c11e1beb744)
+
+running 5 tests
+test an_h2_only_upstream_is_reported_not_passed_through ... ok
+test the_bundle_holds_system_roots_plus_one_ca_and_no_key_anywhere ... ok
+test without_insecure_upstream_a_self_signed_upstream_fails_verification ... ok
+test an_inspected_host_is_decrypted_and_recorded ... ok
+test a_non_inspected_host_is_only_a_tunnel ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.37s
+
+     Running tests/intercept_tools.rs (target/debug/deps/intercept_tools-65c8ae8da7a61a5d)
+
+running 9 tests
+test an_out_of_scope_send_is_refused_naming_the_layer ... ok
+test http_scope_reports_layers_and_advisory ... ok
+test an_egress_host_is_refused_with_egress_only ... ok
+test an_in_scope_redirect_is_followed ... ok
+test a_redirect_out_of_scope_stops_and_reports_the_hop ... ok
+test a_structured_post_returns_a_bounded_summary ... ok
+test raw_bytes_arrive_byte_for_byte ... ok
+test history_filters_and_attributes ... ok
+test get_views_are_bounded_and_remote ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.47s
+
+     Running tests/operator.rs (target/debug/deps/operator-1be225e0358e86c7)
+
+running 5 tests
+test a_front_end_that_is_gone_refuses ... ok
+test an_unanswered_interactive_request_times_out_and_is_not_retried ... ok
+test the_autonomous_operator_records_every_decision_and_asks_nobody ... ok
+test consents_are_recorded_only_when_there_are_any ... ok
+test a_start_up_grant_carries_the_whole_request ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/session_parity.rs (target/debug/deps/session_parity-a098d49e1a998566)
+
+running 10 tests
+test kernel_enforcement_without_the_feature_is_refused ... ok
+test the_http_advisory_has_one_answer ... ok
+test an_mcp_calls_own_server_denial_is_the_calls_and_escalates ... ok
+test a_servers_events_after_the_last_call_are_still_recorded ... ok
+test a_concurrent_batch_refuses_what_it_cannot_provide ... ok
+test interactive_and_autonomous_differ_only_in_the_operator ... ok
+test an_mcp_servers_own_events_are_its_not_the_open_calls ... ok
+test the_system_prompt_names_the_render_tool_everywhere ... ok
+test every_entry_point_builds_the_same_session ... ok
+test teardown_has_one_order_shut_down_or_dropped ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/stuck_detection.rs (target/debug/deps/stuck_detection-08a22392ccec2427)
+
+running 10 tests
+test denied_repeat_gets_policy_reminder_at_two ... ok
+test proxy_refused_repeat_gets_policy_reminder ... ok
+test different_call_resets ... ok
+test granted_retry_is_not_a_denied_repeat ... ok
+test key_order_is_irrelevant ... ok
+test alternating_success_does_not_stop ... ok
+test reminder_once_at_five ... ok
+test stops_at_eight_failing ... ok
+test repl_stop_ends_exchange_not_session ... ok
+test reminders_are_recorded ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/transcript_compat.rs (target/debug/deps/transcript_compat-7fc02e29e03ea32f)
+
+running 2 tests
+test a_pre_025_transcript_reads_and_writes_back_unchanged ... ok
+test a_run_without_025_features_writes_no_new_key ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

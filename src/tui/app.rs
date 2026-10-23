@@ -1452,7 +1452,10 @@ mod tests {
             &mut a.effects,
             Some("m"),
             &crate::tui::effects::panel_enter_spec(),
-            &crate::tui::effects::ResolveCtx::agent(a.visual, area),
+            &crate::tui::effects::ResolveCtx {
+                color: true,
+                ..crate::tui::effects::ResolveCtx::agent(a.visual, area)
+            },
         );
         assert!(a.effects.is_running());
 

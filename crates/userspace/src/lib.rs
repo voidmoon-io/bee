@@ -75,7 +75,31 @@ pub struct Engine {
     #[allow(dead_code)]
     support: Support,
     #[cfg(feature = "enforce")]
-    ebpf: aya::Ebpf,
+    ebpf: std::mem::ManuallyDrop<aya::Ebpf>,
+    #[cfg(feature = "enforce")]
+    scope_paths: Vec<std::path::PathBuf>,
+}
+
+#[cfg(feature = "enforce")]
+impl Drop for Engine {
+    fn drop(&mut self) {
+        for path in &self.scope_paths {
+            if !path.exists() {
+                continue;
+            }
+            if let Err(error) = cgroup::kill_scope_cgroup(path) {
+                // Detaching would remove enforcement from surviving children. Keep the link
+                // descriptors open for the rest of this process's lifetime instead.
+                eprintln!("bee: retaining enforcement after failed scope cleanup: {error}");
+                return;
+            }
+            let _ = cgroup::teardown_scope_cgroup(path);
+        }
+        // SAFETY: this is the sole owner, and all owned scopes are confirmed empty.
+        unsafe {
+            std::mem::ManuallyDrop::drop(&mut self.ebpf);
+        }
+    }
 }
 
 impl Engine {
@@ -95,7 +119,11 @@ impl Engine {
         #[cfg(feature = "enforce")]
         {
             let ebpf = loader::load_and_attach()?;
-            Ok(Engine { support, ebpf })
+            Ok(Engine {
+                support,
+                ebpf: std::mem::ManuallyDrop::new(ebpf),
+                scope_paths: Vec::new(),
+            })
         }
         #[cfg(not(feature = "enforce"))]
         {
@@ -117,6 +145,7 @@ impl Engine {
         plan: &EnforcementPlan,
     ) -> Result<Scope, ScopeError> {
         let path = cgroup::create_scope_cgroup(parent_cgroup, scope_id)?;
+        self.scope_paths.push(path.clone());
         let cgroup_id = cgroup::cgroup_id(&path)?;
 
         // Planning has already validated all capabilities and encoded the mode/flags.

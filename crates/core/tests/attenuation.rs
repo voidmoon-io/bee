@@ -260,3 +260,33 @@ fn protected_git_is_readable_but_not_writable_by_a_child() {
         ))
         .is_err());
 }
+
+#[test]
+fn effective_defaults_survive_serialization() {
+    let parent = p("[policy]\nname='parent'\n[policy.filesystem]\n'/project'='write'\n");
+    let child = parent
+        .derive(p(
+            "[policy]\nname='child'\n[policy.filesystem]\n'/project'='read'\n",
+        ))
+        .unwrap();
+    let restored: Policy = toml::from_str(&toml::to_string(&child).unwrap()).unwrap();
+    assert!(restored.denies_unmatched_writes());
+    assert!(!restored
+        .filesystem
+        .values()
+        .any(|a| *a == bee_core::Access::Write));
+}
+
+#[test]
+fn inherited_read_only_region_stays_readable() {
+    let parent = p("[policy]\nname='parent'\n[policy.filesystem]\n'/project'='read'\n");
+    let child = parent
+        .derive(p(
+            "[policy]\nname='child'\n[policy.filesystem]\n'/project/sub'='read'\n",
+        ))
+        .unwrap();
+    assert_eq!(
+        child.filesystem.get("/project"),
+        Some(&bee_core::Access::Read)
+    );
+}

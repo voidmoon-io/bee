@@ -254,10 +254,9 @@ async fn a_refused_call_never_runs_in_the_episode() {
 async fn a_refused_call_never_runs_in_the_repl() {
     let (mut reg, ran, mut sb) = registry();
     let config = ReplConfig {
-        escalation: Some(ReplEscalation::new(escalation(
-            vec![Box::new(DenyCall("c0"))],
-            Ttl::Forever,
-        ))),
+        escalation: Some(
+            ReplEscalation::new(escalation(vec![Box::new(DenyCall("c0"))], Ttl::Forever)).unwrap(),
+        ),
         ..ReplConfig::default()
     };
     let (r, convo, _) = repl(script(&[&["c0"]]), &config, &mut reg, &mut sb).await;
@@ -311,10 +310,9 @@ async fn a_lease_expires_after_two_model_turns_in_the_episode() {
 async fn a_lease_expires_after_two_model_turns_in_the_repl() {
     let (mut reg, _, mut sb) = registry();
     let config = ReplConfig {
-        escalation: Some(ReplEscalation::new(escalation(
-            vec![Box::new(GrantOn("c1"))],
-            Ttl::Turns(2),
-        ))),
+        escalation: Some(
+            ReplEscalation::new(escalation(vec![Box::new(GrantOn("c1"))], Ttl::Turns(2))).unwrap(),
+        ),
         ..ReplConfig::default()
     };
     let (_, _, log) = repl(lease_script(), &config, &mut reg, &mut sb).await;
@@ -362,10 +360,13 @@ async fn a_released_lease_narrows_the_scope() {
 
     let (mut reg, _, mut sb) = registry();
     let config = ReplConfig {
-        escalation: Some(ReplEscalation::new(escalation(
-            vec![Box::new(GrantOn("c0")), Box::new(ReleaseAt(1, "g0"))],
-            Ttl::Forever,
-        ))),
+        escalation: Some(
+            ReplEscalation::new(escalation(
+                vec![Box::new(GrantOn("c0")), Box::new(ReleaseAt(1, "g0"))],
+                Ttl::Forever,
+            ))
+            .unwrap(),
+        ),
         ..ReplConfig::default()
     };
     let (_, _, log) = repl(script(&[&["c0"], &["c1"]]), &config, &mut reg, &mut sb).await;

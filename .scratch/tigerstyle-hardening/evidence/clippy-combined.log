@@ -1,0 +1,4 @@
+    Checking bee-core v0.1.0 (/home/jg/git/bee/crates/core)
+    Checking bee-userspace v0.1.0 (/home/jg/git/bee/crates/userspace)
+    Checking bee v0.1.0 (/home/jg/git/bee)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 13.23s

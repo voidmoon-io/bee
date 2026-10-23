@@ -90,6 +90,7 @@ pub struct EscalationRecord {
 /// Everything one tool call produced (data-model.md).
 #[derive(Debug, Clone)]
 pub struct CallOutcome {
+    pub terminated: Option<String>,
     /// The result of the attempt that stands. Always from the same attempt as `audit` (FR-025).
     pub result: ToolResult,
     /// The tool scope's kernel events for the attempt that stands, plus late events (FR-023).
@@ -155,51 +156,105 @@ impl CallOutcome {
     }
 }
 
-/// Run one tool call to completion, following contracts/call-lifecycle.md. The returned future is
-/// `Send`: the concurrent runner spawns the episode loop.
+fn stopped(reason: String, timed_out: bool, terminate: bool) -> CallOutcome {
+    CallOutcome {
+        result: ToolResult::error(reason.clone()),
+        terminated: terminate.then_some(reason),
+        audit: Vec::new(),
+        denied_attempt_audit: Vec::new(),
+        proxy_audit: Vec::new(),
+        proxy_events: Vec::new(),
+        denied_attempt_proxy_events: Vec::new(),
+        retried: false,
+        timed_out,
+        escalations: Vec::new(),
+        refused_by_hook: None,
+    }
+}
+
 pub async fn run_call(
     input: CallInput<'_>,
     sandbox: &mut Sandbox,
     registry: &mut ToolRegistry,
-    mut esc: Option<Escalation<'_>>,
+    esc: Option<Escalation<'_>>,
 ) -> CallOutcome {
-    let tc = input.call;
-    let (deadline, timeout_message) = match input.timeout {
-        TimeoutPolicy::Deadline(d) => (
-            d,
-            "tool aborted: episode wall-clock deadline reached".to_string(),
-        ),
-        TimeoutPolicy::PerCall(t) => (
-            Instant::now() + t,
-            format!("tool timed out after {}s", t.as_secs()),
-        ),
+    let deadline = match input.timeout {
+        TimeoutPolicy::Deadline(d) => d,
+        TimeoutPolicy::PerCall(t) => Instant::now() + t,
     };
+    if Instant::now() >= deadline {
+        return stopped("tool deadline reached before dispatch".into(), true, false);
+    }
+    let timeout_message = match input.timeout {
+        TimeoutPolicy::Deadline(_) => {
+            "tool aborted: episode wall-clock deadline reached".to_string()
+        }
+        TimeoutPolicy::PerCall(t) => format!("tool timed out after {}s", t.as_secs()),
+    };
+    let mut outcome = stopped(timeout_message.clone(), false, false);
+    let server = registry.mcp_server(&input.call.name).map(str::to_string);
+    if tokio::time::timeout_at(
+        deadline.into(),
+        run_call_inner(
+            input,
+            sandbox,
+            registry,
+            esc,
+            deadline,
+            &timeout_message,
+            &mut outcome,
+        ),
+    )
+    .await
+    .is_err()
+    {
+        outcome.timed_out = true;
+        // Keep the completed attempt if a hook or retry used the rest of the budget.
+        // Closing the call also revokes its proxy credential after cancellation.
+        match tokio::time::timeout(Duration::from_secs(1), sandbox.end_call()).await {
+            Ok(events) => outcome.proxy_events.extend(events),
+            Err(_) => sandbox.cleanup_failed("call cleanup timed out".into()),
+        }
+        outcome.audit.extend(sandbox.drain_audit(server.as_deref()));
+        outcome.proxy_audit.extend(sandbox.drain_sidecar_audit());
+    }
+    outcome
+}
+
+/// Run one tool call to completion, following contracts/call-lifecycle.md. The returned future is
+/// `Send`: the concurrent runner spawns the episode loop.
+#[allow(clippy::too_many_arguments)]
+async fn run_call_inner(
+    input: CallInput<'_>,
+    sandbox: &mut Sandbox,
+    registry: &mut ToolRegistry,
+    mut esc: Option<Escalation<'_>>,
+    deadline: Instant,
+    timeout_message: &str,
+    outcome: &mut CallOutcome,
+) {
+    let tc = input.call;
     let ctx = CallContext {
         call_id: tc.id.clone(),
         turn: input.turn,
         origin: input.origin,
     };
-    let mut escalations = Vec::new();
 
     // 1. Before the call: a hook may refuse it, and then it never runs (FR-031); or ask for a grant
     //    (a loaded skill's `requires`), and the call then runs under the possibly-widened scope.
     if let Some(e) = esc.as_mut() {
         match before_call(e, tc, sandbox, registry).await {
-            Before::Refused(reason) => {
-                return CallOutcome {
-                    result: ToolResult::refused_by_hook(&reason),
-                    audit: Vec::new(),
-                    denied_attempt_audit: Vec::new(),
-                    proxy_audit: Vec::new(),
-                    proxy_events: Vec::new(),
-                    denied_attempt_proxy_events: Vec::new(),
-                    retried: false,
-                    timed_out: false,
-                    escalations,
-                    refused_by_hook: Some(reason),
-                }
+            Before::Stopped(reason) => {
+                *outcome = stopped(reason, false, true);
+                return;
             }
-            Before::Run(Some(rec)) => escalations.push(rec),
+            Before::Refused(reason) => {
+                outcome.result = ToolResult::refused_by_hook(&reason);
+                outcome.refused_by_hook = Some(reason);
+                return;
+            }
+
+            Before::Run(Some(rec)) => outcome.escalations.push(rec),
             Before::Run(None) => {}
         }
     }
@@ -209,70 +264,75 @@ pub async fn run_call(
     let server = registry.mcp_server(&tc.name).map(str::to_string);
     let server = server.as_deref();
     sandbox.begin_call(ctx.clone()).await;
-    let (mut result, mut timed_out) =
-        attempt(tc, &*sandbox, &*registry, deadline, &timeout_message).await;
+    (outcome.result, outcome.timed_out) =
+        attempt(tc, &*sandbox, &*registry, deadline, timeout_message).await;
     sandbox.settle().await;
-    let mut audit = sandbox.drain_audit(server);
-    let mut denied_attempt_audit = Vec::new();
-    let mut retried = false;
+    outcome.audit = sandbox.drain_audit(server);
 
     // 4. A kernel denial may be escalated — a grant scoped to the denied resource — and the call
     //    retried once, inside the same open call.
-    if let (Some(e), Some((op, target))) = (esc.as_mut(), first_denial(&audit)) {
-        if let Some(rec) = reactive(e, &op, &target, tc, sandbox, registry).await {
+    if let (Some(e), Some((op, target))) = (esc.as_mut(), first_denial(&outcome.audit)) {
+        let decision = reactive(e, &op, &target, tc, sandbox, registry).await;
+        if let Err(reason) = &decision {
+            outcome.terminated = Some(reason.clone());
+        }
+        if let Ok(Some(rec)) = decision {
             let granted = rec.outcome.is_granted();
-            escalations.push(rec);
+            outcome.escalations.push(rec);
             if granted && !left(deadline).is_zero() {
-                let (r, t) = attempt(tc, &*sandbox, &*registry, deadline, &timeout_message).await;
+                let (r, t) = attempt(tc, &*sandbox, &*registry, deadline, timeout_message).await;
                 sandbox.settle().await;
                 let retry_audit = sandbox.drain_audit(server);
                 if t {
                     // FR-025: the abandoned retry does not replace the attempt that stands. Its
                     // kernel events are still this call's.
-                    timed_out = true;
-                    audit.extend(retry_audit);
+                    outcome.timed_out = true;
+                    outcome.audit.extend(retry_audit);
                 } else {
-                    denied_attempt_audit = std::mem::replace(&mut audit, retry_audit);
-                    result = r;
-                    retried = true;
+                    outcome.denied_attempt_audit =
+                        std::mem::replace(&mut outcome.audit, retry_audit);
+                    outcome.result = r;
+                    outcome.retried = true;
                 }
             }
         }
     }
 
     // 5. Close the call.
-    #[cfg_attr(not(feature = "intercept"), allow(unused_mut))]
-    let mut proxy_events = sandbox.end_call().await;
-    #[cfg_attr(not(feature = "intercept"), allow(unused_mut))]
-    let mut denied_attempt_proxy_events = Vec::new();
+    outcome.proxy_events = sandbox.end_call().await;
 
     // 6. A proxy refusal may become a consented target-scope widening, and the call is retried once
     //    in a new call — unless a kernel retry already spent the one retry.
     #[cfg(feature = "intercept")]
-    if !retried {
+    if !outcome.retried && outcome.terminated.is_none() && !outcome.timed_out {
         if let Some(e) = esc.as_mut() {
-            if let Some(rec) = proxy_refusal(e, &proxy_events, tc, sandbox, registry).await {
+            let decision = proxy_refusal(e, &outcome.proxy_events, tc, sandbox, registry).await;
+            if let Err(reason) = &decision {
+                outcome.terminated = Some(reason.clone());
+            }
+            if let Ok(Some(rec)) = decision {
                 let granted = rec.outcome.is_granted();
-                escalations.push(rec);
+                outcome.escalations.push(rec);
                 if granted && !left(deadline).is_zero() {
                     sandbox.begin_call(ctx.clone()).await;
                     let (r, t) =
-                        attempt(tc, &*sandbox, &*registry, deadline, &timeout_message).await;
+                        attempt(tc, &*sandbox, &*registry, deadline, timeout_message).await;
                     sandbox.settle().await;
                     let retry_audit = sandbox.drain_audit(server);
                     let retry_proxy = sandbox.end_call().await;
                     if t {
                         // FR-025: as for a kernel retry, the attempt before stands; the abandoned
                         // retry's events are still this call's.
-                        timed_out = true;
-                        audit.extend(retry_audit);
-                        proxy_events.extend(retry_proxy);
+                        outcome.timed_out = true;
+                        outcome.audit.extend(retry_audit);
+                        outcome.proxy_events.extend(retry_proxy);
                     } else {
-                        denied_attempt_audit = std::mem::replace(&mut audit, retry_audit);
-                        denied_attempt_proxy_events =
-                            std::mem::replace(&mut proxy_events, retry_proxy);
-                        result = r;
-                        retried = true;
+                        outcome.denied_attempt_audit =
+                            std::mem::replace(&mut outcome.audit, retry_audit);
+                        outcome.denied_attempt_proxy_events =
+                            std::mem::replace(&mut outcome.proxy_events, retry_proxy);
+                        outcome.result = r;
+                        outcome.retried = true;
                     }
                 }
             }
@@ -282,20 +342,27 @@ pub async fn run_call(
     // 7. The proxy scope's kernel events, only now — after escalation, which they must never drive —
     //    then tool-scope events that reached the ring since the last drain, which belong here, not to
     //    the next call (FR-022, FR-023).
-    let proxy_audit = sandbox.drain_sidecar_audit();
-    audit.extend(sandbox.drain_audit(server));
+    outcome.proxy_audit = sandbox.drain_sidecar_audit();
+    outcome.audit.extend(sandbox.drain_audit(server));
 
-    CallOutcome {
-        result,
-        audit,
-        denied_attempt_audit,
-        proxy_audit,
-        proxy_events,
-        denied_attempt_proxy_events,
-        retried,
-        timed_out,
-        escalations,
-        refused_by_hook: None,
+    if outcome.terminated.is_none() {
+        if let Some(e) = esc.as_mut() {
+            if let Err(reason) = crate::grants::escalate::lifecycle_step(
+                e.config,
+                e.active,
+                StepEvent::AfterToolResult {
+                    call: tc,
+                    result: &outcome.result,
+                    audit: &outcome.audit,
+                },
+                sandbox,
+                registry,
+            )
+            .await
+            {
+                outcome.terminated = Some(reason);
+            }
+        }
     }
 }
 
@@ -312,7 +379,10 @@ async fn attempt(
     deadline: Instant,
     timeout_message: &str,
 ) -> (ToolResult, bool) {
-    match tokio::time::timeout(left(deadline), registry.execute(tc, sandbox)).await {
+    if Instant::now() >= deadline {
+        return (ToolResult::error(timeout_message), true);
+    }
+    match tokio::time::timeout_at(deadline.into(), registry.execute(tc, sandbox)).await {
         Ok(r) => (r, false),
         Err(_) => (ToolResult::error(timeout_message), true),
     }
@@ -356,6 +426,7 @@ enum Before {
     Run(Option<EscalationRecord>),
     /// Do not run it.
     Refused(String),
+    Stopped(String),
 }
 
 /// Dispatch `BeforeToolCall`: a refusal stops the call (FR-031, and outranks any proposed grant —
@@ -366,7 +437,23 @@ async fn before_call(
     sandbox: &mut Sandbox,
     registry: &mut ToolRegistry,
 ) -> Before {
-    let d = crate::hooks::dispatch(&e.config.hooks, &StepEvent::BeforeToolCall(tc)).await;
+    let d = crate::hooks::dispatch_bounded(
+        &e.config.hooks,
+        &StepEvent::BeforeToolCall(tc),
+        e.config.operator.timeout(),
+    )
+    .await;
+    if let Some(reason) = d.terminate {
+        return Before::Stopped(reason);
+    }
+    if d.refresh_tools {
+        return Before::Stopped("tool refresh is only valid at turn start".into());
+    }
+    if let Err(reason) =
+        crate::grants::escalate::release_leases(&d.deescalate, e.active, sandbox, registry).await
+    {
+        return Before::Stopped(reason);
+    }
     if let Some(reason) = d.deny {
         return Before::Refused(reason);
     }
@@ -401,16 +488,24 @@ async fn reactive(
     tc: &ToolCall,
     sandbox: &mut Sandbox,
     registry: &mut ToolRegistry,
-) -> Option<EscalationRecord> {
+) -> Result<Option<EscalationRecord>, String> {
     let ev = StepEvent::KernelDenial {
         op,
         target,
         call: tc,
     };
-    let delta = crate::hooks::dispatch(&e.config.hooks, &ev)
-        .await
-        .escalate?;
-    Some(
+    let d = crate::hooks::dispatch_bounded(&e.config.hooks, &ev, e.config.operator.timeout()).await;
+    if let Some(reason) = d.terminate {
+        return Err(reason);
+    }
+    if d.refresh_tools {
+        return Err("tool refresh is only valid at turn start".into());
+    }
+    crate::grants::escalate::release_leases(&d.deescalate, e.active, sandbox, registry).await?;
+    let Some(delta) = d.escalate else {
+        return Ok(None);
+    };
+    Ok(Some(
         widen(
             e,
             Trigger::KernelDenial {
@@ -426,7 +521,7 @@ async fn reactive(
             registry,
         )
         .await,
-    )
+    ))
 }
 
 /// The proxy-refusal step (019 US3): dispatch `ProxyRefusal` for the first out-of-scope refusal; on a
@@ -438,19 +533,31 @@ async fn proxy_refusal(
     tc: &ToolCall,
     sandbox: &mut Sandbox,
     registry: &mut ToolRegistry,
-) -> Option<EscalationRecord> {
-    let ev = events
+) -> Result<Option<EscalationRecord>, String> {
+    let Some(ev) = events
         .iter()
-        .find(|e| e.kind == crate::proxy_event::ProxyEventKind::RefusedOutOfScope)?;
+        .find(|e| e.kind == crate::proxy_event::ProxyEventKind::RefusedOutOfScope)
+    else {
+        return Ok(None);
+    };
     let step = StepEvent::ProxyRefusal {
         host: &ev.host,
         port: ev.port,
         call: tc,
     };
-    let delta = crate::hooks::dispatch(&e.config.hooks, &step)
-        .await
-        .escalate?;
-    Some(
+    let d =
+        crate::hooks::dispatch_bounded(&e.config.hooks, &step, e.config.operator.timeout()).await;
+    if let Some(reason) = d.terminate {
+        return Err(reason);
+    }
+    if d.refresh_tools {
+        return Err("tool refresh is only valid at turn start".into());
+    }
+    crate::grants::escalate::release_leases(&d.deescalate, e.active, sandbox, registry).await?;
+    let Some(delta) = d.escalate else {
+        return Ok(None);
+    };
+    Ok(Some(
         widen(
             e,
             Trigger::ProxyRefusal {
@@ -467,7 +574,7 @@ async fn proxy_refusal(
             registry,
         )
         .await,
-    )
+    ))
 }
 
 /// `run_call`'s future must be `Send`: the concurrent runner spawns the episode loop (R2).

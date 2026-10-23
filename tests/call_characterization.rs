@@ -251,7 +251,7 @@ async fn repl_with(case: &Case) -> (Run, ReplConfig) {
     let consent = RecordingConsent::new(case.grant);
     let config = ReplConfig {
         tool_timeout_secs: case.budget_secs,
-        escalation: Some(ReplEscalation::new(escalation(case, consent.clone()))),
+        escalation: Some(ReplEscalation::new(escalation(case, consent.clone())).unwrap()),
         ..ReplConfig::default()
     };
     let mut convo = Conversation::new("test", "");
@@ -379,14 +379,17 @@ async fn s4_kernel_denial_already_held() {
 #[tokio::test]
 async fn s5_proxy_refusal_granted_and_retried() {
     let mut case = Case::new(vec![Attempt::error("refused"), Attempt::ok("200 OK")]);
-    case.base = http_policy(&[]);
-    case.ceiling = http_policy(&["10.0.0.9:80"]);
+    case.base = http_policy(&["10.0.0.1:80"]);
+    case.ceiling = http_policy(&["10.0.0.1:80", "10.0.0.9:80"]);
     case.proxy = vec![vec![refusal("c1", "10.0.0.9", 80)], Vec::new()];
     let (e, r) = (episode(&case).await, repl(&case).await);
     assert_same_calls(&e, &r);
     // The widening reaches the proxy, the call is retried once, and the result is the retry's.
     assert_eq!((e.asked, e.attempts), (1, 2));
-    assert_eq!(e.http_updates, vec![vec!["10.0.0.9:80".to_string()]]);
+    assert_eq!(
+        e.http_updates,
+        vec![vec!["10.0.0.1:80".to_string(), "10.0.0.9:80".to_string()]]
+    );
     assert_eq!(
         e.calls,
         vec![Call {
@@ -456,8 +459,8 @@ async fn s6c_proxy_retry_times_out() {
         Attempt::error("refused").with_audit(vec![ev("file_open", "/tmp/cache", "allowed", None)]),
         Attempt::ok("late").taking(Duration::from_secs(120)),
     ]);
-    case.base = http_policy(&[]);
-    case.ceiling = http_policy(&["10.0.0.9:80"]);
+    case.base = http_policy(&["10.0.0.1:80"]);
+    case.ceiling = http_policy(&["10.0.0.1:80", "10.0.0.9:80"]);
     case.proxy = vec![vec![refusal("c1", "10.0.0.9", 80)], Vec::new()];
     case.budget_secs = 30;
     let (e, r) = (episode(&case).await, repl(&case).await);

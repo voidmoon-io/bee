@@ -382,6 +382,7 @@ mod tests {
 
     fn outcome(result: ToolResult) -> CallOutcome {
         CallOutcome {
+            terminated: None,
             result,
             audit: Vec::new(),
             denied_attempt_audit: Vec::new(),

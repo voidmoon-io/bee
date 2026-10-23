@@ -120,10 +120,16 @@ async fn progress_with(
         Operator::with_consent(OperatorKind::Autonomous, RecordingConsent::new(true))
             .with_timeout(Duration::from_secs(5))
     };
+    let mut base = policy(&[]);
+    if let Some(http) = &ceiling.http {
+        let mut initial = http.clone();
+        initial.targets.truncate(1);
+        base.http = Some(initial);
+    }
     let opts = LoopOptions {
         progress: Some(Box::new(move |l: &str| progress(l))),
         escalation: Some(LoopEscalation {
-            base: policy(&[]),
+            base,
             ceiling,
             hooks,
             operator,
@@ -285,7 +291,7 @@ async fn the_proxy_escalation_line() {
         vec![Box::new(bee::grants::escalate::ProxyRefusalHook {
             enabled: true,
         })],
-        http_policy(&["10.0.0.9:80"]),
+        http_policy(&["10.0.0.1:80", "10.0.0.9:80"]),
         |sb, hooks| {
             hooks.push("c1", vec![refusal("c1", "10.0.0.9", 80)]);
             sb.set_http_scope_hook(Arc::new(FakeHttpScope::default()));

@@ -7,8 +7,8 @@
 
 use std::sync::Arc;
 
-use crate::grants::{ActivePolicy, GrantId, GrantLease};
-use crate::hooks::{dispatch, Flow, LoopHook, StepEvent, StepEventKind};
+use crate::grants::{ActivePolicy, GrantId};
+use crate::hooks::{dispatch_bounded, Flow, LoopHook, StepEvent, StepEventKind};
 use crate::sandbox::Sandbox;
 use crate::tools::ToolRegistry;
 
@@ -54,8 +54,8 @@ pub struct TurnStartReport {
     pub removed_tools: Vec<String>,
     /// The MCP tools were re-registered.
     pub refreshed_tools: bool,
-    /// Narrowing the live scope failed. The leases are gone from the active policy either way; this is
-    /// reported, never swallowed.
+    /// A turn-start action failed. The loop must stop; failed narrowing leaves the last committed
+    /// lease set intact and poisons further dispatch.
     pub narrow_error: Option<String>,
 }
 
@@ -84,44 +84,59 @@ pub async fn turn_start(
     refresh: Option<&Arc<dyn ToolRefresh>>,
 ) -> TurnStartReport {
     let ev = StepEvent::TurnStart { turn };
-    let mut d = dispatch(hooks, &ev).await;
+    let mut d = dispatch_bounded(hooks, &ev, std::time::Duration::from_secs(60)).await;
     if let Some(source) = refresh {
         let hook: [Box<dyn LoopHook>; 1] = [Box::new(RefreshHook {
             source: source.clone(),
         })];
-        d.merge(dispatch(&hook, &ev).await);
+        d.merge(dispatch_bounded(&hook, &ev, std::time::Duration::from_secs(60)).await);
     }
 
     let mut report = TurnStartReport::default();
+    if let Err(e) = sandbox.check_cleanup() {
+        report.narrow_error = Some(e);
+        return report;
+    }
+    if let Some(e) = d.terminate {
+        report.narrow_error = Some(e);
+        return report;
+    }
+    if d.deny.is_some() || d.escalate.is_some() {
+        report.narrow_error = Some("unsupported hook action at turn start".into());
+        return report;
+    }
     if let Some(active) = active {
-        let before: Vec<GrantLease> = active.leases().to_vec();
+        let mut candidate = active.clone();
         for id in &d.deescalate {
-            if active.release(id) {
-                report.released.push(id.clone());
+            match candidate.release(id) {
+                Ok(true) => report.released.push(id.clone()),
+                Ok(false) => {
+                    report.narrow_error = Some(format!("unknown grant: {id}"));
+                    return report;
+                }
+                Err(e) => {
+                    report.narrow_error = Some(e);
+                    return report;
+                }
             }
         }
-        report.expired = active.expire(turn);
-
+        report.expired = match candidate.expire(turn) {
+            Ok(ids) => ids,
+            Err(e) => {
+                report.narrow_error = Some(e);
+                return report;
+            }
+        };
         if report.narrowed() {
-            let dropped: Vec<&GrantLease> = before
-                .iter()
-                .filter(|l| report.released.contains(&l.id) || report.expired.contains(&l.id))
-                .collect();
-            if let Err(e) = sandbox.reload(active.active()) {
-                report.narrow_error = Some(format!("reload failed: {e}"));
-            }
-            if dropped.iter().any(|l| !l.delta.http_targets.is_empty()) {
-                if let Err(e) = sandbox.apply_http_scope(active.active()).await {
-                    report.narrow_error = Some(format!("target-scope narrowing failed: {e}"));
-                }
-            }
-            // A lease's tools were absent when it was granted (escalation registers only those), so
-            // a tool no live lease still grants was the lease's alone.
-            let still = active.granted_tools();
-            for tool in dropped.iter().flat_map(|l| &l.delta.tools) {
-                if !still.contains(tool) && registry.remove(tool) {
-                    report.removed_tools.push(tool.clone());
-                }
+            let before = active.granted_tools();
+            let after = candidate.granted_tools();
+            report.removed_tools = before.difference(&after).cloned().collect();
+            if let Err(e) =
+                crate::grants::escalate::install_narrowing(active, candidate, sandbox, registry)
+                    .await
+            {
+                report.narrow_error = Some(e);
+                return report;
             }
         }
     }

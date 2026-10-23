@@ -121,6 +121,7 @@ fn policy(name: &str, fs: &[(&str, Access)]) -> Policy {
         filesystem: Default::default(),
         exec: Default::default(),
         network: Default::default(),
+        defaults: Default::default(),
         exfiltration: Default::default(),
         http: None,
     };
@@ -190,7 +191,8 @@ fn fixture(
         )
         .with_timeout(timeout),
         default_ttl: Ttl::Forever,
-    });
+    })
+    .unwrap();
 
     // Only the `skill` tool starts registered. `bash` must arrive via the grant or not at all.
     let mut registry = ToolRegistry::new();
@@ -463,18 +465,23 @@ impl bee::operator::Consent for RenderingSink {
 /// A ceiling wide enough that every delta below is within it, so consent is always consulted.
 fn wide_ceiling() -> Policy {
     let mut p = policy("ceil", &[("/tmp", Access::Write)]);
-    p.network.allow = vec!["1.2.3.4:443".into(), "10.0.0.5:443".into()];
-    p.exec.allow = vec!["/usr/bin/x".into(), "/bin/true".into()];
-    p.http = Some(bee_core::HttpPolicy {
-        targets: vec![bee_core::HostPort::try_from("app.test:443".to_string()).unwrap()],
-        ..Default::default()
-    });
+    p.network.allow = vec![
+        "127.0.0.1:1".into(),
+        "1.2.3.4:443".into(),
+        "10.0.0.5:443".into(),
+    ];
+    p.exec.allow = vec!["/bin/false".into(), "/usr/bin/x".into(), "/bin/true".into()];
+
     p
 }
 
 /// Run `delta` through the real escalation cycle and return what the operator was shown.
 async fn shown_for(delta: GrantDelta) -> String {
-    let mut ap = ActivePolicy::new(policy("base", &[]), wide_ceiling());
+    // Explicit subsets are necessary: an omitted dimension inherits the ceiling.
+    let mut base = policy("base", &[]);
+    base.exec.allow = vec!["/bin/false".into()];
+    base.network.allow = vec!["127.0.0.1:1".into()];
+    let mut ap = ActivePolicy::new(base, wide_ceiling()).unwrap();
     let mut reg = ToolRegistry::new();
     let mut sb = Sandbox::host(Vec::new());
     let sink = Arc::new(RenderingSink::default());
@@ -536,7 +543,9 @@ async fn every_field_of_a_grant_is_rendered() {
         net: vec!["10.0.0.5:443".into()],
         http_targets: vec!["app.test:443".into()],
     };
-    let shown = shown_for(delta).await;
+    let shown = ConsentRequest::from_delta(GrantOrigin::Explicit, &delta, 0)
+        .render_lines()
+        .join("\n");
     for needle in [
         "bash",
         "/tmp/w",

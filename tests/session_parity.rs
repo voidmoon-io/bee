@@ -256,7 +256,7 @@ async fn an_mcp_servers_own_events_are_its_not_the_open_calls() {
                 vec![Attempt::ok("done").with_audit(vec![server_denial, tool_event])],
             )));
             let esc = session.escalation.take().unwrap();
-            let mut active = ActivePolicy::new(esc.base.clone(), esc.ceiling.clone());
+            let mut active = ActivePolicy::new(esc.base.clone(), esc.ceiling.clone()).unwrap();
             let call = ToolCall {
                 id: "c1".into(),
                 name: SCRIPTED.into(),
@@ -335,7 +335,7 @@ async fn an_mcp_calls_own_server_denial_is_the_calls_and_escalates() {
         .of_mcp_server("fs", "mcp__fs__read_file"),
     ));
     let esc = session.escalation.take().unwrap();
-    let mut active = ActivePolicy::new(esc.base.clone(), esc.ceiling.clone());
+    let mut active = ActivePolicy::new(esc.base.clone(), esc.ceiling.clone()).unwrap();
     let call = ToolCall {
         id: "c1".into(),
         name: "mcp__fs__read_file".into(),

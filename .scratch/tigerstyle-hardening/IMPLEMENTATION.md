@@ -2,7 +2,13 @@
 
 Implemented 2026-10-22 against `ebf2d29` plus the existing worktree edits. The implementation covers
 the 13 findings in [the audit](../tigerstyle-audit/AUDIT.md). Existing transactional reload work and
-unrelated changes were preserved. Changes remain in the worktree; no commits or deployment were made.
+unrelated changes were preserved in the original workspace. The tested changes were committed in an
+isolated checkout for the pull request on 2026-10-23; no production deployment was made.
+
+**PR status:** draft. Current `main` (`50e0ee1`) includes substantial session/interception changes and
+the transactional reload fix from PR #39. A trial merge found conflicts. The validation below applies
+to the audited `ebf2d29` baseline plus these changes, not to a merge with current `main`. Integration
+and fresh verification are required before this PR is ready to merge.
 
 ## Coverage
 
@@ -111,7 +117,8 @@ RSS; byte-cap assertions provide stronger evidence of the output bound than that
   Batches preserve successful appends but are not crash-atomic transactions. The lock coordinates
   cooperating writers only; ledger paths through symlinks are intentionally refused.
 - The plan's numbered commits describe review units. They were implemented together in the existing
-  dirty worktree, preserving the user's changes, rather than creating commits containing unrelated work.
+  dirty worktree, preserving the user's changes. PR preparation then copied only the hardening work
+  and its transactional-reload prerequisite into an isolated checkout. Unrelated edits remain local.
 
 This closes the audited scope. It is not a complete dependency vulnerability audit or proof that
 every sandbox boundary is secure.

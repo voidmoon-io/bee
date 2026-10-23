@@ -8,4 +8,3 @@ test kernel::finite_policy_lease_narrows_in_kernel ... ok
 test kernel::granted_executable_keeps_its_inode_pin ... ok
 
 test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 37.43s
-

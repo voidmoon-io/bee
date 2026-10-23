@@ -1,0 +1,1127 @@
+   Compiling smallvec v1.15.2
+   Compiling tinyvec_macros v0.1.1
+   Compiling gix-trace v0.1.21
+   Compiling gix-validate v0.11.3
+   Compiling gix-error v0.2.5
+   Compiling byteorder v1.5.0
+   Compiling sha1 v0.10.7
+   Compiling serde_core v1.0.229
+   Compiling tinyvec v1.12.0
+   Compiling jiff-core v0.1.0
+   Compiling parking_lot_core v0.9.12
+   Compiling gix-path v0.12.3
+   Compiling hash32 v0.3.1
+   Compiling sha1-checked v0.10.0
+   Compiling parking_lot v0.12.5
+   Compiling heapless v0.8.0
+   Compiling hashbrown v0.14.5
+   Compiling unicode-normalization v0.1.25
+   Compiling prodash v31.0.0
+   Compiling gix-chunk v0.7.3
+   Compiling nonempty v0.12.0
+   Compiling unicode-bom v2.0.3
+   Compiling icu_normalizer v2.2.0
+   Compiling gix-utils v0.3.5
+   Compiling faster-hex v0.10.0
+   Compiling jiff v0.2.35
+   Compiling dashmap v6.2.1
+   Compiling gix-features v0.49.0
+   Compiling gix-quote v0.7.2
+   Compiling serde_json v1.0.150
+   Compiling gix-hash v0.26.0
+   Compiling gix-fs v0.22.0
+   Compiling gix-glob v0.27.0
+   Compiling shell-words v1.1.1
+   Compiling gix-command v0.9.1
+   Compiling idna_adapter v1.2.2
+   Compiling gix-hashtable v0.16.0
+   Compiling gix-tempfile v24.0.0
+   Compiling gix-commitgraph v0.38.0
+   Compiling gix-attributes v0.34.0
+   Compiling gix-packetline v0.22.0
+   Compiling num-traits v0.2.19
+   Compiling serde v1.0.229
+   Compiling gix-lock v24.0.0
+   Compiling deranged v0.5.8
+   Compiling gix-sec v0.14.2
+   Compiling hyper v1.10.1
+   Compiling idna v1.1.0
+   Compiling zerocopy v0.8.54
+   Compiling gix-bitmap v0.3.3
+   Compiling filetime v0.2.29
+   Compiling url v2.5.8
+   Compiling serde_spanned v0.6.9
+   Compiling toml_datetime v0.6.11
+   Compiling tree-sitter v0.26.11
+   Compiling hyper-util v0.1.20
+   Compiling gix-date v0.15.6
+   Compiling time v0.3.53
+   Compiling gix-ignore v0.22.0
+   Compiling gix-url v0.37.0
+   Compiling tree-sitter-language v0.1.7
+   Compiling gix-actor v0.41.2
+   Compiling gix-config-value v0.19.0
+   Compiling gix-object v0.63.0
+   Compiling zlib-rs v0.6.6
+   Compiling toml_edit v0.22.27
+   Compiling gix-revwalk v0.34.0
+   Compiling gix-ref v0.66.0
+   Compiling gix-filter v0.33.0
+   Compiling gix-traverse v0.60.0
+   Compiling gix-revision v0.48.0
+   Compiling gix-index v0.54.0
+   Compiling hyper-rustls v0.27.9
+   Compiling tower-http v0.6.11
+   Compiling regex v1.13.1
+   Compiling clru v0.6.3
+   Compiling gix-imara-diff v0.2.4
+   Compiling bit-vec v0.10.1
+   Compiling streaming-iterator v0.1.9
+   Compiling rstest_macros v0.26.1
+   Compiling gix-worktree v0.55.0
+   Compiling bit-set v0.11.1
+   Compiling bisync v0.3.0
+   Compiling plist v1.9.0
+   Compiling reqwest v0.13.4
+   Compiling gix-zlib v0.1.0
+   Compiling gix-pack v0.73.0
+   Compiling gix-diff v0.66.0
+   Compiling crossterm v0.29.0
+   Compiling gix-refspec v0.44.0
+   Compiling toml v0.8.23
+   Compiling gix-config v0.59.0
+   Compiling nix v0.31.3
+   Compiling gix-pathspec v0.19.0
+   Compiling gix-transport v0.58.0
+   Compiling bincode v1.3.3
+   Compiling gix-shallow v0.13.0
+   Compiling arc-swap v1.9.2
+   Compiling nibble_vec v0.1.0
+   Compiling ansi-to-tui v8.0.1
+   Compiling gix-odb v0.83.0
+   Compiling syntect v5.3.0
+   Compiling bee-core v0.1.0 (/home/jg/git/bee/crates/core)
+   Compiling process-wrap v9.1.0
+   Compiling schemars v1.2.1
+   Compiling radix_trie v0.2.1
+   Compiling gix-submodule v0.33.0
+   Compiling gix-protocol v0.64.0
+   Compiling rstest v0.26.1
+   Compiling rig-derive v0.40.0
+   Compiling ahash v0.8.12
+   Compiling ratatui-crossterm v0.1.2
+   Compiling gix-blame v0.16.0
+   Compiling ast-grep-core v0.45.0
+   Compiling tree-sitter-rust v0.24.2
+   Compiling gix-discover v0.54.0
+   Compiling sse-stream v0.2.4
+   Compiling chrono v0.4.45
+   Compiling ordered-float v5.3.0
+   Compiling tokio-stream v0.1.18
+   Compiling serde_yaml_ng v0.10.0
+   Compiling rhai v1.25.1
+   Compiling rustyline v17.0.2
+   Compiling rig-core v0.40.0
+   Compiling tui-markdown v0.3.9
+   Compiling ast-grep-language v0.45.0
+   Compiling rmcp v2.2.0
+   Compiling gix v0.86.0
+   Compiling ratatui v0.30.2
+   Compiling bee-userspace v0.1.0 (/home/jg/git/bee/crates/userspace)
+   Compiling ppv-lite86 v0.2.21
+   Compiling cvss v2.2.0
+   Compiling rand_chacha v0.9.0
+   Compiling proptest v1.11.0
+   Compiling bee v0.1.0 (/home/jg/git/bee)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2m 04s
+     Running unittests src/lib.rs (target/debug/deps/bee-b44a7b4ba9159887)
+
+running 493 tests
+test astgrep::tests::an_uncompiled_language_is_refused_not_parsed ... ok
+test astgrep::tests::a_pattern_opening_with_a_hyphen_survives_argv ... ok
+test astgrep::tests::worker_argv_round_trips_the_request ... ok
+test astgrep::tests::rust_is_compiled_in_when_its_feature_is ... ok
+test config::tests::anthropic_ok ... ok
+test config::tests::openai_compat_requires_base_url ... ok
+test config::visual_tests::agent_requested_ttl_clamps_down_but_honors_shorter ... ok
+test config::tests::prompt_caching_can_be_disabled ... ok
+test config::visual_tests::an_out_of_range_configured_ttl_is_a_hard_error ... ok
+test config::visual_tests::an_unknown_level_is_a_hard_error_not_a_fallback ... ok
+test config::visual_tests::defaults_are_panels_animated_and_thirty_seconds ... ok
+test config::visual_tests::level_precedence_is_cli_then_env_then_scenario ... ok
+test config::visual_tests::motion_is_independent_of_level ... ok
+test config::visual_tests::motion_is_off_if_any_source_says_so_and_a_scenario_cannot_switch_it_back_on ... ok
+test config::visual_tests::the_tiers_are_ordered_so_gate_checks_are_comparisons ... ok
+test config::visual_tests::width_fractions_match_the_tier_table ... ok
+test config::visual_tests::the_harness_section_parses_from_scenario_toml ... ok
+test config::tests::thinking_rejected_on_non_anthropic ... ok
+test config::tests::thinking_and_effort_parse ... ok
+test config::tests::api_key_env_cannot_name_an_arbitrary_host_secret ... ok
+test episode::workdir_containment_tests::absolute_path_outside_the_root_is_refused ... ok
+test config::tests::api_key_env_accepts_the_provider_key_namespace ... ok
+test episode::workdir_containment_tests::parent_traversal_is_refused ... ok
+test findings::tests::a_caller_supplied_severity_is_refused ... ok
+test episode::workdir_containment_tests::absolute_path_under_the_root_is_allowed ... ok
+test episode::workdir_containment_tests::symlink_crossing_the_root_is_refused ... ok
+test episode::workdir_containment_tests::default_root_contains_an_absolute_escape ... ok
+test findings::tests::an_unbounded_title_is_refused_rather_than_mangled ... ok
+test findings::tests::bands_follow_the_cvss_ranges ... ok
+test findings::tests::validation_names_the_field_it_refused ... ok
+test gitlog::tests::a_commit_renders_differently_for_log_and_blame ... ok
+test gitlog::tests::a_log_request_carries_no_line ... ok
+test gitlog::tests::worker_argv_round_trips_a_blame_request ... ok
+test gitlog::tests::the_two_refusals_have_distinct_exit_codes ... ok
+test findings::tests::evidence_is_bounded_before_the_line_is_written ... ok
+test findings::tests::identity_ignores_the_line_but_not_the_substance ... ok
+test episode::workdir_containment_tests::relative_paths_land_under_the_root ... ok
+test findings::tests::verdict_states_round_trip_through_their_cli_spelling ... ok
+test grants::escalate::tests::denial_hook_builds_a_write_delta_for_file_open ... ok
+test grants::escalate::tests::disabled_denial_hook_does_not_observe ... ok
+test grants::tests::apply_beyond_ceiling_is_refused_and_noop ... ok
+test grants::tests::expire_narrows_at_ttl ... ok
+test grants::escalate::tests::escalate_within_ceiling_grants_and_reloads ... ok
+test grants::escalate::tests::escalate_beyond_ceiling_refuses_without_consent ... ok
+test grants::escalate::tests::escalate_denied_by_consent_is_refused ... ok
+test grants::tests::granted_tools_union_over_live_leases ... ok
+test grants::tests::starts_at_base_no_leases ... ok
+test grants::tests::release_drops_a_named_lease ... ok
+test grants::tests::unmet_compares_paths_key_for_key_rather_than_by_prefix ... ok
+test grants::tests::apply_within_ceiling_widens ... ok
+test grants::tests::unmet_drops_what_is_already_held_at_the_same_or_greater_access ... ok
+test grants::tests::unmet_filters_exec_and_net_against_what_is_allowed ... ok
+test grants::tests::unmet_keeps_an_upgrade_and_anything_unheld ... ok
+test grants::tests::unmet_leaves_tools_alone_because_they_are_not_policy ... ok
+test hooks::tests::all_continue_yields_continue ... ok
+test mcp::config::tests::stdio_requires_command_remote_requires_url ... ok
+test mcp::config::tests::tool_filter_denied_overrides_allowed ... ok
+test hooks::tests::first_non_continue_wins ... ok
+test mcp::bridge::tests::disabled_bridge_registers_nothing ... ok
+test hooks::tests::observes_filters_events ... ok
+test mcp::bridge::tests::connect_disabled_policy_is_empty ... ok
+test mcp::policy::tests::default_is_disabled_and_fail_closed ... ok
+test mcp::policy::tests::rejects_bare_and_malformed_wildcards ... ok
+test mcp::policy::tests::parses_exact_and_wildcard ... ok
+test mcp::config::tests::rejects_name_with_double_underscore ... ok
+test mcp::policy::tests::rejects_duplicate_server_names ... ok
+test mcp::policy::tests::roundtrips_through_string ... ok
+test mcp::policy::tests::resolution_matrix ... ok
+test mcp::policy::tests::wildcard_matching_rules ... ok
+test mcp::policy::tests::url_host_extraction ... ok
+test mcp::proxy::tests::truncates_large_content ... ok
+test mcp::proxy::tests::maps_text_success ... ok
+test mcp::proxy::tests::falls_back_to_structured_content ... ok
+test metrics::pricing::tests::cache_and_reasoning_are_priced ... ok
+test mcp::proxy::tests::maps_error_flag ... ok
+test metrics::pricing::tests::local_and_mock_are_unpriced ... ok
+test metrics::pricing::tests::opus_plain_cost ... ok
+test metrics::pricing::tests::provider_prefix_is_ignored ... ok
+test metrics::report::tests::empty_report ... ok
+test metrics::tests::build_derives_cost_and_throughput ... ok
+test metrics::report::tests::percentiles_are_sane ... ok
+test metrics::tests::append_then_read_roundtrips ... ok
+test metrics::report::tests::totals_and_grouping ... ok
+test metrics::tests::provider_split ... ok
+test metrics::tests::unpriced_model_has_no_cost ... ok
+test provider::rig_model::tests::empty_conversation_is_rejected ... ok
+test provider::mock_model::tests::stream_reassembles_text_and_ends_with_done ... ok
+test provider::rig_model::tests::sampling_guard_matches_only_no_temperature_models ... ok
+test provider::rig_model::tests::maps_system_tools_and_limits ... ok
+test provider::mock_model::tests::stream_forwards_tool_calls_before_done ... ok
+test provider::rig_model::tests::tool_call_and_result_survive_rig_serialization ... ok
+test provider::rig_model::tests::additional_params_encodes_thinking_and_effort ... ok
+test render_api::effect_api::takeover_tests::a_non_positive_lifetime_is_a_script_error_like_render_to_ttl ... ok
+test render_api::effect_api::takeover_tests::a_takeover_at_level_none_renders_inline_with_its_effect_intact ... ok
+test render_api::effect_api::takeover_tests::a_takeover_below_the_level_lands_in_the_reserved_panel_with_a_note ... ok
+test render_api::effect_api::takeover_tests::a_takeover_at_level_takeover_passes_through_untouched ... ok
+test render_api::effect_api::takeover_tests::a_takeover_carries_its_attached_effect ... ok
+test render_api::effect_api::takeover_tests::the_overlay_target_reaches_the_tool_result ... ok
+test render_api::effect_api::takeover_tests::an_attached_effect_is_dropped_silently_at_level_none_rather_than_failing ... ok
+test render_api::effect_api::takeover_tests::an_over_long_lifetime_is_not_an_error_because_the_config_clamps_it ... ok
+test render_api::effect_api::takeover_tests::render_fullscreen_produces_an_overlay_target ... ok
+test mcp::policy::tests::wildcard_never_matches_apex_or_substring ... ok
+test render_api::effect_api::takeover_tests::render_fullscreen_ttl_carries_the_requested_lifetime ... ok
+test render_api::effect_api::tests::a_widget_with_no_effect_records_none_meaning_default_transition ... ok
+test render_api::effect_api::tests::an_unknown_color_is_carried_through_for_the_theme_to_resolve ... ok
+test render_api::effect_api::tests::an_unknown_direction_falls_back_to_left ... ok
+test render_api::effect_api::tests::an_effect_on_an_inline_render_rides_along_too ... ok
+test render_api::effect_api::takeover_tests::the_takeover_panel_id_is_reserved_against_direct_use ... ok
+test render_api::effect_api::tests::a_duration_outside_the_band_is_clamped_not_refused ... ok
+test provider::rig_model::tests::from_config_drops_temperature_and_carries_params_on_opus_4_8 ... ok
+test render_api::tests::a_markdown_block_takes_an_effect_and_a_panel_like_any_other_widget ... ok
+test render_api::effect_api::tests::the_clamped_value_is_what_gets_recorded ... ok
+test render_api::tests::a_widget_wider_than_a_panel_fails_and_suggests_inline ... ok
+test render_api::effect_api::tests::the_last_attached_effect_wins ... ok
+test render_api::tests::a_new_panel_fails_when_the_column_is_full_but_an_update_still_works ... ok
+test render_api::tests::a_terminal_below_the_hard_floor_fails_every_render ... ok
+test render_api::tests::headless_never_fails_a_render ... ok
+test grants::tests::property::active_stays_within_bounds ... ok
+test render_api::tests::a_widget_wider_than_the_chat_pane_fails_inline ... ok
+test render_api::tests::inline_and_panels_coexist_in_one_script ... ok
+test render_api::tests::markdown_commits_its_source_not_a_rendering ... ok
+test render_api::tests::log_tail_builds_lines_with_and_without_levels ... ok
+test render_api::tests::render_commits_inline_and_no_panel_ops ... ok
+test render_api::tests::render_to_ttl_carries_the_expiry_and_rejects_non_positive ... ok
+test render_api::tests::render_to_emits_an_upsert ... ok
+test render_api::tests::render_to_accepts_the_full_legal_charset ... ok
+test render_api::tests::panel_ids_are_validated_on_every_entry_point ... ok
+test render_spec::effect_spec::tests::color_and_text_variants_are_classified_for_no_color ... ok
+test render_api::tests::the_inline_repl_only_constrains_width_not_height ... ok
+test render_spec::effect_spec::tests::durations_clamp_into_the_band ... ok
+test render_spec::effect_spec::tests::deserialize_re_clamps_out_of_band_durations ... ok
+test render_api::tests::ttl_is_clamped_to_a_day ... ok
+test render_spec::effect_spec::tests::the_tag_is_kind_and_snake_case ... ok
+test render_spec::effect_spec::tests::unknown_direction_canonicalizes_to_left_at_construction ... ok
+test render_spec::effect_spec::tests::every_variant_round_trips ... ok
+test repl::terminal::tests::a_denied_audit_target_cannot_forge_its_own_line ... ok
+test repl::terminal::tests::animation_preempts_spinner ... ok
+test repl::terminal::tests::animation_reclaims_all_its_rows ... ok
+test render_api::tests::ttl_renders_are_fit_checked_too ... ok
+test repl::terminal::tests::clip_collapses_and_truncates ... ok
+test render_spec::effect_spec::tests::unknown_kind_is_an_error_not_a_silent_no_op ... ok
+test render_spec::tests::render_target_serde_roundtrips ... ok
+test repl::terminal::tests::long_line_wraps_at_width ... ok
+test render_api::effect_api::tests::an_effect_attaches_to_every_widget_type ... ok
+test repl::terminal::tests::streamed_deltas_reassemble_into_wrapped_lines ... ok
+test repl::terminal::tests::no_color_emits_no_escapes ... ok
+test repl::terminal::tests::spinner_frame_shows_glyph_and_advances ... ok
+test repl::terminal::tests::untrusted_text_cannot_emit_control_sequences ... ok
+test repl::tests::agent_responds_with_text ... ok
+test repl::terminal::tests::spinner_draws_immediately_then_reclaims_its_row ... ok
+test repl::tests::audit_summary_is_readable ... ok
+test repl::tests::footer_omits_cost_for_unpriced_model ... ok
+test repl::tests::footer_reads_cleanly ... ok
+test repl::tests::agent_calls_tool_then_responds ... ok
+test repl::tests::meta_command_quit ... ok
+test repl::tests::pending_steering_keeps_agent_going_instead_of_ending ... ok
+test repl::tests::footer_shows_cache_reads_and_writes ... ok
+test repl::tests::meta_command_parsing ... ok
+test repl::tests::plural_agrees ... ok
+test repl::tests::preloaded_steering_is_injected_before_first_call ... ok
+test repl::tests::agent_budget_exhausted ... ok
+test repl::tests::denial_surfaces_in_output ... ok
+test safe_text::tests::c1_introducers_are_escaped ... ok
+test safe_text::tests::a_block_keeps_newlines_and_tabs_but_a_line_does_not ... ok
+test safe_text::tests::carriage_return_cannot_rewrite_a_printed_line ... ok
+test safe_text::tests::bidi_overrides_are_escaped ... ok
+test safe_text::tests::clean_text_is_borrowed_unchanged ... ok
+test sarif::tests::a_result_without_a_message_still_records_something_reviewable ... ok
+test render_api::tests::remove_panel_and_clear_panels_emit_ops ... ok
+test render_api::tests::ops_keep_script_order ... ok
+test sarif::tests::a_report_with_no_catalogue_at_all_still_normalises ... ok
+test sarif::tests::a_rule_id_with_no_matching_catalogue_entry_is_simply_unlevelled ... ok
+test safe_text::tests::escape_sequences_are_defanged ... ok
+test sarif::tests::a_results_own_level_wins_over_the_rules_default ... ok
+test repl::tests::system_prompt_mentions_visuals_only_when_render_enabled ... ok
+test safe_text::tests::sanitized_output_contains_no_dangerous_characters ... ok
+test sarif::tests::a_scanner_relative_path_normalises_like_every_other_finding_path ... ok
+test render_api::effect_api::tests::every_constructor_produces_its_spec ... ok
+test sarif::tests::one_failed_run_taints_the_report ... ok
+test sarif::tests::an_unparseable_document_is_an_error_not_an_empty_scan ... ok
+test sarif::tests::a_rule_default_level_reaches_a_result_that_carries_none ... ok
+test sarif::tests::the_scanner_level_is_advisory_and_never_a_severity ... ok
+test scanners::codeql::tests::a_bundle_that_is_not_there_is_a_mismatch_naming_the_expected_version ... ok
+test scanners::codeql::tests::a_bundle_and_a_cli_version_are_the_same_pin ... ok
+test sarif::tests::only_the_documented_subset_is_read ... ok
+test scanners::codeql::tests::a_binary_outside_the_configured_bundle_is_refused ... ok
+test scanners::codeql::tests::a_cli_that_cannot_say_its_version_is_not_given_the_benefit_of_the_doubt ... ok
+test scanners::codeql::tests::an_unpinned_bundle_could_not_run_rather_than_ran_and_broke ... ok
+test scanners::codeql::tests::an_alias_resolves_to_the_extractor_that_handles_it ... ok
+test scanners::codeql::tests::a_traced_language_is_declined_and_says_what_is_analysable ... ok
+test scanners::codeql::tests::a_matching_version_passes_in_either_spelling ... ok
+test scanners::codeql::tests::a_language_codeql_has_never_heard_of_is_a_different_answer ... ok
+test scanners::codeql::tests::a_different_version_is_a_mismatch_that_names_both ... ok
+test scanners::codeql::tests::a_configured_suite_replaces_the_default_pack_and_is_checked ... ok
+test scanners::codeql::tests::an_unpinned_bundle_yields_no_command_and_no_preflight ... ok
+test scanners::codeql::tests::no_language_at_all_is_refused_rather_than_guessed ... ok
+test scanners::codeql::tests::nothing_here_ever_asks_for_tracing ... ok
+test scanners::opengrep::tests::no_ruleset_means_no_command ... ok
+test scanners::codeql::tests::steps_does_not_take_probes_word_for_the_language ... ok
+test scanners::opengrep::tests::a_missing_ruleset_is_refused_before_spawning ... ok
+test scanners::codeql::tests::the_two_commands_are_exactly_what_the_contract_says ... ok
+test scanners::tests::a_binary_swapped_after_the_grant_fails_the_probe ... ok
+test scanners::opengrep::tests::the_command_is_exactly_what_the_contract_says ... ok
+test scanners::codeql::tests::the_version_child_is_asked_for_machine_readable_output ... ok
+test scanners::tests::a_binary_that_appeared_after_an_empty_grant_is_refused ... ok
+test scanners::opengrep::tests::auto_is_refused_at_construction_with_the_reason ... ok
+test scanners::tests::a_removed_binary_reports_absence_not_a_mismatch ... ok
+test scanners::tests::configuration_reaches_the_grant ... ok
+test scanners::tests::only_pinned_entries_naming_a_known_scanner_become_grants ... ok
+test scanners::opengrep::tests::the_output_path_is_bee_chosen_and_the_timeout_is_the_grants ... ok
+test scanners::codeql::tests::typescript_is_analysable_because_javascript_is ... ok
+test scenario::tests::ctf_requires_flag ... ok
+test scenario::tests::rejects_zero_turn_limit ... ok
+test sarif::tests::an_oversized_catalogue_costs_levels_and_never_the_scan ... ok
+test scanners::tests::a_target_that_is_really_a_flag_is_refused ... ok
+test scenario::tests::relative_skill_roots_resolve_against_scenario_dir ... ok
+test scenario::tests::ctf_requires_submit_flag_tool ... ok
+test scenario::tests::ctf_mode_now_accepted ... ok
+test scenario::tests::no_mcp_section_is_disabled ... ok
+test scenario::tests::loads_defaults ... ok
+test security::tests::a_scanner_table_parses_by_name ... ok
+test scenario::tests::rejects_unknown_tool ... ok
+test session::tests::clear_history_reaches_the_front_end_as_an_event ... ok
+test session::tests::sink_forwards_callbacks_as_events_in_order ... ok
+test skills::grant::tests::beyond_ceiling_grant_is_refused_without_prompting ... ok
+test skills::grant::tests::instructions_only_skill_is_a_noop ... ok
+test skills::grant::tests::malformed_access_word_is_refused ... ok
+test skills::grant::tests::no_ceiling_means_no_widening_even_with_consent ... ok
+test search::tests::worker_argv_roundtrips_the_flags ... ok
+test search::tests::no_glob_or_case_flags_when_defaulted ... ok
+test security::tests::a_mistyped_key_is_refused_rather_than_ignored ... ok
+test skills::grant::tests::within_ceiling_grant_is_refused_without_consent ... ok
+test scenario::tests::skills_defaults_empty ... ok
+test security::tests::an_unconfigured_scanner_yields_the_default_not_an_error ... ok
+test scenario::tests::top_level_mcp_section_parses ... ok
+test skills::tests::body_strips_frontmatter ... ok
+test skills::grant::tests::tools_from_multiple_skills_are_deduped ... ok
+test skills::tests::discovers_repo_skills_fixture ... ok
+test skills::grant::tests::tool_only_grant_needs_no_ceiling_room ... ok
+test skills::grant::tests::within_ceiling_grant_is_approved_with_consent ... ok
+test skills::tests::a_control_character_in_the_body_does_not_block_loading ... ok
+test skills::tests::empty_requires_is_treated_as_instructions_only ... ok
+test skills::tests::missing_root_is_not_an_error ... ok
+test skills::tests::malformed_skill_is_warned_not_fatal ... ok
+test skills::tests::defaults_are_model_invocable_not_user_invocable ... ok
+test skills::tests::split_frontmatter_requires_leading_fence ... ok
+test skills::tests::requires_block_is_parsed ... ok
+test skills::tests::split_frontmatter_extracts_yaml_and_body ... ok
+test skills::tests::split_frontmatter_tolerates_bom_and_crlf ... ok
+test tools::cvss::tests::a_malformed_vector_is_rejected_not_guessed ... ok
+test skills::tests::metadata_with_terminal_controls_is_refused ... ok
+test skills::tests::invocation_flags_are_honored ... ok
+test skills::tests::project_root_shadows_user_root ... ok
+test tools::cvss::tests::reference_vectors_compute_to_their_published_scores ... ok
+test tools::cvss::tests::a_rejected_vector_never_yields_a_zero_score ... ok
+test tools::astgrep::tests::the_description_tells_the_model_what_this_does_that_search_cannot ... ok
+test tools::astgrep::tests::the_schema_advertises_only_compiled_in_languages ... ok
+test skills::tests::unknown_frontmatter_keys_are_tolerated ... ok
+test tools::finding::tests::a_missing_field_is_refused_with_the_field_named ... ok
+test tools::finding::tests::a_supplied_score_is_refused_rather_than_recomputed ... ok
+test tools::finding::tests::an_empty_ledger_lists_as_a_clean_scan_not_an_error ... ok
+test tools::finding::tests::an_unparseable_vector_leaves_the_finding_recorded_and_unscored ... ok
+test tools::finding::tests::a_score_nested_under_another_name_is_refused_too ... ok
+test tools::gitlog::tests::an_empty_history_reads_as_an_answer_not_a_silence ... ok
+test tools::gitlog::tests::the_description_says_it_cannot_write ... ok
+test tools::outcome::tests::a_clean_scan_and_an_unavailable_never_read_alike ... ok
+test tools::outcome::tests::a_refusal_carries_no_payload_to_render ... ok
+test tools::outcome::tests::security_relevant_refusals_are_flagged_for_audit ... ok
+test tools::render::tests::an_inline_render_is_untouched_at_every_level ... ok
+test tools::render::tests::level_none_routes_a_panel_inline_and_tells_the_model_why ... ok
+test tools::render::tests::panels_survive_at_every_level_that_allows_them ... ok
+test tools::render::tests::removes_and_clears_drop_silently_at_level_none ... ok
+test tools::render::tests::several_downgraded_panels_collapse_to_one_widget_and_one_note ... ok
+test tools::render::tests::the_note_reaches_the_models_summary_verbatim ... ok
+test tools::scanner::tests::a_clean_scan_renders_with_the_shared_phrase ... ok
+test tools::scanner::tests::a_damaged_finding_line_fails_rather_than_being_skipped ... ok
+test tools::scanner::tests::a_header_that_omits_success_is_not_read_as_successful ... ok
+test tools::outcome::tests::truncation_is_stated_on_the_first_line ... ok
+test tools::gitlog::tests::the_schema_offers_both_modes_and_requires_neither_argument ... ok
+test tools::finding::tests::a_vector_is_scored_by_the_crate_and_stored ... ok
+test tools::scanner::tests::an_ungranted_scanner_is_refused_before_anything_runs ... ok
+test tools::outcome::tests::unsupported_language_names_what_is_available ... ok
+test tools::scanner::tests::empty_normaliser_output_is_an_error_not_a_clean_scan ... ok
+test tools::finding::tests::listing_surfaces_the_human_verdict ... ok
+test tools::finding::tests::recording_the_same_finding_twice_reports_the_merge ... ok
+test tools::scanner::tests::the_schema_advertises_only_granted_scanners ... ok
+test transcript::tests::long_output_truncated_and_marked ... ok
+test tools::skill::tests::schema_lists_model_facing_skills_with_enum ... ok
+test tools::skill::tests::missing_name_is_invalid_args ... ok
+test tools::skill::tests::call_returns_body_framed_with_input ... ok
+test tools::skill::tests::model_hidden_skill_cannot_be_loaded_by_the_model ... ok
+test tui::app::tests::a_resize_cancels_transitions_rather_than_playing_them_at_stale_coordinates ... ok
+test tui::app::tests::blank_submit_does_nothing ... ok
+test transcript::tests::truncation_respects_char_boundary ... ok
+test tools::skill::tests::unknown_skill_is_an_error_not_a_panic ... ok
+test tui::app::tests::ctrl_p_and_n_walk_the_input_history_now_that_the_arrows_do_not ... ok
+test tui::app::tests::ctrl_z_requests_suspend_without_quitting ... ok
+test tui::app::tests::esc_closes_the_overlay ... ok
+test tui::app::tests::esc_with_no_takeover_still_clears_input_and_still_hides_panels ... ok
+test tui::app::tests::ctrl_d_quits_outside_the_input_line_only ... ok
+test tui::app::tests::help_outranks_the_takeover_because_it_is_the_more_modal_surface ... ok
+test tui::app::tests::esc_dismisses_from_chat_focus_too ... ok
+test tui::app::tests::opening_the_overlay_focuses_panels_and_esc_leaves ... ok
+test tui::app::tests::overlay_open_requires_single_pane_and_content ... ok
+test tui::app::tests::p_toggles_the_panel_overlay_from_chat_but_types_in_input ... ok
+test tui::app::tests::panel_ops_remove_and_clear_through_the_reducer ... ok
+test tui::app::tests::panel_update_upserts_into_panels_not_chat ... ok
+test tui::app::tests::help_overlay_toggles_and_swallows_keys ... ok
+test tui::app::tests::panels_focus_selects_collapses_and_closes ... ok
+test tui::app::tests::q_is_not_a_dismiss_key ... ok
+test tui::app::tests::inline_render_goes_to_chat_not_panels ... ok
+test tui::app::tests::q_quits_from_chat_but_types_in_input ... ok
+test transcript::tests::short_output_untouched ... ok
+test tui::app::tests::a_second_takeover_replaces_the_first_rather_than_stacking ... ok
+test tui::app::tests::clearing_the_conversation_empties_the_chat_pane ... ok
+test tui::app::tests::esc_dismisses_the_takeover_and_leaves_typed_text_alone ... ok
+test tui::app::tests::same_turn_prose_leaves_the_takeover_alone ... ok
+test tui::app::tests::shift_enter_inserts_a_newline_not_a_submit ... ok
+test tui::app::tests::submitting_keeps_the_takeover_and_the_models_reply_ends_it ... ok
+test tui::app::tests::tab_reaches_panels_only_when_they_are_on_screen ... ok
+test tui::app::tests::the_arrows_move_within_a_multi_line_input_before_they_scroll ... ok
+test tui::app::tests::the_chat_scroll_position_survives_the_whole_takeover_cycle ... ok
+test tui::app::tests::the_wheel_scrolls_from_either_focus ... ok
+test tui::app::tests::typing_then_enter_submits_a_user_message_and_fills_outbox ... ok
+test tui::app::tests::untrusted_session_text_reaches_the_chat_model_defanged ... ok
+test tui::app::tests::y_skips_widgets_which_have_no_text_form ... ok
+test tui::app::tests::y_yanks_the_newest_prose_message ... ok
+test tui::app::tests::re_rendering_a_panel_replaces_in_place_no_duplicate ... ok
+test tui::app::tests::streaming_deltas_coalesce_into_one_assistant_message ... ok
+test tui::chat::tests::only_declared_markdown_and_settled_prose_are_markdown ... ok
+test tui::app::tests::resize_updates_layout_mode ... ok
+test tui::app::tests::scrolling_breaks_and_restores_tail_follow ... ok
+test tui::effects::tests::a_keyed_effect_cancels_the_previous_one_with_the_same_key ... ok
+test tui::effects::tests::a_panel_entrance_starts_at_the_theme_color_and_lands_on_the_final_content ... ok
+test tui::effects::tests::a_zero_area_region_is_a_no_op_not_a_crash ... ok
+test tui::effects::tests::a_panel_update_dissolves_the_old_content_then_coalesces_the_new ... ok
+test tui::effects::tests::an_agent_effect_on_any_key_cannot_replace_a_chrome_effect ... ok
+test tui::effects::tests::an_erosion_is_suppressed_with_the_rest_when_motion_is_off ... ok
+test tui::effects::tests::an_erosion_only_ever_grows ... ok
+test tui::app::tests::tab_cycles_focus_and_ctrl_c_quits ... ok
+test tui::effects::tests::an_erosion_reveals_the_content_underneath_rather_than_blanking_it ... ok
+test tui::app::tests::the_arrows_scroll_the_chat_from_the_input_line ... ok
+test tui::effects::tests::apply_reports_false_when_suppressed_so_callers_show_final_content ... ok
+test tui::effects::tests::character_effects_keep_moving_under_no_color_without_touching_a_single_color ... ok
+test tui::effects::tests::chrome_still_plays_at_visual_level_none ... ok
+test tui::effects::tests::disabling_animations_suppresses_everything_including_chrome ... ok
+test tui::effects::tests::directions_map_onto_tachyonfx_motions ... ok
+test tui::effects::tests::every_chrome_preset_plays_in_an_ordinary_session ... ok
+test tui::effects::tests::different_keys_do_not_interfere ... ok
+test tui::effects::tests::every_variant_resolves_when_nothing_suppresses_it ... ok
+test tui::effects::tests::chrome_speaks_the_same_vocabulary_the_agent_does ... ok
+test tui::effects::tests::chrome_is_unkeyed_so_no_agent_panel_can_cancel_it ... ok
+test tui::effects::tests::no_color_suppresses_color_effects_but_keeps_text_motion ... ok
+test tui::effects::tests::nothing_registers_when_motion_is_off_so_the_loop_never_ticks ... ok
+test tui::effects::tests::the_header_fade_starts_at_the_theme_color_and_lands_on_the_real_header ... ok
+test tui::effects::tests::the_panel_defaults_are_a_fade_in_and_a_dissolve_pair ... ok
+test tui::effects::tests::the_verdict_pulses_use_the_success_and_error_roles ... ok
+test tui::effects::tests::visual_level_none_strips_agent_effects_but_not_chrome ... ok
+test tui::frontend::tests::a_capable_terminal_gets_the_full_screen_ui ... ok
+test tui::frontend::tests::a_missing_term_is_not_treated_as_dumb ... ok
+test tui::frontend::tests::a_terminal_below_the_hard_floor_falls_back_with_the_size_in_the_note ... ok
+test tui::frontend::tests::default_and_explicit_opt_out_are_inline_without_a_note ... ok
+test tui::frontend::tests::every_degraded_choice_explains_itself ... ok
+test tui::frontend::tests::exactly_at_the_floor_is_still_full_screen ... ok
+test tui::frontend::tests::piping_falls_back_inline_with_a_note ... ok
+test tui::effects::tests::the_three_axes_compose_without_cancelling_each_other_out ... ok
+test tui::frontend::tests::term_dumb_falls_back_inline_with_a_note ... ok
+test tui::effects::tests::no_chrome_plays_when_motion_is_off_and_the_loop_never_ticks ... ok
+test tui::input::tests::a_shorter_line_clamps_the_column_rather_than_overshooting ... ok
+test tui::input::tests::an_empty_buffer_has_nowhere_to_go ... ok
+test tui::effects::tests::the_env_kill_switch_leaves_the_first_frame_already_final ... ok
+test tui::input::tests::the_outer_lines_refuse_to_move_so_the_caller_can_scroll_instead ... ok
+test tui::effects::tests::the_mascot_materializes_out_of_block_glyphs ... ok
+test tui::input::tests::the_cursor_moves_between_soft_newlines_and_reports_where_it_is ... ok
+test tui::markdown::tests::a_heading_is_styled_marker_and_all ... ok
+test tui::markdown::tests::a_fitting_line_is_passed_through_untouched ... ok
+test tui::chat::tests::appending_and_settling_both_invalidate_the_cache ... ok
+test tui::markdown::tests::an_unbroken_word_longer_than_the_pane_is_cut_not_dropped ... ok
+test tui::chat::tests::the_render_cache_answers_only_for_the_width_it_was_built_at ... ok
+test tui::overlay::tests::a_replacement_arriving_during_a_fade_supersedes_the_one_already_queued ... ok
+test tui::overlay::tests::a_replacement_starts_only_once_the_first_has_finished_fading_out ... ok
+test tui::markdown::tests::emphasis_becomes_style_rather_than_literal_punctuation ... ok
+test tui::markdown::tests::plain_prose_survives_untouched ... ok
+test tui::markdown::tests::bold_runs_keep_their_style_when_a_long_line_is_wrapped ... ok
+test tui::overlay::tests::a_zero_area_overlay_registers_nothing_and_does_not_panic ... ok
+test tui::overlay::tests::dismissing_mid_entrance_abandons_it_rather_than_waiting_it_out ... ok
+test tui::overlay::tests::a_longer_request_than_the_config_allows_is_clamped_silently ... ok
+test tui::overlay::tests::a_shorter_request_is_honored_and_no_request_takes_the_configured_lifetime ... ok
+test search::tests::finds_a_known_pattern_in_this_file ... ok
+test tui::overlay::tests::mashing_escape_does_not_restart_the_fade_out ... ok
+test tui::overlay::tests::the_phases_run_in_order_and_the_overlay_expires_on_its_own ... ok
+test tui::overlay::tests::the_overlay_effect_key_is_one_no_panel_id_can_spell ... ok
+test tui::overlay::tests::the_ttl_is_fixed_at_construction_so_a_later_config_change_cannot_extend_it ... ok
+test tui::overlay::tests::the_model_reply_dismisses_only_after_the_operator_has_spoken ... ok
+test tui::overlay::tests::the_replacements_clock_starts_when_it_reaches_the_screen ... ok
+test tui::overlay::tests::the_countdown_still_advances_with_animations_disabled ... ok
+test tui::overlay::tests::the_hint_counts_down_once_per_second_and_rounds_up ... ok
+test tui::panels::tests::a_burst_of_updates_between_redraws_keeps_the_first_request_time ... ok
+test tui::panels::tests::a_new_panel_owes_an_entrance_and_a_replaced_one_owes_an_update ... ok
+test tui::panels::tests::a_panel_replaced_before_it_ever_drew_still_enters ... ok
+test tui::panels::tests::a_suppressed_transition_registers_nothing_and_says_so ... ok
+test tui::panels::tests::a_requested_effect_is_still_subject_to_the_kill_switch ... ok
+test tui::panels::tests::an_agent_requested_effect_replaces_the_default_transition ... ok
+test tui::panels::tests::a_requested_effect_lasts_as_long_as_it_asked_for ... ok
+test tui::panels::tests::clear_drops_every_panel ... ok
+test tui::panels::tests::remove_drops_one_panel_and_is_a_noop_when_absent ... ok
+test tui::panels::tests::no_request_means_the_default_transition_not_a_still_panel ... ok
+test tui::panels::tests::ttl_panels_expire_on_prune_and_others_survive ... ok
+test tui::panels::tests::coalescing_keeps_only_the_last_spec_per_id ... ok
+test tui::panels::tests::re_upserting_without_a_ttl_clears_a_previous_expiry ... ok
+test tui::panels::tests::upsert_appends_new_and_replaces_existing_in_place ... ok
+test tui::panels::tests::a_second_update_mid_transition_replaces_the_first_instead_of_stacking_on_it ... ok
+test tui::scheduler_tests::running_effects_put_the_loop_in_its_60fps_state ... ok
+test tui::scheduler_tests::an_idle_session_never_wakes_up_on_its_own ... ok
+test tui::scheduler_tests::a_motionless_session_can_never_reach_the_60fps_state ... ok
+test tui::scheduler_tests::a_timed_panel_polls_coarsely_and_stops_once_it_expires ... ok
+test tui::scheduler_tests::a_showing_overlay_costs_one_wakeup_per_second_not_sixty ... ok
+test tui::scheduler_tests::an_overlay_countdown_still_ticks_with_animations_disabled ... ok
+test tui::term::tests::resize_and_paste_map_through ... ok
+test tui::term::tests::base64_matches_known_vectors ... ok
+test tui::term::tests::key_press_maps_to_message_release_is_ignored ... ok
+test tui::scheduler_tests::the_loop_goes_quiet_again_once_the_overlay_is_gone ... ok
+test tui::term::tests::the_wheel_maps_to_scroll_and_every_other_mouse_gesture_is_ignored ... ok
+test tui::view::tests::a_wide_but_short_terminal_stays_single_pane ... ok
+test tui::view::tests::a_declared_markdown_block_renders_styled_whatever_its_role ... ok
+test tui::view::tests::a_wider_level_is_never_narrower_than_a_stricter_one ... ok
+test tui::view::tests::a_zero_height_chat_area_makes_the_takeover_a_no_op ... ok
+test tui::view::tests::a_motionless_session_draws_panels_with_no_effect_at_all ... ok
+test tui::view::tests::an_expired_takeover_is_gone_from_the_buffer ... ok
+test tui::view::tests::a_dismissed_takeover_gives_the_chat_back ... ok
+test tui::markdown::tests::a_code_block_keeps_its_content_and_carries_one_style_throughout ... ok
+test tui::view::tests::inline_widget_renders_richly_not_as_ascii_placeholder ... ok
+test tui::view::tests::level_none_strips_agent_effects_while_chrome_keeps_moving ... ok
+test tui::view::tests::help_overlay_lists_keybindings ... ok
+test tui::view::tests::drawing_a_new_panel_registers_its_entrance_and_snapshots_what_it_drew ... ok
+test tui::view::tests::only_assistant_prose_is_treated_as_markdown ... ok
+test tui::view::tests::level_none_leaves_no_column_for_the_agent_at_all ... ok
+test tui::markdown::tests::a_recognized_fence_is_highlighted_and_no_color_strips_it ... ok
+test tui::theme_bridge::tests::no_color_toggles_the_foreground ... ok
+test tui::view::tests::narrow_terminal_hides_the_panel_column_and_the_overlay_brings_panels_back ... ok
+test tui::view::tests::newest_content_is_visible_at_the_bottom_past_a_tall_widget ... ok
+test tui::view::tests::renders_header_chat_input_and_footer ... ok
+test tui::view::tests::settled_assistant_prose_renders_as_markdown_and_streaming_prose_does_not ... ok
+test tui::view::tests::the_footer_never_truncates_mid_hint_on_a_narrow_terminal ... ok
+test tui::view::tests::the_dismiss_hint_sits_in_the_overlays_last_row ... ok
+test tui::view::tests::the_footer_advertises_yank_always_and_p_only_when_the_overlay_is_the_way_in ... ok
+test tui::view::tests::the_hint_wins_the_last_row_even_when_the_content_has_no_room ... ok
+test tui::view::tests::the_panel_column_never_exceeds_the_levels_share_of_the_screen ... ok
+test tui::view::tests::the_published_viewport_reflects_the_level_so_the_tool_sizes_to_it ... ok
+test tui::view::tests::the_overlay_is_single_pane_only ... ok
+test tui::view::tests::the_hint_is_present_without_color_just_unstyled ... ok
+test visual_gate::tests::a_repeated_downgrade_upserts_one_panel_rather_than_stacking ... ok
+test tui::view::tests::too_small_terminal_shows_a_message_not_a_broken_layout ... ok
+test visual_gate::tests::an_overlay_below_takeover_lands_in_the_reserved_panel ... ok
+test visual_gate::tests::inline_passes_through_at_every_level ... ok
+test visual_gate::tests::level_none_routes_panels_and_overlays_inline_with_the_contract_note ... ok
+test visual_gate::tests::an_agent_ttl_request_is_clamped_silently_to_the_configured_ceiling ... ok
+test tui::view::tests::the_takeover_covers_chat_but_never_the_input_line ... ok
+test visual_gate::tests::panels_and_panels_wide_admit_panels_untouched ... ok
+test visual_gate::tests::takeover_admits_the_overlay_with_its_request_intact ... ok
+test visual_gate::tests::the_published_config_is_what_the_gate_reads_and_defaults_when_unset ... ok
+test visual_gate::tests::the_width_cap_floors_rather_than_rounds_up ... ok
+test visual_gate::tests::the_width_cap_is_a_third_at_panels_and_a_half_above_it ... ok
+test viz::animator::tests::playback_bounce_and_cycles ... ok
+test viz::animator::tests::redraw_block_starts_with_cursor_up ... ok
+test viz::background::tests::colorfgbg_classifies_by_its_last_field ... ok
+test viz::background::tests::osc11_payload_classifies_by_luma_at_any_digit_width ... ok
+test viz::buffer_render::log_tail_tests::levels_mark_the_gutter_with_letters_that_survive_monochrome ... ok
+test viz::buffer_render::log_tail_tests::the_tail_keeps_the_newest_lines_and_drops_the_oldest ... ok
+test viz::grid::tests::status_grid_color_and_no_color ... ok
+test viz::palette::tests::honeycomb_info_is_basic_ansi_yellow ... ok
+test viz::palette::tests::color_off_emits_no_escapes ... ok
+test viz::palette::tests::mocha_info_is_truecolor ... ok
+test viz::palette::tests::mocha_info_quantizes_without_truecolor ... ok
+test viz::palette::tests::paint_if_wraps_and_bypasses ... ok
+test viz::theme::tests::ansi_passes_through_every_mode ... ok
+test viz::theme::tests::builtin_with_role_override ... ok
+test viz::theme::tests::auto_maps_backgrounds_to_flavors_and_unknown_to_honeycomb ... ok
+test viz::theme::tests::cli_beats_env_beats_config ... ok
+test viz::theme::tests::resolve_color_name_precedence ... ok
+test viz::theme::tests::fully_custom_theme_from_config ... ok
+test viz::theme::tests::rgb_renders_or_quantizes_by_mode ... ok
+test viz::theme::tests::unknown_named_theme_warns_and_falls_back ... ok
+test viz::themes::tests::aliases_and_normalization ... ok
+test viz::viewport::tests::default_is_unconstrained_so_headless_runs_never_fail_a_render ... ok
+test viz::themes::tests::all_builtins_resolve ... ok
+test viz::themes::tests::honeycomb_is_basic_ansi ... ok
+test viz::viewport::tests::has_panel_tracks_live_ids ... ok
+test tui::view::tests::a_collapsed_panel_shows_its_label_and_none_of_its_content ... ok
+test tui::view::tests::every_region_still_renders_without_color ... ok
+test tui::view::tests::panel_column_appears_only_when_populated ... ok
+test tui::view::tests::panel_renders_beside_chat_in_two_pane ... ok
+test tui::view::tests::overflowing_panels_report_what_is_hidden ... ok
+
+test result: ok. 493 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.89s
+
+     Running unittests src/main.rs (target/debug/deps/bee-7a95a0f3bc5b3a4e)
+
+running 27 tests
+test app::config::file::tests::an_absent_file_is_absence_not_failure ... ok
+test app::config::file::tests::a_theme_only_config_still_parses ... ok
+test app::config::file::tests::an_explicitly_named_missing_file_is_an_error ... ok
+test app::config::file::tests::paths_resolve_against_the_files_own_directory ... ok
+test app::config::file::tests::a_malformed_file_names_the_file ... ok
+test app::config::tests::a_configured_visual_level_is_read_and_motion_stays_sticky ... ok
+test app::config::file::tests::an_unknown_section_is_rejected_rather_than_ignored ... ok
+test app::config::tests::a_provider_from_user_configuration_completes_it ... ok
+test app::config::tests::a_ceiling_with_no_request_yields_no_policy ... ok
+test app::config::file::tests::project_configuration_may_request_a_policy ... ok
+test app::config::file::tests::project_configuration_may_not_set_operator_only_sections ... ok
+test app::config::tests::an_unreadable_policy_names_the_file ... ok
+test app::config::tests::an_unreadable_provider_names_the_file ... ok
+test app::config::tests::an_over_grant_is_refused_with_the_validators_own_words ... ok
+test app::config::tests::an_unknown_theme_warns_but_an_unknown_visual_level_fails ... ok
+test app::config::tests::no_provider_anywhere_reports_where_it_could_come_from ... ok
+test app::config::tests::a_request_with_no_ceiling_stands_as_written ... ok
+test app::config::tests::defaults_apply_when_nothing_configures_a_field ... ok
+test app::config::tests::a_flag_beats_every_file ... ok
+test app::config::tests::a_within_ceiling_request_is_derived ... ok
+test app::config::tests::paths_in_a_file_resolve_against_that_file ... ok
+test app::config::tests::explicit_beats_project_beats_user ... ok
+test app::config::tests::precedence_is_per_field_not_per_file ... ok
+test app::findings::tests::an_empty_ledger_says_so_rather_than_printing_nothing ... ok
+test app::config::tests::a_project_policy_request_is_bounded_by_the_user_ceiling ... ok
+test app::findings::tests::untrusted_finding_text_cannot_drive_the_operators_terminal ... ok
+test app::findings::tests::filtering_by_verdict_and_class_narrows_the_list ... ok
+
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/_tigerstyle_audit_probe.rs (target/debug/deps/_tigerstyle_audit_probe-101b900fd1e43225)
+
+running 7 tests
+test probe_grant_discards_inherited_executable_pin ... ok
+test probe_ledger_follows_project_symlink ... ok
+test probe_one_turn_grant_survives_next_turn ... ok
+test probe_deny_hook_does_not_prevent_execution ... ok
+test probe_chat_height_overflows_u16 - should panic ... ok
+test probe_provider_outlives_episode_deadline ... ok
+test probe_cancelled_child_leaves_descendant_alive ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.41s
+
+     Running tests/astgrep_tool.rs (target/debug/deps/astgrep_tool-e4276376c40512e1)
+
+running 6 tests
+test an_uncompiled_language_refuses_and_names_what_is_available ... ok
+test non_matching_extensions_are_skipped ... ok
+test an_invalid_pattern_reports_a_diagnostic ... ok
+test a_pattern_with_no_matches_is_a_clean_result ... ok
+test structural_search_ignores_comments_and_strings ... ok
+test the_match_set_is_bounded ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/batch.rs (target/debug/deps/batch-403a0298f802cfa5)
+
+running 4 tests
+test enforcement_trace_extracts_audit ... ok
+test parse_failure_is_a_batch_error ... ok
+test batch_bad_provider_isolated ... ok
+test batch_two_mocks_same_scenario ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/codeql_adapter.rs (target/debug/deps/codeql_adapter-913f0c9944361a1d)
+
+running 11 tests
+test a_bundle_that_is_not_there_is_refused_before_the_cli_is_run_at_all ... ok
+test an_ungranted_codeql_refuses_however_much_of_it_is_installed ... ok
+test an_unpinned_bundle_yields_no_scan_and_says_which_setting_is_missing ... ok
+test a_cli_that_cannot_say_what_it_is_does_not_get_the_benefit_of_the_doubt ... ok
+test a_version_mismatch_names_both_versions_and_analyses_nothing ... ok
+test a_traced_language_is_declined_explicitly_rather_than_half_analysed ... ok
+test the_database_does_not_outlive_the_call ... ok
+test typescript_is_analysed_because_the_javascript_extractor_handles_it ... ok
+test a_buildless_language_is_created_then_analysed_and_lands_in_the_ledger ... ok
+test bee_never_asks_codeql_to_observe_a_build ... ok
+test the_budget_bounds_the_whole_scan_not_each_child_of_it ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.01s
+
+     Running tests/command_surface.rs (target/debug/deps/command_surface-64b19ba29528e410)
+
+running 4 tests
+test run_is_not_the_raw_process_runner ... ok
+test bare_bee_prints_help_and_runs_nothing ... ok
+test exec_help_describes_a_diagnostic ... ok
+test exec_requires_a_policy_and_a_command ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/concurrent.rs (target/debug/deps/concurrent-8ddc39c1e8481f56)
+
+running 1 test
+test four_concurrent_mock_episodes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.82s
+
+     Running tests/core_deps_guard.rs (target/debug/deps/core_deps_guard-6ce0b7ac37854389)
+
+running 5 tests
+test bee_common_has_no_terminal_or_runtime_dependency ... ok
+test bee_core_has_no_terminal_or_runtime_dependency ... ok
+test the_guard_actually_detects_a_leak ... ok
+test tui_markdown_is_reachable_only_through_the_tui_feature ... ok
+test tachyonfx_is_reachable_only_through_the_tui_feature ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cred_isolation.rs (target/debug/deps/cred_isolation-182c821f35ebabe8)
+
+running 1 test
+test tool_child_cannot_read_provider_key ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/ctf.rs (target/debug/deps/ctf-7f59052b1750c4d2)
+
+running 6 tests
+test give_up_is_not_captured ... ok
+test score_report_counts_techniques ... ok
+test submit_flag_wrong_then_correct ... ok
+test submit_flag_correct_captures ... ok
+test run_episode_populates_score_for_ctf ... ok
+test turn_limit_in_ctf_is_not_captured ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/descendant_cleanup.rs (target/debug/deps/descendant_cleanup-aa625ec8bb36500c)
+
+running 1 test
+test backgrounded_descendant_does_not_survive_the_tool_call ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.01s
+
+     Running tests/dynamic_grants.rs (target/debug/deps/dynamic_grants-9ff2ae426efdb7e2)
+
+running 5 tests
+test a_grant_the_operator_denies_withholds_the_tool ... ok
+test a_beyond_ceiling_grant_is_refused_without_consulting_consent ... ok
+test an_already_held_capability_is_never_asked_for_again ... ok
+test a_skill_grant_registers_its_tool_for_later_calls ... ok
+test a_consent_sink_that_never_answers_times_out_and_denies ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+
+     Running tests/effect_examples.rs (target/debug/deps/effect_examples-8b816df113cbf2fa)
+
+running 5 tests
+test every_example_in_the_directory_is_covered ... ok
+test status_pulse_flashes_a_theme_role ... ok
+test panel_fade_in_draws_a_panel_and_requests_no_effect ... ok
+test fullscreen_chart_requests_a_takeover_with_its_own_lifetime ... ok
+test slide_dashboard_attaches_a_distinct_effect_to_each_panel ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/episode_loop.rs (target/debug/deps/episode_loop-e868ebedc1ebdc2d)
+
+running 7 tests
+test text_only_first_turn_is_no_tool_calls ... ok
+test malformed_tool_args_error_and_loop_continues ... ok
+test unknown_tool_name_is_error_not_panic ... ok
+test agent_finishing_after_a_tool_call_is_completed ... ok
+test transcript_shape_is_recorded ... ok
+test oversized_output_is_truncated_and_marked ... ok
+test turn_limit_reached_is_timeout ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/fail_closed.rs (target/debug/deps/fail_closed-f5d8030ea2790cb2)
+
+running 6 tests
+test headless_host_mode_on_an_enforcement_build_is_refused_not_faked ... ok
+test host_and_a_policy_together_are_a_contradiction ... ok
+test host_cannot_be_set_from_a_configuration_file ... ok
+test a_policy_on_a_host_build_is_refused_rather_than_ignored ... ok
+test host_makes_an_unenforced_session_start_and_say_so ... ok
+test a_session_with_no_policy_and_no_host_refuses ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/fail_closed_tools.rs (target/debug/deps/fail_closed_tools-5a53383b35b078cd)
+
+running 10 tests
+test a_failed_run_is_an_error_and_reads_as_one ... ok
+test an_unpinned_bundle_names_the_setting_that_would_pin_it ... ok
+test a_refusal_never_renders_a_payload ... ok
+test every_reason_has_a_distinct_audit_slug ... ok
+test a_compiled_out_family_refuses_rather_than_returning_nothing ... ok
+test no_unavailable_rendering_can_be_mistaken_for_a_clean_scan ... ok
+test only_grant_relevant_refusals_are_flagged_security_relevant ... ok
+test sec_tool_names_are_known_so_scenarios_do_not_drop_them ... ok
+test the_three_states_are_mutually_distinguishable ... ok
+test truncation_is_announced_before_the_results ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/finding_ledger.rs (target/debug/deps/finding_ledger-6682e34c95b5e8c4)
+
+running 9 tests
+test an_unrecognised_event_is_skipped_and_counted_not_fatal ... ok
+test a_finding_that_moved_lines_merges_rather_than_duplicating ... ok
+test a_false_positive_verdict_survives_rediscovery ... ok
+test a_record_missing_required_evidence_is_rejected_and_writes_nothing ... ok
+test identity_separates_its_components ... ok
+test the_ledger_round_trips_through_a_text_diff_without_loss ... ok
+test title_normalisation_collapses_cosmetic_differences ... ok
+test the_same_finding_seen_in_two_runs_is_one_entry_with_two_sightings ... ok
+test concurrent_writers_lose_no_events ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.45s
+
+     Running tests/gitlog_tool.rs (target/debug/deps/gitlog_tool-6c0cc2c11da26af0)
+
+running 6 tests
+test a_path_outside_any_repository_says_so ... ok
+test the_limit_keeps_the_newest_commits ... ok
+test a_line_outside_the_file_is_refused_with_a_diagnostic ... ok
+test an_untracked_file_is_an_empty_history_not_a_refusal ... ok
+test log_reports_author_date_and_summary ... ok
+test blame_identifies_the_commit_that_introduced_a_line ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+     Running tests/grid.rs (target/debug/deps/grid-cca0d1d3e04c8cd5)
+
+running 10 tests
+test grid_counts_elements_and_nesting ... ok
+test grid_renders_each_cell_content ... ok
+test sprite_rasterizes_into_a_buffer_cell ... ok
+test grid_spanning_cell_is_accepted ... ok
+test overlapping_cells_are_rejected ... ok
+test shipped_example_script_runs ... ok
+test out_of_bounds_cell_is_rejected ... ok
+test oversized_grid_is_rejected ... ok
+test spanning_cell_unions_its_tracks ... ok
+test grid_script_commits_a_grid_spec ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/live_smoke.rs (target/debug/deps/live_smoke-2b0b34b566a35be3)
+
+running 2 tests
+test anthropic_smoke ... ok
+test ollama_openai_compat_smoke ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/mcp_dep_boundary.rs (target/debug/deps/mcp_dep_boundary-b7dadcdc34b248db)
+
+running 1 test
+test rmcp_absent_from_bee_core ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s
+
+     Running tests/mcp_domain_gating.rs (target/debug/deps/mcp_domain_gating-a6d41262ec08f313)
+
+running 4 tests
+test empty_allowlist_refuses_all_remote ... ok
+test denied_domain_wins_over_wildcard ... ok
+test token_value_never_leaks_in_status ... ok
+test not_in_allowlist_is_refused ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/mcp_repl.rs (target/debug/deps/mcp_repl-867432edf9f0168e)
+
+running 2 tests
+test disabled_mcp_summary_is_concise ... ok
+test mcp_summary_reports_servers_and_domain_policy ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/mcp_stdio.rs (target/debug/deps/mcp_stdio-90c241cdc0a0beb8)
+
+running 4 tests
+test call_read_returns_content ... ignored, needs Node + @modelcontextprotocol/server-filesystem on PATH (MCP_FS_BIN)
+test connect_lists_and_calls ... ignored, needs Node + @modelcontextprotocol/server-filesystem on PATH (MCP_FS_BIN)
+test denied_tools_are_hidden ... ignored, needs Node + @modelcontextprotocol/server-filesystem on PATH (MCP_FS_BIN)
+test tools_list_changed_refreshes_registry ... ignored, needs Node (tests/fixtures/notify_server.mjs)
+
+test result: ok. 0 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/panel_replay.rs (target/debug/deps/panel_replay-25cc21d162bcd5ed)
+
+running 5 tests
+test inline_only_transcript_reconstructs_no_panels ... ok
+test replay_applies_remove_and_clear_not_just_upserts ... ok
+test ttl_panels_replay_with_their_last_content ... ok
+test replay_folds_last_writer_wins_per_panel_in_insertion_order ... ok
+test panel_updates_lists_every_targeted_render_in_order ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/render_ansi.rs (target/debug/deps/render_ansi-228fcc148cc197d7)
+
+running 2 tests
+test bar_chart_renders_inline_ansi_box_color_and_no_color ... ok
+test vsplit_height_is_sum_of_children_plus_separators ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/render_exchange.rs (target/debug/deps/render_exchange-2677efc225d8cc5b)
+
+running 1 test
+test agent_render_call_draws_widget_and_summarizes_to_model ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/render_sandbox.rs (target/debug/deps/render_sandbox-ba4ff906c5934ef7)
+
+running 15 tests
+test bad_hex_color_is_rejected ... ok
+test last_render_wins_with_discard_note ... ok
+test mismatched_frame_dims_is_rejected ... ok
+test bee_functions_are_callable ... ok
+test loop_hits_operation_limit ... ok
+test interval_is_clamped_not_an_error ... ok
+test no_io_module_available ... ok
+test bar_chart_builds_expected_spec ... ok
+test sprite_over_32_is_rejected ... ok
+test oversized_palette_is_rejected ... ok
+test script_with_no_render_is_an_error ... ok
+test too_many_frames_is_rejected ... ok
+test unregistered_function_is_denied ... ok
+test nesting_over_four_is_rejected ... ok
+test transparent_sprite_summary_notes_it ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/repl_command.rs (target/debug/deps/repl_command-a7de9bdfa8ef83cd)
+
+running 7 tests
+test mcp_configuration_without_the_feature_is_refused ... ok
+test no_provider_at_all_reports_what_is_missing ... ok
+test a_missing_provider_is_a_usage_error ... ok
+test the_banner_reports_the_session ... ok
+test a_full_screen_request_falls_back_when_piped ... ok
+test a_transcript_is_saved_on_exit ... ok
+test closed_stdin_ends_the_session_cleanly ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/run_command.rs (target/debug/deps/run_command-cd8ba39352146d51)
+
+running 8 tests
+test a_missing_provider_file_is_a_usage_error ... ok
+test concurrent_without_the_feature_is_an_explicit_refusal ... ok
+test a_single_episode_writes_its_transcript ... ok
+test an_unparseable_scenario_is_a_usage_error ... ok
+test the_transcript_stays_out_of_the_progress_stream ... ok
+test a_batch_crosses_scenarios_with_providers ... ok
+test an_ad_hoc_task_runs_without_a_scenario_file ... ok
+test out_writes_the_transcript_to_a_file ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/scanner_adapter.rs (target/debug/deps/scanner_adapter-a762725c69d009b1)
+
+running 25 tests
+test a_compiled_out_scanner_family_is_still_a_known_tool ... ok
+test a_report_without_the_invocation_block_is_not_assumed_successful ... ok
+test a_grant_is_only_ever_an_inode_pinned_exec_entry ... ok
+test a_rule_level_reaches_the_ledger_without_becoming_a_severity ... ok
+test a_result_with_no_location_is_kept_rather_than_dropped ... ok
+test a_granted_but_absent_binary_reports_its_absence ... ok
+test a_binary_substituted_after_the_grant_is_never_executed ... ok
+test an_unpinned_allow_entry_is_not_a_scanner_grant ... ok
+test a_scanner_with_no_ruleset_configured_refuses_rather_than_defaulting_to_auto ... ok
+test config_auto_is_refused_when_the_command_is_built ... ok
+test control_and_bidi_characters_in_a_report_render_inert ... ok
+test a_scanner_that_writes_no_report_fails ... ok
+test a_scanner_with_no_grant_refuses_rather_than_reporting_nothing ... ok
+test no_policy_at_all_grants_no_scanner ... ok
+test the_finding_set_is_bounded_before_rendering ... ok
+test the_compiled_exec_surface_is_bee_plus_the_granted_scanner_and_nothing_else ... ok
+test the_measured_fixture_normalises_to_one_finding ... ok
+test unavailable_reasons_all_render_distinguishably_from_a_clean_scan ... ok
+test the_model_cannot_smuggle_a_flag_through_the_target ... ok
+test exit_zero_with_execution_unsuccessful_is_a_failure ... ok
+test an_unparseable_report_fails_rather_than_reading_as_empty ... ok
+test a_genuinely_clean_scan_reads_as_clean ... ok
+test exit_zero_with_findings_is_a_successful_scan ... ok
+test findings_are_merged_into_the_ledger_sourced_by_scanner ... ok
+test a_scanner_that_exceeds_its_budget_fails_with_no_partial_findings ... ok
+
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.01s
+
+     Running tests/search_tool.rs (target/debug/deps/search_tool-26a936ca67f50b0c)
+
+running 4 tests
+test search_is_a_default_tool ... ok
+test glob_restricts_the_file_set ... ok
+test matches_across_files_as_path_line_text ... ok
+test ignore_case_is_opt_in ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/skills_episode.rs (target/debug/deps/skills_episode-840cced4232a8573)
+
+running 4 tests
+test no_skill_roots_means_no_skill_tool ... ok
+test grant_beyond_ceiling_is_refused_and_tool_withheld ... ok
+test scenario_skill_roots_register_the_skill_tool ... ok
+test skill_requiring_a_tool_grants_it_within_ceiling ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/sprite_anim.rs (target/debug/deps/sprite_anim-df88e9f85e9e32d9)
+
+running 2 tests
+test playback_applies_bounce_and_cycles ... ok
+test redraw_block_starts_with_cursor_up ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/sprite_render.rs (target/debug/deps/sprite_render-19cde7bb25ffa3d8)
+
+running 6 tests
+test ansi256_and_ansi16_use_indexed_escapes ... ok
+test no_color_degrades_to_mono_blocks ... ok
+test fully_transparent_sprite_is_blank_rows ... ok
+test quantization_maps_known_colors ... ok
+test sixteen_by_sixteen_is_eight_truecolor_rows ... ok
+test transparent_half_emits_no_background_escape ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/status_grid.rs (target/debug/deps/status_grid-3e25d82a7317e160)
+
+running 2 tests
+test default_render_widget_emits_non_blank_ascii ... ok
+test status_grid_colors_then_no_color ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/theme.rs (target/debug/deps/theme-f62219ef14c1854c)
+
+running 4 tests
+test error_role_renders_mocha_red ... ok
+test info_role_renders_mocha_truecolor ... ok
+test extended_palette_color_resolves ... ok
+test chart_accent_color_resolves_through_theme ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/tui_fallback.rs (target/debug/deps/tui_fallback-752cede8b42f4d2b)
+
+running 7 tests
+test below_the_hard_floor_falls_back_and_names_both_sizes ... ok
+test exactly_at_the_floor_still_runs_full_screen ... ok
+test a_capable_terminal_runs_full_screen_silently ... ok
+test term_dumb_falls_back_to_inline_with_a_note ... ok
+test no_color_does_not_force_the_inline_path ... ok
+test the_default_and_no_tui_are_inline_without_a_note ... ok
+test non_tty_falls_back_to_inline_with_a_note ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/tui_restore.rs (target/debug/deps/tui_restore-962a7ed1e70c16e8)
+
+running 6 tests
+test ctrl_c_is_treated_as_quit ... ok
+test early_return_restores_via_the_guard ... ok
+test panic_restores_via_the_guard_and_still_propagates ... ok
+test disarm_prevents_a_double_restore_on_the_normal_path ... ok
+test q_from_chat_focus_quits ... ok
+test suspend_resume_is_a_noop_today_and_never_a_hidden_quit ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/validate.rs (target/debug/deps/validate-ef18c1de5f206f2d)
+
+running 4 tests
+test supported_policy_is_runnable ... ok
+test unsupported_segment_is_rejected_before_kernel_probe ... ok
+test attenuated_child_must_also_be_runnable ... ok
+test an_inode_pin_now_validates_and_enabled_exfiltration_is_still_rejected ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+   Doc-tests bee
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

@@ -1,8 +1,8 @@
 //! Authoring policy types and TOML deserialization (the source of truth — Principle IV).
 //!
-//! These types mirror the TOML in `contracts/policy.schema.md` verbatim. They hold *raw* pattern
-//! strings (tokens like `:project_root` and `~` unresolved); resolution and glob lowering happen in
-//! [`crate::compiler`]. Keeping authoring separate from the compiled form keeps policy reviewable.
+//! These types hold authoring TOML plus effective restrictions inherited during derivation. Pattern
+//! strings remain raw (tokens like `:project_root` and `~` unresolved); resolution and glob lowering
+//! happen in [`crate::compiler`]. The compiled form remains separate from this reviewable policy.
 
 use std::collections::BTreeMap;
 
@@ -76,7 +76,7 @@ impl Access {
 }
 
 /// Executable allowlist.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecPolicy {
     /// Names (resolved via PATH) or absolute paths. A leading `!` pins the binary inode (TOCTOU-hard).
     #[serde(default)]
@@ -84,7 +84,7 @@ pub struct ExecPolicy {
 }
 
 /// Network egress allowlist.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetPolicy {
     /// `host:port` entries; host is a domain, IP, or CIDR. Deny-all is implicit when non-empty.
     #[serde(default)]
@@ -92,7 +92,7 @@ pub struct NetPolicy {
 }
 
 /// Exfiltration-detection config (parsed now; enforcement deferred to P3).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExfilPolicy {
     #[serde(default)]
     pub enabled: bool,
@@ -100,10 +100,20 @@ pub struct ExfilPolicy {
     pub sensitive_paths: Vec<String>,
 }
 
+/// Restrictions carried across derivation independently of explicit grants.
+/// Serialized as well as cloned so a policy round-trip cannot lose inherited restrictions.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EffectiveDefaults {
+    #[serde(default)]
+    pub deny_unmatched_writes: bool,
+}
+
 /// A declarative sandbox policy for one scope.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Policy {
     pub name: String,
+    #[serde(default)]
+    pub defaults: EffectiveDefaults,
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
@@ -125,6 +135,12 @@ struct Doc {
 }
 
 impl Policy {
+    /// A write grant opts a root into write allowlisting. Derived policies also retain that
+    /// decision independently of whether any of their remaining rules grant writes.
+    pub fn denies_unmatched_writes(&self) -> bool {
+        self.defaults.deny_unmatched_writes || self.filesystem.values().any(|a| *a == Access::Write)
+    }
+
     /// Parse and structurally validate a policy from a TOML string.
     pub fn from_toml(s: &str) -> Result<Policy, PolicyError> {
         let doc: Doc = toml::from_str(s).map_err(|e| PolicyError::Toml(e.to_string()))?;

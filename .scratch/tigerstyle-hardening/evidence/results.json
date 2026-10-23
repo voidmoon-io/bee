@@ -1,0 +1,65 @@
+{
+  "workspace": {
+    "passed": 691,
+    "failed": 0,
+    "ignored": 0
+  },
+  "headless": {
+    "passed": 413,
+    "failed": 0,
+    "ignored": 0
+  },
+  "optional-features": {
+    "passed": 746,
+    "failed": 0,
+    "ignored": 5
+  },
+  "combined-features-focused": {
+    "passed": 512,
+    "failed": 0,
+    "ignored": 7
+  },
+  "async-audit": {
+    "passed": 45,
+    "failed": 0,
+    "ignored": 0
+  },
+  "attenuation": {
+    "passed": 2,
+    "failed": 0,
+    "ignored": 0
+  },
+  "kernel-regressions": {
+    "passed": 5,
+    "failed": 0,
+    "ignored": 0
+  },
+  "repl-clock": {
+    "passed": 1,
+    "failed": 0,
+    "ignored": 0
+  },
+  "ledger-single-record-control": {
+    "passed": 1,
+    "failed": 0,
+    "ignored": 0
+  },
+  "ledger-batch": {
+    "passed": 1,
+    "failed": 0,
+    "ignored": 0
+  },
+  "output-memory": {
+    "passed": 1,
+    "failed": 0,
+    "ignored": 0
+  },
+  "vm-matrix": {
+    "passed": 38,
+    "failed": 0
+  },
+  "parser": {
+    "passed": 3,
+    "failed": 0
+  }
+}

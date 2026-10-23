@@ -266,6 +266,11 @@ impl ToolRegistry {
         self
     }
 
+    /// Remove a tool whose final lease expired.
+    pub(crate) fn remove(&mut self, name: &str) {
+        self.tools.remove(name);
+    }
+
     /// True if a tool with `name` is registered.
     pub fn contains(&self, name: &str) -> bool {
         self.tools.contains_key(name)
@@ -285,6 +290,9 @@ impl ToolRegistry {
     /// Execute a model-requested call. An unknown tool name yields an error result (fed back to the
     /// model), never a panic (FR-016).
     pub async fn execute(&self, call: &ToolCall, sandbox: &Sandbox) -> ToolResult {
+        if let Err(error) = sandbox.check_cleanup() {
+            return ToolResult::error(error);
+        }
         match self.tools.get(call.name.as_str()) {
             Some(tool) => tool.call(call.arguments.clone(), sandbox).await,
             None => ToolResult::error(format!("unknown tool: {}", call.name)),

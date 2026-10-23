@@ -8,8 +8,11 @@ BEE=${BEE:-/home/ubuntu/bee}
 WORK=$(mktemp -d)
 pass=0
 fail=0
+CASE_MANIFEST="$(dirname "$0")/cases.txt"
+[ -r "$CASE_MANIFEST" ] || { echo "missing case manifest" >&2; exit 1; }
 
 emit() { # name status note
+  grep -Fxq -- "$1" "$CASE_MANIFEST" || { echo "unknown case: $1" >&2; exit 1; }
   echo "RESULT|$1|$2|$3"
   if [ "$2" = PASS ]; then pass=$((pass + 1)); else fail=$((fail + 1)); fi
 }

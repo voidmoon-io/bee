@@ -218,6 +218,7 @@ fn enforcement_trace_extracts_audit() {
             duration_ms: 1,
         }],
         audit_trail: vec![denied],
+        audit_health: Default::default(),
         timing: Timing::default(),
         usage: None::<Usage>,
         score: None,

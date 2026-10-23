@@ -1,0 +1,26 @@
+   Compiling bee v0.1.0 (/home/jg/git/bee)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.69s
+     Running tests/_tigerstyle_audit_probe.rs (target/debug/deps/_tigerstyle_audit_probe-ea6d7a09dd8102c3)
+
+running 7 tests
+test probe_ledger_follows_project_symlink ... ok
+test probe_grant_discards_inherited_executable_pin ... ok
+test probe_deny_hook_does_not_prevent_execution ... ok
+test probe_one_turn_grant_survives_next_turn ... ok
+
+thread 'probe_chat_height_overflows_u16' (38) panicked at /home/jg/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/accum.rs:206:1:
+attempt to add with overflow
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test probe_chat_height_overflows_u16 - should panic ... ok
+test probe_provider_outlives_episode_deadline ... ok
+test probe_cancelled_child_leaves_descendant_alive ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.41s
+
+     Running tests/_tigerstyle_audit_probe.rs (target/debug/deps/_tigerstyle_audit_probe-a3489d1efd23fd2b)
+
+running 1 test
+test probe_narrowing_write_to_read_widens_unmatched_writes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

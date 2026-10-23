@@ -21,9 +21,12 @@ impl AuditReader {
         AuditReader { rb, scope_id }
     }
 
-    /// Drain all currently-available records, invoking `sink` for each. Non-blocking.
-    pub fn drain(&mut self, sink: &mut dyn FnMut(AuditEvent)) {
-        while let Some(item) = self.rb.next() {
+    /// Drain at most 4096 records. Returns true only after observing an empty ring.
+    pub fn drain(&mut self, sink: &mut dyn FnMut(AuditEvent)) -> bool {
+        for _ in 0..4096 {
+            let Some(item) = self.rb.next() else {
+                return true;
+            };
             if item.len() >= core::mem::size_of::<AuditRecord>() {
                 // SAFETY: the ring holds a full AuditRecord written by the eBPF side.
                 let rec = unsafe { core::ptr::read_unaligned(item.as_ptr() as *const AuditRecord) };
@@ -35,6 +38,7 @@ impl AuditReader {
                 sink(ev);
             }
         }
+        false
     }
 
     /// Block up to `timeout_ms` (or indefinitely if negative) for the ring to become readable.

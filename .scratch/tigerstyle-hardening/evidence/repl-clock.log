@@ -1,0 +1,9 @@
+    Blocking waiting for file lock on build directory
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 23.95s
+     Running tests/hardening.rs (target/debug/deps/hardening-8ee7c72fb68e012f)
+
+running 1 test
+test repl_denial_and_expiry_match_headless_behavior ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.01s
+

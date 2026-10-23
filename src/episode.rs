@@ -79,6 +79,7 @@ fn preview(s: &str, max: usize) -> String {
 fn status_label(s: &EpisodeStatus) -> String {
     match s {
         EpisodeStatus::Completed => "completed".into(),
+        EpisodeStatus::Terminated { detail } => format!("terminated ({detail})"),
         EpisodeStatus::Timeout => "timeout".into(),
         EpisodeStatus::NoToolCalls => "no_tool_calls".into(),
         EpisodeStatus::ApiError { detail } => format!("api_error ({detail})"),
@@ -108,7 +109,13 @@ async fn complete_with_retry(
 ) -> Result<Turn, String> {
     let mut attempt: u32 = 0;
     loop {
-        match model.complete(convo, schemas).await {
+        if Instant::now() >= deadline {
+            return Err("episode deadline exceeded".into());
+        }
+        let reply = tokio::time::timeout_at(deadline.into(), model.complete(convo, schemas))
+            .await
+            .map_err(|_| "episode deadline exceeded".to_string())?;
+        match reply {
             Ok(turn) => return Ok(turn),
             Err(ModelError::Transient {
                 status,
@@ -121,10 +128,9 @@ async fn complete_with_retry(
                 }
                 let backoff = retry_after
                     .unwrap_or_else(|| Duration::from_millis(200 * 2u64.pow(attempt.min(6))));
-                if Instant::now() + backoff >= deadline {
-                    return Err(format!(
-                        "transient provider error (status {status}); deadline reached before retry"
-                    ));
+                if backoff >= deadline.saturating_duration_since(Instant::now()) {
+                    tokio::time::sleep_until(deadline.into()).await;
+                    return Err("episode deadline exceeded".into());
                 }
                 tokio::time::sleep(backoff).await;
                 attempt += 1;
@@ -134,6 +140,19 @@ async fn complete_with_retry(
             Err(ModelError::Decode(m)) => return Err(format!("could not decode response: {m}")),
         }
     }
+}
+
+async fn bounded_hook(
+    deadline: Instant,
+    step: impl std::future::Future<Output = Option<crate::grants::escalate::EscalateOutcome>>,
+) -> Option<crate::grants::escalate::EscalateOutcome> {
+    tokio::time::timeout_at(deadline.into(), step)
+        .await
+        .unwrap_or_else(|_| {
+            Some(crate::grants::escalate::EscalateOutcome::Terminated(
+                "episode deadline exceeded".into(),
+            ))
+        })
 }
 
 /// Run the loop over a ready sandbox. The sandbox is `&mut` so audit can be drained between calls.
@@ -167,10 +186,21 @@ pub async fn run_loop(
 
     // Dynamic capability grants (007-dynamic-grants): the mutable active policy, present only when
     // escalation is configured. Starts at `base`, bounded by `ceiling`.
-    let mut active_policy = opts
+    let mut active_policy = match opts
         .escalation
         .as_ref()
-        .map(|e| crate::grants::ActivePolicy::new(e.base.clone(), e.ceiling.clone()));
+        .map(|e| crate::grants::ActivePolicy::new(e.base.clone(), e.ceiling.clone()))
+        .transpose()
+    {
+        Ok(active) => active,
+        Err(detail) => return infra_error(scenario, model, detail),
+    };
+
+    if let (Some(esc), Some(active)) = (opts.escalation.as_ref(), active_policy.as_ref()) {
+        if let Err(detail) = esc.initialize(active, sandbox) {
+            return infra_error(scenario, model, detail);
+        }
+    }
 
     // If the loop runs out of turns without the agent stopping, it hit the turn limit (FR-007). In
     // CTF mode (US3) a turn-limit-expired episode means the agent *failed* to capture the flag, so
@@ -182,10 +212,36 @@ pub async fn run_loop(
     };
 
     'outer: for index in 0..scenario.turn_limit {
+        macro_rules! stop_run {
+            ($detail:expr) => {{
+                status = if Instant::now() >= deadline {
+                    EpisodeStatus::Timeout
+                } else {
+                    EpisodeStatus::Terminated { detail: $detail }
+                };
+                break 'outer;
+            }};
+        }
+
         let turn_start = Instant::now();
         if Instant::now() >= deadline {
             status = EpisodeStatus::Timeout;
             break;
+        }
+
+        if let Err(detail) = sandbox.check_cleanup() {
+            stop_run!(detail);
+        }
+        if let (Some(esc), Some(active)) = (opts.escalation.as_ref(), active_policy.as_mut()) {
+            if let Some(crate::grants::escalate::EscalateOutcome::Terminated(detail)) =
+                bounded_hook(
+                    deadline,
+                    crate::grants::escalate::turn_start(esc, active, index, sandbox, registry),
+                )
+                .await
+            {
+                stop_run!(detail);
+            }
         }
 
         // Refresh MCP tools if a server sent `tools/list_changed` since last turn (FR-043), then take
@@ -194,6 +250,27 @@ pub async fn run_loop(
             refresh(registry);
         }
         let schemas = registry.schemas();
+        if let (Some(esc), Some(active)) = (opts.escalation.as_ref(), active_policy.as_mut()) {
+            if let Some(crate::grants::escalate::EscalateOutcome::Terminated(detail)) =
+                bounded_hook(
+                    deadline,
+                    crate::grants::escalate::event_step(
+                        esc,
+                        active,
+                        crate::hooks::StepEvent::BeforeModelCall {
+                            convo: &convo,
+                            schemas: &schemas,
+                        },
+                        index,
+                        sandbox,
+                        registry,
+                    ),
+                )
+                .await
+            {
+                stop_run!(detail);
+            }
+        }
 
         let call_start = Instant::now();
         let turn =
@@ -210,7 +287,11 @@ pub async fn run_loop(
                             "error",
                         );
                     }
-                    status = EpisodeStatus::ApiError { detail };
+                    status = if Instant::now() >= deadline {
+                        EpisodeStatus::Timeout
+                    } else {
+                        EpisodeStatus::ApiError { detail }
+                    };
                     break;
                 }
             };
@@ -293,18 +374,44 @@ pub async fn run_loop(
             // Proactive escalation (007, US2): a hook may request a grant before this call runs
             // (e.g. a loaded skill's `requires`). The grant applies (or is refused) in place; the
             // call then executes normally under the possibly-widened scope.
+            let mut refusal = None;
             if let (Some(esc), Some(active)) = (opts.escalation.as_ref(), active_policy.as_mut()) {
-                if let Some(out) = crate::grants::escalate::proactive_step(
-                    esc, active, tc, index, sandbox, registry,
+                if let Some(out) = bounded_hook(
+                    deadline,
+                    crate::grants::escalate::proactive_step(
+                        esc, active, tc, index, sandbox, registry,
+                    ),
                 )
                 .await
                 {
                     emit(opts, format!("  escalate(proactive): {out:?}"));
+                    match out {
+                        crate::grants::escalate::EscalateOutcome::Denied(reason) => {
+                            refusal = Some(crate::tools::ToolResult::error(reason))
+                        }
+                        crate::grants::escalate::EscalateOutcome::Terminated(reason) => {
+                            turns.push(TranscriptTurn {
+                                index,
+                                assistant_text,
+                                calls: recorded,
+                                duration_ms: ms_since(turn_start),
+                            });
+                            stop_run!(reason);
+                        }
+                        _ => (),
+                    }
                 }
             }
 
-            let (mut result, timed_out) =
-                match tokio::time::timeout(remaining, registry.execute(tc, sandbox)).await {
+            if Instant::now() >= deadline {
+                stop_run!("episode deadline exceeded".into());
+            }
+
+            let (mut result, mut timed_out) = if let Some(refusal) = refusal {
+                (refusal, false)
+            } else {
+                match tokio::time::timeout_at(deadline.into(), registry.execute(tc, sandbox)).await
+                {
                     Ok(r) => (r, false),
                     Err(_) => (
                         crate::tools::ToolResult::error(
@@ -312,12 +419,14 @@ pub async fn run_loop(
                         ),
                         true,
                     ),
-                };
+                }
+            };
 
             // Correlate the kernel audit events this call produced (FR-008). `settle` lets the async
             // demux path (US4) deliver this call's events; it is a no-op for the sync paths.
             sandbox.settle().await;
             let mut audit = sandbox.drain_audit();
+            sandbox.retain_audit(&mut audit);
             audit_trail.extend(audit.iter().cloned());
 
             // Reactive escalation (007, US1): a kernel denial may be escalated (a grant scoped to the
@@ -328,32 +437,104 @@ pub async fn run_loop(
                     (opts.escalation.as_ref(), active_policy.as_mut())
                 {
                     if let Some((op, target)) = crate::grants::escalate::first_denial(&audit) {
-                        if let Some(out) = crate::grants::escalate::reactive_step(
-                            esc, active, &op, &target, tc, index, sandbox, registry,
+                        if let Some(out) = bounded_hook(
+                            deadline,
+                            crate::grants::escalate::reactive_step(
+                                esc, active, &op, &target, tc, index, sandbox, registry,
+                            ),
                         )
                         .await
                         {
                             emit(opts, format!("  escalate(reactive): {out:?}"));
+                            match &out {
+                                crate::grants::escalate::EscalateOutcome::Denied(reason) => {
+                                    result = crate::tools::ToolResult::error(reason.clone())
+                                }
+                                crate::grants::escalate::EscalateOutcome::Terminated(reason) => {
+                                    let detail = reason.clone();
+                                    recorded.push(RecordedCall {
+                                        call: tc.clone(),
+                                        result,
+                                        audit,
+                                    });
+                                    turns.push(TranscriptTurn {
+                                        index,
+                                        assistant_text,
+                                        calls: recorded,
+                                        duration_ms: ms_since(turn_start),
+                                    });
+                                    stop_run!(detail);
+                                }
+                                _ => (),
+                            }
                             // Retry the call exactly once under the widened scope (SC-005). Only on
                             // a genuine widening: `AlreadyHeld` changed nothing, so the retry would
                             // be denied exactly as the first attempt was.
-                            let left = deadline.saturating_duration_since(Instant::now());
-                            if out.is_granted() && !left.is_zero() {
-                                if let Ok(r) =
-                                    tokio::time::timeout(left, registry.execute(tc, sandbox)).await
-                                {
-                                    sandbox.settle().await;
-                                    let retry_audit = sandbox.drain_audit();
-                                    audit_trail.extend(retry_audit.iter().cloned());
-                                    result = r;
-                                    audit = retry_audit;
-                                }
+                            if out.is_granted() {
+                                let retried = if Instant::now() >= deadline {
+                                    None
+                                } else {
+                                    tokio::time::timeout_at(
+                                        deadline.into(),
+                                        registry.execute(tc, sandbox),
+                                    )
+                                    .await
+                                    .ok()
+                                };
+                                result = retried.unwrap_or_else(|| {
+                                    timed_out = true;
+                                    crate::tools::ToolResult::error(
+                                        "tool retry aborted: episode wall-clock deadline reached",
+                                    )
+                                });
+                                sandbox.settle().await;
+                                let mut retry_audit = sandbox.drain_audit();
+                                sandbox.retain_audit(&mut retry_audit);
+                                audit_trail.extend(retry_audit.iter().cloned());
+                                audit = retry_audit;
                             }
                         }
                     }
                 }
             }
 
+            if let (Some(esc), Some(active)) = (opts.escalation.as_ref(), active_policy.as_mut()) {
+                if let Some(crate::grants::escalate::EscalateOutcome::Terminated(detail)) =
+                    bounded_hook(
+                        deadline,
+                        crate::grants::escalate::event_step(
+                            esc,
+                            active,
+                            crate::hooks::StepEvent::AfterToolResult {
+                                call: tc,
+                                result: &result,
+                                audit: &audit,
+                            },
+                            index,
+                            sandbox,
+                            registry,
+                        ),
+                    )
+                    .await
+                {
+                    recorded.push(RecordedCall {
+                        call: tc.clone(),
+                        result,
+                        audit,
+                    });
+                    turns.push(TranscriptTurn {
+                        index,
+                        assistant_text,
+                        calls: recorded,
+                        duration_ms: ms_since(turn_start),
+                    });
+                    stop_run!(detail);
+                }
+            }
+
+            if let Some(warning) = sandbox.audit_warning() {
+                emit(opts, warning);
+            }
             let denied = audit.iter().any(|e| e.decision == "denied");
             let tag = if denied {
                 "DENIED"
@@ -449,6 +630,7 @@ pub async fn run_loop(
         status,
         turns,
         audit_trail,
+        audit_health: sandbox.audit_health(),
         timing: Timing {
             started_at: rfc3339(started_at),
             ended_at: rfc3339(ended_at),
@@ -468,6 +650,7 @@ fn infra_error(scenario: &Scenario, model: &dyn Model, detail: String) -> Episod
         status: EpisodeStatus::InfraError { detail },
         turns: Vec::new(),
         audit_trail: Vec::new(),
+        audit_health: Default::default(),
         timing: Timing {
             started_at: now.clone(),
             ended_at: now,
@@ -736,13 +919,11 @@ pub async fn run_episode(
         opts.refresh_tools = None;
         drop(bridge);
     }
-    // A scope that will not empty means something survived the episode and is about to lose its
-    // enforcement when the engine drops. Surface it on the progress sink rather than discarding it.
+    // Failed cleanup is an infrastructure failure even if the model completed its task. The engine
+    // retains its enforcement links until process exit if its final cleanup attempt also fails.
     if let Err(e) = sandbox.teardown() {
-        emit(
-            &opts,
-            format!("WARNING: {e} — a process may have outlived enforcement"),
-        );
+        emit(&opts, format!("scope cleanup failed: {e}"));
+        transcript.status = EpisodeStatus::InfraError { detail: e };
     }
 
     // CTF episodes carry a score derived from the audit trail (US3).
@@ -762,6 +943,7 @@ fn empty_policy() -> bee_core::Policy {
         filesystem: std::collections::BTreeMap::new(),
         exec: Default::default(),
         network: Default::default(),
+        defaults: Default::default(),
         exfiltration: Default::default(),
     }
 }
@@ -934,6 +1116,7 @@ mod mcp_cgroup_spike {
             mcp: Default::default(),
             skills: Vec::new(),
             ceiling_policy_path: None,
+            security: Default::default(),
         };
         (scn, dir)
     }

@@ -1,0 +1,47 @@
+== build (host) ==
+   Compiling bee-core v0.1.0 (/home/jg/git/bee/crates/core)
+   Compiling bee-userspace v0.1.0 (/home/jg/git/bee/crates/userspace)
+   Compiling bee v0.1.0 (/home/jg/git/bee)
+    Finished `release` profile [optimized] target(s) in 4m 46s
+== wait for guest reachability ==
+== ship binaries + runner ==
+== run matrix (guest, as root) ==
+kernel-bpf-lsm                      PASS   lockdown,capability,landlock,yama,apparmor,bpf
+kernel-btf                          PASS   present
+bee-check                           PASS   gates ok
+net-allow                           PASS   http=301
+net-deny                            PASS   connection blocked
+net-unix-denied                     PASS   AF_UNIX connect refused (REFUSED 1)
+file-deny                           PASS   secret not leaked
+file-allow                          PASS   read ok (ac-matrix-vm)
+file-glob-deny                      PASS   *.secret blocked
+file-glob-allow                     PASS   non-matching file opens
+file-segment-refused                PASS   fail-closed on unenforceable rule
+rw-read-source                      PASS   read-only source readable
+rw-write-source-denied              PASS   write to read-only source blocked
+rw-write-scratch                    PASS   write to granted scratch works
+rw-write-default-deny               PASS   unlisted write denied by default
+exec-allow                          PASS   allowlisted exec ran
+exec-deny                           PASS   unlisted exec denied
+exec-pin-allow                      PASS   pinned image ran; unpinned sibling denied
+exec-pin-swapped-denied             PASS   same path, new inode: exec denied after the swap
+exec-unresolvable-denied            PASS   unresolvable exec refused
+file-unresolvable-denied            PASS   unresolvable open refused
+search-in-scope                     PASS   matched allowed file, denied file invisible to the library search
+priv-drop                           PASS   NoNewPrivs=1 CapBnd=0x6 (DAC only, CAP_SYS_ADMIN gone)
+cgroup-migrate-enforced             PASS   migrated to child cgroup, read still denied
+teardown-kills-descendants          PASS   descendant reaped at teardown
+observe-mode                        PASS   allowed + 1 observed events
+atten-reject                        PASS   over-broad subagent refused (rc=64)
+atten-subset-allow                  PASS   child-kept dest connects (http=301)
+atten-subset-deny                   PASS   parent-allowed but child-dropped dest blocked
+scope-isolation                     PASS   host egress unaffected
+episode-file-deny                   PASS   kernel EACCES surfaced in transcript; episode completed
+episode-allow                       PASS   in-scope write succeeded, no denials
+skill-grant-allow                   PASS   within-ceiling grant compiled into scope; write to skgrant allowed
+skill-grant-deny                    PASS   beyond-ceiling grant refused; write to skgrant kernel-denied (EACCES)
+reload-widen-allow                  PASS   denial → escalate → live reload → retry wrote data
+reload-beyond-ceiling               PASS   beyond-ceiling escalation refused; write stayed kernel-denied
+scanner-escape-denied               PASS   granted scanner ran in-scope; its out-of-scope read was refused (control run leaked)
+concurrent-audit-isolation          PASS   4 concurrent scopes, no cgroup cross-contamination
+ALL 38 CASES PASSED

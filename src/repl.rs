@@ -104,18 +104,24 @@ pub struct ReplEscalation {
 
 impl ReplEscalation {
     /// Build session state from an escalation config, starting the active policy at its `base`.
-    pub fn new(config: crate::grants::escalate::LoopEscalation) -> Self {
-        let active = crate::grants::ActivePolicy::new(config.base.clone(), config.ceiling.clone());
-        ReplEscalation {
+    pub fn new(config: crate::grants::escalate::LoopEscalation) -> Result<Self, String> {
+        let active = crate::grants::ActivePolicy::new(config.base.clone(), config.ceiling.clone())?;
+        Ok(ReplEscalation {
             config,
             active: tokio::sync::Mutex::new(active),
             turn: std::sync::atomic::AtomicU32::new(0),
-        }
+        })
     }
 
     /// The current session turn, incrementing it for the next caller.
-    fn next_turn(&self) -> u32 {
-        self.turn.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    fn next_turn(&self) -> Result<u32, String> {
+        self.turn
+            .fetch_update(
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+                |n| n.checked_add(1),
+            )
+            .map_err(|_| "session turn counter exhausted".into())
     }
 }
 
@@ -224,6 +230,7 @@ pub enum ExchangeOutcome {
     BudgetExhausted,
     /// A provider error (after retries) ended the exchange.
     ApiError(String),
+    Terminated(String),
 }
 
 /// The result of running one user→agent exchange (used by [`run_repl`] and by tests).
@@ -456,6 +463,9 @@ fn report_escalation(
         EscalateOutcome::Refused(reason) => {
             output.info(&format!("capability refused for {subject} — {reason}"))
         }
+        EscalateOutcome::Denied(reason) | EscalateOutcome::Terminated(reason) => {
+            output.error(reason)
+        }
         EscalateOutcome::AlreadyHeld => {}
     }
 }
@@ -490,7 +500,58 @@ pub async fn run_exchange(
     let mut denials = 0u32;
     let mut usage_total: Option<Usage> = None;
 
+    macro_rules! stop_exchange {
+        ($detail:expr) => {{
+            let detail = $detail;
+            output.error(&detail);
+            return ExchangeResult {
+                outcome: ExchangeOutcome::Terminated(detail),
+                model_calls,
+                tool_calls,
+                denials,
+                turns,
+                audit: audit_all,
+                usage: usage_total,
+            };
+        }};
+    }
     for _step in 0..config.agent_turn_budget {
+        if let Err(detail) = sandbox.check_cleanup() {
+            stop_exchange!(detail);
+        }
+        let turn_no = match config
+            .escalation
+            .as_ref()
+            .map(|e| e.next_turn())
+            .transpose()
+        {
+            Ok(turn) => turn,
+            Err(detail) => {
+                stop_exchange!(detail);
+            }
+        };
+        if let (Some(esc), Some(turn_no)) = (config.escalation.as_ref(), turn_no) {
+            let mut active = esc.active.lock().await;
+            if turn_no == 0 {
+                if let Err(detail) = esc.config.initialize(&active, sandbox) {
+                    stop_exchange!(detail);
+                }
+            }
+
+            if let Some(crate::grants::escalate::EscalateOutcome::Terminated(detail)) =
+                crate::grants::escalate::turn_start(
+                    &esc.config,
+                    &mut active,
+                    turn_no,
+                    sandbox,
+                    registry,
+                )
+                .await
+            {
+                stop_exchange!(detail);
+            }
+        }
+
         // Fold in any steering the user typed since the last model call — the agent catches it now.
         drain_steering(steering, conversation, output);
 
@@ -499,6 +560,25 @@ pub async fn run_exchange(
             refresh(&mut *registry);
         }
         let schemas = registry.schemas();
+        if let (Some(esc), Some(turn_no)) = (config.escalation.as_ref(), turn_no) {
+            let mut active = esc.active.lock().await;
+            if let Some(crate::grants::escalate::EscalateOutcome::Terminated(detail)) =
+                crate::grants::escalate::event_step(
+                    &esc.config,
+                    &mut active,
+                    crate::hooks::StepEvent::BeforeModelCall {
+                        convo: conversation,
+                        schemas: &schemas,
+                    },
+                    turn_no,
+                    sandbox,
+                    registry,
+                )
+                .await
+            {
+                stop_exchange!(detail);
+            }
+        }
 
         let turn_start = Instant::now();
         // Show a "working" indicator from the instant the call is dispatched — this covers the
@@ -615,7 +695,7 @@ pub async fn run_exchange(
             // Proactive escalation (007, US2): a hook may request a grant before this call runs —
             // a loaded skill's `requires`, above all. In an interactive session the consent sink is
             // a prompt, which is why the cycle only ever asks for what is not already held.
-            let turn_no = config.escalation.as_ref().map(|e| e.next_turn());
+            let mut refusal = None;
             if let (Some(esc), Some(turn_no)) = (config.escalation.as_ref(), turn_no) {
                 let mut active = esc.active.lock().await;
                 if let Some(out) = crate::grants::escalate::proactive_step(
@@ -629,26 +709,47 @@ pub async fn run_exchange(
                 .await
                 {
                     report_escalation(output, "capability", &out);
+                    match out {
+                        crate::grants::escalate::EscalateOutcome::Denied(reason) => {
+                            refusal = Some(ToolResult::error(reason))
+                        }
+                        crate::grants::escalate::EscalateOutcome::Terminated(reason) => {
+                            turns.push(TranscriptTurn {
+                                index: turns.len() as u32,
+                                assistant_text,
+                                calls: recorded,
+                                duration_ms: turn_start.elapsed().as_millis() as u64,
+                            });
+                            stop_exchange!(reason);
+                        }
+                        _ => (),
+                    }
                 }
             }
 
-            let mut result = match tokio::time::timeout(
-                Duration::from_secs(config.tool_timeout_secs),
-                registry.execute(tc, sandbox),
-            )
-            .await
-            {
-                Ok(r) => r,
-                Err(_) => ToolResult::error(format!(
-                    "tool timed out after {}s",
-                    config.tool_timeout_secs
-                )),
+            let mut result = if let Some(refusal) = refusal {
+                refusal
+            } else {
+                match tokio::time::timeout(
+                    Duration::from_secs(config.tool_timeout_secs),
+                    registry.execute(tc, sandbox),
+                )
+                .await
+                {
+                    Ok(r) => r,
+                    Err(_) => ToolResult::error(format!(
+                        "tool timed out after {}s",
+                        config.tool_timeout_secs
+                    )),
+                }
             };
 
             // Correlate the kernel audit events this call produced (FR-008). `settle` lets the async
             // demux path deliver this call's events; it is a no-op for the sync sandboxes.
             sandbox.settle().await;
             let mut audit = sandbox.drain_audit();
+            sandbox.retain_audit(&mut audit);
+            audit_all.extend(audit.iter().cloned());
 
             // Reactive escalation (007, US1): a kernel denial may be escalated and the call retried
             // exactly once under the widened scope, so the user sees one result rather than a
@@ -669,23 +770,75 @@ pub async fn run_exchange(
                     .await
                     {
                         report_escalation(output, &format!("{op} {target}"), &out);
+                        match &out {
+                            crate::grants::escalate::EscalateOutcome::Denied(reason) => {
+                                result = ToolResult::error(reason.clone())
+                            }
+                            crate::grants::escalate::EscalateOutcome::Terminated(reason) => {
+                                let detail = reason.clone();
+                                recorded.push(RecordedCall {
+                                    call: tc.clone(),
+                                    result,
+                                    audit,
+                                });
+                                turns.push(TranscriptTurn {
+                                    index: turns.len() as u32,
+                                    assistant_text,
+                                    calls: recorded,
+                                    duration_ms: turn_start.elapsed().as_millis() as u64,
+                                });
+                                stop_exchange!(detail);
+                            }
+                            _ => (),
+                        }
                         if out.is_granted() {
-                            if let Ok(r) = tokio::time::timeout(
+                            result = tokio::time::timeout(
                                 Duration::from_secs(config.tool_timeout_secs),
                                 registry.execute(tc, sandbox),
                             )
                             .await
-                            {
-                                sandbox.settle().await;
-                                let retry_audit = sandbox.drain_audit();
-                                result = r;
-                                audit = retry_audit;
-                            }
+                            .unwrap_or_else(|_| ToolResult::error("tool retry timed out"));
+                            sandbox.settle().await;
+                            let mut retry_audit = sandbox.drain_audit();
+                            sandbox.retain_audit(&mut retry_audit);
+                            audit_all.extend(retry_audit.iter().cloned());
+                            audit = retry_audit;
                         }
                     }
                 }
             }
 
+            if let (Some(esc), Some(turn_no)) = (config.escalation.as_ref(), turn_no) {
+                let mut active = esc.active.lock().await;
+                if let Some(crate::grants::escalate::EscalateOutcome::Terminated(detail)) =
+                    crate::grants::escalate::event_step(
+                        &esc.config,
+                        &mut active,
+                        crate::hooks::StepEvent::AfterToolResult {
+                            call: tc,
+                            result: &result,
+                            audit: &audit,
+                        },
+                        turn_no,
+                        sandbox,
+                        registry,
+                    )
+                    .await
+                {
+                    recorded.push(RecordedCall {
+                        call: tc.clone(),
+                        result,
+                        audit,
+                    });
+                    turns.push(TranscriptTurn {
+                        index: turns.len() as u32,
+                        assistant_text,
+                        calls: recorded,
+                        duration_ms: turn_start.elapsed().as_millis() as u64,
+                    });
+                    stop_exchange!(detail);
+                }
+            }
             denials += audit.iter().filter(|e| e.decision == "denied").count() as u32;
             output.tool_result(&result, &audit);
             // If the tool produced a visualization (the `render` tool), surface it — routed by its
@@ -716,7 +869,9 @@ pub async fn run_exchange(
                 content: result.content.clone(),
                 is_error: result.is_error,
             });
-            audit_all.extend(audit.iter().cloned());
+            if let Some(warning) = sandbox.audit_warning() {
+                output.error(&warning);
+            }
             recorded.push(RecordedCall {
                 call: tc.clone(),
                 result,
@@ -816,6 +971,7 @@ fn build_transcript(
     start: Instant,
     turns: &[TranscriptTurn],
     audit_trail: &[AuditEvent],
+    audit_health: crate::transcript::AuditHealth,
     usage: Option<Usage>,
 ) -> EpisodeTranscript {
     EpisodeTranscript {
@@ -824,6 +980,7 @@ fn build_transcript(
         status: EpisodeStatus::Completed,
         turns: turns.to_vec(),
         audit_trail: audit_trail.to_vec(),
+        audit_health,
         timing: Timing {
             started_at: rfc3339(started_at),
             ended_at: rfc3339(OffsetDateTime::now_utc()),
@@ -1013,6 +1170,7 @@ pub async fn run_repl(
                 start,
                 &turns,
                 &audit_trail,
+                sandbox.audit_health(),
                 usage_total,
             );
             return ReplSession {
@@ -1038,6 +1196,7 @@ pub async fn run_repl(
                 start,
                 &turns,
                 &audit_trail,
+                sandbox.audit_health(),
                 usage_total,
             );
             return ReplSession {
@@ -1180,6 +1339,7 @@ pub async fn run_repl(
                         start,
                         &turns,
                         &audit_trail,
+                        sandbox.audit_health(),
                         usage_total,
                     );
                     match std::fs::write(&path, transcript.to_json()) {
@@ -1283,6 +1443,7 @@ pub async fn run_repl(
         start,
         &turns,
         &audit_trail,
+        sandbox.audit_health(),
         usage_total,
     );
     ReplSession {

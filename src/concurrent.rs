@@ -212,7 +212,8 @@ pub async fn run_concurrent(
             };
             let mut t = run_loop(model.as_ref(), &scenario, &mut registry, &mut sb, &opts).await;
             if let Err(e) = sb.teardown() {
-                eprintln!("bee: WARNING: {e} — a process may have outlived enforcement");
+                eprintln!("bee: scope cleanup failed: {e}");
+                t.status = EpisodeStatus::InfraError { detail: e };
             }
             if scenario.mode == ScoringMode::Ctf {
                 t.score = Some(ScoreReport::from_transcript(&t));
@@ -280,6 +281,7 @@ mod tests {
             mcp: Default::default(),
             skills: Vec::new(),
             ceiling_policy_path: None,
+            security: Default::default(),
         }
     }
 

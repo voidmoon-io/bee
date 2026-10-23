@@ -45,15 +45,17 @@ impl AsyncAuditStream {
         })
     }
 
-    /// Wait until the ring has data, then drain and return all currently-available events. A
+    /// Wait until the ring has data, then return a bounded batch of events. A
     /// spurious readiness wake (no records yet) loops rather than returning an empty batch.
     pub async fn next_batch(&mut self) -> io::Result<Vec<AuditEvent>> {
         loop {
             let mut guard = self.async_fd.readable().await?;
             // `self.rb` and `self.scope_id` are disjoint from `self.async_fd`, so draining here does
             // not conflict with the readiness guard borrowing `async_fd`.
-            let events = drain_into(&mut self.rb, &self.scope_id);
-            guard.clear_ready();
+            let (events, exhausted) = drain_into(&mut self.rb, &self.scope_id);
+            if exhausted {
+                guard.clear_ready();
+            }
             if !events.is_empty() {
                 return Ok(events);
             }
@@ -66,11 +68,14 @@ impl AsyncAuditStream {
     }
 }
 
-/// Drain all currently-available records from `rb` into a `Vec` (non-blocking). Same record decode
+/// Drain at most 256 records from `rb` into a `Vec` (non-blocking). Same record decode
 /// as [`crate::events::AuditReader::drain`], collected instead of dispatched via a sink.
-fn drain_into(rb: &mut RingBuf<MapData>, scope_id: &str) -> Vec<AuditEvent> {
+fn drain_into(rb: &mut RingBuf<MapData>, scope_id: &str) -> (Vec<AuditEvent>, bool) {
     let mut out = Vec::new();
-    while let Some(item) = rb.next() {
+    for _ in 0..256 {
+        let Some(item) = rb.next() else {
+            return (out, true);
+        };
         if item.len() >= core::mem::size_of::<AuditRecord>() {
             // SAFETY: the ring holds a full AuditRecord written by the eBPF side.
             let rec = unsafe { core::ptr::read_unaligned(item.as_ptr() as *const AuditRecord) };
@@ -81,5 +86,5 @@ fn drain_into(rb: &mut RingBuf<MapData>, scope_id: &str) -> Vec<AuditEvent> {
             ));
         }
     }
-    out
+    (out, false)
 }

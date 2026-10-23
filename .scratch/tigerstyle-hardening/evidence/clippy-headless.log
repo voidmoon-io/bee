@@ -1,0 +1,42 @@
+    Checking mio v1.2.2
+    Checking tracing-core v0.1.36
+    Checking rustix v1.1.4
+    Checking either v1.16.0
+    Checking crossbeam-utils v0.8.22
+    Checking kasuari v0.4.12
+    Checking strum v0.28.0
+    Checking compact_str v0.9.1
+    Checking time v0.3.53
+    Checking itertools v0.14.0
+    Checking rhai v1.25.1
+    Checking tokio v1.53.0
+    Checking crossbeam-epoch v0.9.20
+    Checking tracing v0.1.44
+    Checking tracing-futures v0.2.5
+    Checking crossbeam-deque v0.8.7
+    Checking ignore v0.4.31
+    Checking ripgrep-api v0.2.0
+    Checking unicode-truncate v2.0.1
+    Checking ratatui-core v0.1.2
+    Checking fd-lock v4.0.4
+    Checking tempfile v3.27.0
+    Checking bee-core v0.1.0 (/home/jg/git/bee/crates/core)
+    Checking rustyline v17.0.2
+    Checking rusty-fork v0.3.1
+    Checking insta v1.48.0
+    Checking proptest v1.11.0
+    Checking bee-userspace v0.1.0 (/home/jg/git/bee/crates/userspace)
+    Checking ratatui-widgets v0.3.2
+    Checking ratatui v0.30.2
+    Checking tokio-util v0.7.18
+    Checking tokio-rustls v0.26.4
+    Checking tower v0.5.3
+    Checking tower-http v0.6.11
+    Checking h2 v0.4.15
+    Checking hyper v1.10.1
+    Checking hyper-util v0.1.20
+    Checking hyper-rustls v0.27.9
+    Checking reqwest v0.13.4
+    Checking rig-core v0.40.0
+    Checking bee v0.1.0 (/home/jg/git/bee)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 35.88s

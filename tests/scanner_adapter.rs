@@ -81,6 +81,7 @@ fn policy_granting(path: &Path) -> bee_core::Policy {
             allow: vec![format!("!{}", path.display())],
         },
         network: Default::default(),
+        defaults: Default::default(),
         exfiltration: Default::default(),
     }
 }

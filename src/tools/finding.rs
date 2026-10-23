@@ -69,12 +69,77 @@ struct RecordArgs {
 }
 
 /// `{ path, class, title, evidence, line?, rule_id?, severity_vector? }` → a finding id.
+#[derive(Clone)]
 pub struct RecordFinding {
     ledger: Ledger,
     run_id: String,
 }
 
 impl RecordFinding {
+    fn run(&self, arguments: serde_json::Value) -> ToolResult {
+        let args: RecordArgs = match serde_json::from_value(arguments) {
+            Ok(a) => a,
+            Err(e) => return ToolResult::invalid_args("record_finding", e),
+        };
+
+        // FR-005, stated at the surface: refuse an asserted score rather than dropping it. A caller
+        // whose number was silently discarded would go on believing the ledger holds it.
+        if args.severity_score.is_some() {
+            return failed(
+                "record_finding",
+                "a severity score may not be supplied: state `severity_vector` instead and the \
+                 score is computed from it",
+            );
+        }
+
+        let mut finding = Finding::new(
+            args.path,
+            args.class,
+            args.title,
+            args.evidence,
+            FindingSource::Tool("model".to_string()),
+        );
+        finding.reidentify();
+
+        let sighting = Sighting {
+            run_id: self.run_id.clone(),
+            at: OffsetDateTime::now_utc(),
+            line: args.line,
+            end_line: args.end_line,
+            rule_id: args.rule_id,
+        };
+
+        let id = match record(&self.ledger, finding, sighting) {
+            Ok(id) => id,
+            Err(e) => return failed("record_finding", e),
+        };
+
+        let mut body = format!("recorded finding {id}");
+        if let Some(vector) = args.severity_vector {
+            body.push_str(&score_and_attach(&self.ledger, &id, &vector));
+        }
+        // Report the merge, because it is the thing the model cannot otherwise see: a second
+        // sighting means an earlier run — or an earlier turn — already knew about this.
+        if let Ok(view) = fold(&self.ledger) {
+            if let Some(f) = view.get(&id) {
+                if f.sightings.len() > 1 {
+                    body.push_str(&format!(
+                        "\nalready known: {} sightings, first seen in run {}",
+                        f.sightings.len(),
+                        f.sightings[0].run_id
+                    ));
+                }
+                if let Some(v) = &f.verdict {
+                    body.push_str(&format!(
+                        "\na human already adjudicated this: {} (by {})",
+                        v.state, v.by
+                    ));
+                }
+            }
+        }
+        ToolOutcome::completed(body).into_tool_result(|b| b)
+    }
+
     pub fn new(ledger: Ledger, run_id: impl Into<String>) -> Self {
         RecordFinding {
             ledger,
@@ -140,67 +205,11 @@ impl Tool for RecordFinding {
     }
 
     async fn call(&self, arguments: serde_json::Value, _sandbox: &Sandbox) -> ToolResult {
-        let args: RecordArgs = match serde_json::from_value(arguments) {
-            Ok(a) => a,
-            Err(e) => return ToolResult::invalid_args("record_finding", e),
-        };
-
-        // FR-005, stated at the surface: refuse an asserted score rather than dropping it. A caller
-        // whose number was silently discarded would go on believing the ledger holds it.
-        if args.severity_score.is_some() {
-            return failed(
-                "record_finding",
-                "a severity score may not be supplied: state `severity_vector` instead and the \
-                 score is computed from it",
-            );
+        let owned = self.clone();
+        match crate::findings::run_ledger_work(move || owned.run(arguments)).await {
+            Ok(result) => result,
+            Err(error) => failed("record_finding", error),
         }
-
-        let mut finding = Finding::new(
-            args.path,
-            args.class,
-            args.title,
-            args.evidence,
-            FindingSource::Tool("model".to_string()),
-        );
-        finding.reidentify();
-
-        let sighting = Sighting {
-            run_id: self.run_id.clone(),
-            at: OffsetDateTime::now_utc(),
-            line: args.line,
-            end_line: args.end_line,
-            rule_id: args.rule_id,
-        };
-
-        let id = match record(&self.ledger, finding, sighting) {
-            Ok(id) => id,
-            Err(e) => return failed("record_finding", e),
-        };
-
-        let mut body = format!("recorded finding {id}");
-        if let Some(vector) = args.severity_vector {
-            body.push_str(&score_and_attach(&self.ledger, &id, &vector));
-        }
-        // Report the merge, because it is the thing the model cannot otherwise see: a second
-        // sighting means an earlier run — or an earlier turn — already knew about this.
-        if let Ok(view) = fold(&self.ledger) {
-            if let Some(f) = view.get(&id) {
-                if f.sightings.len() > 1 {
-                    body.push_str(&format!(
-                        "\nalready known: {} sightings, first seen in run {}",
-                        f.sightings.len(),
-                        f.sightings[0].run_id
-                    ));
-                }
-                if let Some(v) = &f.verdict {
-                    body.push_str(&format!(
-                        "\na human already adjudicated this: {} (by {})",
-                        v.state, v.by
-                    ));
-                }
-            }
-        }
-        ToolOutcome::completed(body).into_tool_result(|b| b)
     }
 }
 
@@ -252,11 +261,49 @@ struct ListArgs {
 }
 
 /// `{ class?, verdict?, path?, limit? }` → the folded ledger, filtered and bounded.
+#[derive(Clone)]
 pub struct ListFindings {
     ledger: Ledger,
 }
 
 impl ListFindings {
+    fn run(&self, arguments: serde_json::Value) -> ToolResult {
+        let args: ListArgs = match serde_json::from_value(arguments) {
+            Ok(a) => a,
+            Err(e) => return ToolResult::invalid_args("list_findings", e),
+        };
+
+        let view = match fold(&self.ledger) {
+            Ok(v) => v,
+            Err(e) => return failed("list_findings", e),
+        };
+
+        let limit = args.limit.unwrap_or(LIST_LIMIT).min(LIST_LIMIT);
+        let matched: Vec<&Finding> = view
+            .findings
+            .iter()
+            .filter(|f| args.class.as_ref().is_none_or(|c| &f.class == c))
+            .filter(|f| {
+                args.path
+                    .as_ref()
+                    .is_none_or(|p| f.path.starts_with(p.as_str()))
+            })
+            .filter(|f| match args.verdict.as_deref() {
+                None => true,
+                Some("none") => f.verdict.is_none(),
+                Some(want) => f
+                    .verdict
+                    .as_ref()
+                    .is_some_and(|v| v.state.to_string() == want),
+            })
+            .collect();
+
+        let truncated = matched.len() > limit;
+        let shown: Vec<&Finding> = matched.into_iter().take(limit).collect();
+        let body = render_list(&shown, &view);
+        ToolOutcome::completed_truncated(body, truncated).into_tool_result(|b| b)
+    }
+
     pub fn new(ledger: Ledger) -> Self {
         ListFindings { ledger }
     }
@@ -299,40 +346,11 @@ impl Tool for ListFindings {
     }
 
     async fn call(&self, arguments: serde_json::Value, _sandbox: &Sandbox) -> ToolResult {
-        let args: ListArgs = match serde_json::from_value(arguments) {
-            Ok(a) => a,
-            Err(e) => return ToolResult::invalid_args("list_findings", e),
-        };
-
-        let view = match fold(&self.ledger) {
-            Ok(v) => v,
-            Err(e) => return failed("list_findings", e),
-        };
-
-        let limit = args.limit.unwrap_or(LIST_LIMIT).min(LIST_LIMIT);
-        let matched: Vec<&Finding> = view
-            .findings
-            .iter()
-            .filter(|f| args.class.as_ref().is_none_or(|c| &f.class == c))
-            .filter(|f| {
-                args.path
-                    .as_ref()
-                    .is_none_or(|p| f.path.starts_with(p.as_str()))
-            })
-            .filter(|f| match args.verdict.as_deref() {
-                None => true,
-                Some("none") => f.verdict.is_none(),
-                Some(want) => f
-                    .verdict
-                    .as_ref()
-                    .is_some_and(|v| v.state.to_string() == want),
-            })
-            .collect();
-
-        let truncated = matched.len() > limit;
-        let shown: Vec<&Finding> = matched.into_iter().take(limit).collect();
-        let body = render_list(&shown, &view);
-        ToolOutcome::completed_truncated(body, truncated).into_tool_result(|b| b)
+        let owned = self.clone();
+        match crate::findings::run_ledger_work(move || owned.run(arguments)).await {
+            Ok(result) => result,
+            Err(error) => failed("list_findings", error),
+        }
     }
 }
 

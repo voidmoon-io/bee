@@ -376,26 +376,28 @@ fn render_chat(app: &mut App, frame: &mut Frame<'_>, area: Rect) {
         msg.rendered_markdown(width);
     }
     let items = chat_items(app, width);
-    let total: u16 = items.iter().map(|i| i.height()).sum();
-    let height = area.height;
+    let total: usize = items.iter().map(|i| usize::from(i.height())).sum();
+    let height = usize::from(area.height);
 
     // Bottom-anchored virtualized scroll: `scroll` counts rows up from the newest. Heights here are
     // the *rendered* heights, so the newest content always lands flush against the bottom edge.
     let max_offset = total.saturating_sub(height);
-    let scroll_up = app.scroll.min(max_offset as usize) as u16;
+    let scroll_up = app.scroll.min(max_offset);
     let top = max_offset.saturating_sub(scroll_up);
     let bottom = top.saturating_add(height);
 
-    let mut y = 0u16; // absolute row index within the whole flow
+    let mut y = 0usize; // absolute row index within the whole flow
     let mut pending_effects: Vec<(EffectSpec, Rect)> = Vec::new();
     for item in &items {
-        let h = item.height();
+        let h = usize::from(item.height());
         let end = y.saturating_add(h);
         // Skip anything entirely above or below the visible window.
         if end > top && y < bottom {
             let skip = top.saturating_sub(y); // rows of this item hidden above the fold
-            let draw_y = area.y + y.saturating_sub(top);
-            let avail = (bottom.min(end) - top.max(y)).min(area.bottom().saturating_sub(draw_y));
+            let draw_y = area.y + y.saturating_sub(top) as u16;
+            let avail = (bottom.min(end) - top.max(y))
+                .min(usize::from(area.bottom().saturating_sub(draw_y)))
+                as u16;
             match item {
                 Item::Line(l) => {
                     if avail > 0 {
@@ -415,7 +417,16 @@ fn render_chat(app: &mut App, frame: &mut Frame<'_>, area: Rect) {
                 }
                 Item::Widget(spec, wh, effect) => {
                     let widget_rect = Rect::new(area.x, draw_y, width.min(area.width), avail);
-                    blit_widget(frame, spec, *wh, width, area, draw_y, skip, avail);
+                    blit_widget(
+                        frame,
+                        spec,
+                        *wh,
+                        width,
+                        area,
+                        draw_y,
+                        skip.min(u16::MAX as usize) as u16,
+                        avail,
+                    );
                     if let Some(fx) = effect {
                         pending_effects.push(((*fx).clone(), widget_rect));
                     }
@@ -440,9 +451,9 @@ fn render_chat(app: &mut App, frame: &mut Frame<'_>, area: Rect) {
     // Where the reader is in the flow. Drawn only when the conversation is taller than the pane —
     // a fully-visible conversation has no scroll position worth reporting.
     if let (Some(gutter), true) = (gutter, total > height) {
-        let mut state = ScrollbarState::new(total as usize)
-            .position(top as usize)
-            .viewport_content_length(height as usize);
+        let mut state = ScrollbarState::new(total)
+            .position(top)
+            .viewport_content_length(height);
         frame.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .style(dim_style())

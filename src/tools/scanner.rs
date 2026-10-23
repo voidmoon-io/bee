@@ -40,7 +40,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::findings::{record, Ledger, Sighting};
+use crate::findings::{record_batch_async, Ledger, Sighting};
 use crate::provider::ToolSchema;
 use crate::sandbox::Sandbox;
 use crate::sarif::{ScanFinding, MAX_FINDINGS_PER_SCAN};
@@ -268,6 +268,9 @@ impl Tool for ScanTool {
                         budget.as_secs()
                     ));
                 }
+                Err(ChildError::OutputTooLarge) => {
+                    return failed("subprocess protocol output exceeds byte limit")
+                }
                 Err(ChildError::Spawn(e)) => {
                     cleanup();
                     return failed(e);
@@ -308,6 +311,9 @@ impl Tool for ScanTool {
                         args.scanner,
                         budget.as_secs()
                     ));
+                }
+                Err(ChildError::OutputTooLarge) => {
+                    return failed("subprocess protocol output exceeds byte limit")
                 }
                 Err(ChildError::Spawn(e)) => {
                     cleanup();
@@ -376,6 +382,9 @@ impl Tool for ScanTool {
                         d.as_secs()
                     ))
                 }
+                Err(ChildError::OutputTooLarge) => {
+                    return failed("subprocess protocol output exceeds byte limit")
+                }
                 Err(ChildError::Spawn(e)) => return failed(e),
             };
         // The report has served its purpose; leaving it around would accumulate scan artefacts in
@@ -405,23 +414,31 @@ impl Tool for ScanTool {
         }
 
         // ── 8. Merge into the ledger ────────────────────────────────────────────────────────────
-        let mut recorded = 0usize;
-        let mut rejected = Vec::new();
-        for f in &findings {
-            let finding = f.to_finding(&args.scanner);
-            let sighting = Sighting {
-                run_id: self.run_id.clone(),
-                at: time::OffsetDateTime::now_utc(),
-                line: f.line,
-                end_line: f.end_line,
-                rule_id: f.rule_id.clone(),
-            };
-            match record(&self.ledger, finding, sighting) {
-                Ok(_) => recorded += 1,
-                // One malformed finding does not sink the scan — but it is never silent either.
-                Err(e) => rejected.push(e.to_string()),
-            }
-        }
+        let records = findings
+            .iter()
+            .map(|f| {
+                (
+                    f.to_finding(&args.scanner),
+                    Sighting {
+                        run_id: self.run_id.clone(),
+                        at: time::OffsetDateTime::now_utc(),
+                        line: f.line,
+                        end_line: f.end_line,
+                        rule_id: f.rule_id.clone(),
+                    },
+                )
+            })
+            .collect();
+        let results = match record_batch_async(self.ledger.clone(), records).await {
+            Ok(results) => results,
+            Err(error) => return failed(error),
+        };
+        let recorded = results.iter().filter(|r| r.is_ok()).count();
+        let rejected: Vec<_> = results
+            .into_iter()
+            .filter_map(Result::err)
+            .map(|e| e.to_string())
+            .collect();
 
         let body = render(&args.scanner, &findings, recorded, &rejected);
         ToolOutcome::completed_truncated(body, outcome.truncated).into_tool_result(|b| b)

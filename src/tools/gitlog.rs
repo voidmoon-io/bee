@@ -130,6 +130,9 @@ impl Tool for GitLogTool {
                     d.as_secs()
                 ))
             }
+            Err(ChildError::OutputTooLarge) => {
+                return failed("subprocess protocol output exceeds byte limit".into())
+            }
             Err(ChildError::Spawn(e)) => return failed(e),
         };
 

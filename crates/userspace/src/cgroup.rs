@@ -47,39 +47,23 @@ pub fn create_scope_cgroup(parent: &str, scope_id: &str) -> io::Result<PathBuf> 
 /// as the engine holds the LSM programs attached. Tearing the scope down without killing it first
 /// hands the survivor an *unenforced* process, which is a sandbox escape rather than a leak.
 ///
-/// Prefers `cgroup.kill` (cgroup v2, kernel ≥5.14), which kills the whole subtree atomically and
-/// cannot be raced by a fork. Falls back to signalling each pid in `cgroup.procs` on older kernels,
-/// re-reading until the file is empty so a process that forks while being killed is still caught.
+/// Requires subtree-wide `cgroup.kill` and confirms emptiness before enforcement can detach.
 pub fn kill_scope_cgroup(cgroup: &Path) -> io::Result<()> {
-    if std::fs::write(cgroup.join("cgroup.kill"), "1").is_ok() {
-        return Ok(());
-    }
-
-    // Fallback: SIGKILL every pid, repeatedly. Bounded so a process stuck unkillable in D-state
-    // cannot spin here forever — the caller reports a non-empty cgroup as a teardown failure.
-    for _ in 0..16 {
-        let procs = std::fs::read_to_string(cgroup.join("cgroup.procs"))?;
-        let pids: Vec<i32> = procs
-            .lines()
-            .filter_map(|l| l.trim().parse().ok())
-            .collect();
-        if pids.is_empty() {
+    std::fs::write(cgroup.join("cgroup.kill"), "1")?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    loop {
+        let events = std::fs::read_to_string(cgroup.join("cgroup.events"))?;
+        if events.lines().any(|line| line == "populated 0") {
             return Ok(());
         }
-        for pid in pids {
-            // SAFETY: `kill` with a positive pid targets one process; a dead pid yields ESRCH,
-            // which we ignore deliberately — it means the process is already gone.
-            unsafe { libc::kill(pid, libc::SIGKILL) };
+        if std::time::Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("processes remain in {} after SIGKILL", cgroup.display()),
+            ));
         }
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::thread::sleep(std::time::Duration::from_millis(2));
     }
-    Err(io::Error::new(
-        io::ErrorKind::TimedOut,
-        format!(
-            "processes still running in {} after repeated SIGKILL",
-            cgroup.display()
-        ),
-    ))
 }
 
 /// Remove a scope cgroup directory (must be empty of processes).

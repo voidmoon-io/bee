@@ -11,6 +11,9 @@ pattern in `agentcontainers/test/vm/`.
 |------|------|
 | `matrix.sh` | **Host-side orchestrator**: builds `bee --features enforce`, ships it + the runner into the VM over the `virtctl` tunnel, runs the matrix as root, and gates on the results. |
 | `remote-matrix.sh` | **VM-side runner**: exercises the enforcement matrix against the real kernel and emits `RESULT\|<case>\|<PASS\|FAIL>\|<note>` lines. Exits non-zero on any failure. |
+| `cases.txt` | Shared manifest of the required case names, shipped with the runner. |
+| `validate_results.py` | Validates guest exit status, complete unique results, and one consistent summary. Missing, duplicate, skipped, or failed cases fail the gate. |
+| `test_results.py` | Local parser fixtures, including malformed output and transport failure. |
 
 The build happens on the host because host and guest are both Ubuntu noble (glibc 2.39) and the host
 has the nightly bpf toolchain (nightly + `rust-src` + `bpf-linker`) the VM lacks.
@@ -32,6 +35,26 @@ BEE_SKIP_BUILD=1 ./matrix.sh   # reuse target/release/bee
 
 Override target via env: `NS`, `VM`, `KEY`.
 
+Run parser tests without a VM:
+
+```bash
+python3 -m unittest discover -s test/vm -p 'test_*.py'
+```
+
+The additional hardening regressions in `tests/hardening.rs` need a BPF-LSM kernel and root. Build
+the test executable on the host, copy the executable printed by Cargo into the VM, and run it there:
+
+```bash
+cargo test --features concurrent,mcp,sec,astgrep-rust --test hardening --no-run --locked
+# In the VM, after copying that executable to /home/ubuntu/bee-hardening-test:
+sudo /home/ubuntu/bee-hardening-test kernel:: --ignored --test-threads=1 --nocapture
+```
+
+These five tests cover attenuation's unmatched-write default, executable pin preservation, detached
+descendant cancellation with sibling/service isolation, finite policy-lease expiry, and termination
+when a live service prevents mandatory narrowing. They are explicitly ignored in ordinary host tests;
+a successful host suite is not evidence that the kernel regressions ran.
+
 ## Cases
 
 | Case | Asserts |
@@ -52,5 +75,5 @@ Override target via env: `NS`, `VM`, `KEY`.
 | `scope-isolation` | a process outside any bee scope is unaffected |
 | `episode-file-deny` / `episode-allow` | LLM agent harness (002): a scripted episode's tool call that reads a policy-denied path returns kernel `EACCES` in the transcript with a `file_open` denial and status `completed` (US1 AS-1); a permissive in-scope write succeeds with no denials (US1 AS-2) |
 
-All 35 pass on the reference VM. See the repo root `README.md` for the enforcement design and the
+The manifest contains 38 required cases. See the repo root `README.md` for the enforcement design and the
 `bpf_d_path` / offset caveats.

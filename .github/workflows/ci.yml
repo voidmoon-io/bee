@@ -2,7 +2,7 @@ name: CI
 
 # User-space crates build on STABLE (constitution Principle V / NFR-003). The eBPF `enforce` path
 # needs nightly + bpf-linker + a BPF-LSM kernel, so it can't run on stock runners — it gets a
-# separate, non-blocking type-check job (see `enforce-check`).
+# separate required type-check job (see `enforce-check`).
 
 on:
   push:
@@ -52,7 +52,9 @@ jobs:
       - name: clippy (default features)
         run: cargo clippy --workspace --locked --all-targets -- -D warnings
       - name: clippy (mcp feature)
-        run: cargo clippy --features mcp --locked --all-targets -- -D warnings
+        run: cargo clippy --features mcp,sec,astgrep-rust --locked --all-targets -- -D warnings
+      - name: clippy (headless)
+        run: cargo clippy --no-default-features --locked --all-targets -- -D warnings
 
   test:
     name: build & test
@@ -69,16 +71,16 @@ jobs:
         # No ANTHROPIC_API_KEY is set, so the live-provider smoke test self-skips (it only runs when
         # the key is present). Everything else is offline (MockModel + host sandbox).
         run: cargo test --workspace --locked
-      - name: test (mcp feature)
-        run: cargo test --features mcp --locked
+      - name: test (headless)
+        run: cargo test --no-default-features --locked
+      - name: test (MCP and security tools)
+        run: cargo test --features mcp,sec,astgrep-rust --locked
+      - name: VM result parser fixtures
+        run: python3 -m unittest discover -s test/vm -p 'test_*.py'
 
   enforce-check:
-    name: enforce type-check (best-effort)
+    name: enforce and concurrency type-check
     runs-on: ubuntu-latest
-    # Non-blocking: the nightly ↔ bpf-linker ↔ LLVM version triad is a known break risk (see
-    # rust-toolchain.toml). This job type-checks the eBPF `enforce` path so it can't rot silently,
-    # but a red result here does not fail the overall run.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Install stable toolchain (outer build)
@@ -110,4 +112,6 @@ jobs:
       - name: cargo check --features enforce
         # Runs crates/userspace/build.rs, which compiles + embeds the bee-lsm object, then
         # type-checks the enforce user-space path in the application package.
-        run: cargo check --features enforce --locked
+        run: |
+          cargo check --features enforce --tests --locked
+          cargo check --features concurrent,mcp,sec,astgrep-rust --tests --locked

@@ -372,7 +372,11 @@ impl Chrome {
 /// own UI (FR-006d).
 pub fn chrome(effects: &mut Effects, which: Chrome, area: Rect, visual: VisualConfig) -> bool {
     let ctx = ResolveCtx::chrome(visual, area);
-    apply(effects, None, &which.spec(), &ctx)
+    chrome_with_context(effects, which, &ctx)
+}
+
+fn chrome_with_context(effects: &mut Effects, which: Chrome, ctx: &ResolveCtx) -> bool {
+    apply(effects, None, &which.spec(), ctx)
 }
 
 /// The panel column arriving: it slides in from the right edge when the first panel is created
@@ -562,6 +566,19 @@ impl Timeline {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn chrome(effects: &mut Effects, which: Chrome, area: Rect, visual: VisualConfig) -> bool {
+        chrome_with_context(
+            effects,
+            which,
+            &ResolveCtx {
+                visual,
+                area,
+                origin: Origin::Chrome,
+                color: true,
+            },
+        )
+    }
     use crate::config::VisualConfig;
     use ratatui::style::{Modifier, Style};
 

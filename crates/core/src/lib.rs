@@ -18,4 +18,4 @@ pub use compiler::{
     CompiledExec, CompiledNet, CompiledPolicy, ExecIdentity, FsPrimitive, Resolver,
 };
 pub use error::{AttenuationError, CompileError, PolicyError};
-pub use policy::{Access, ExecPolicy, ExfilPolicy, Mode, NetPolicy, Policy};
+pub use policy::{Access, EffectiveDefaults, ExecPolicy, ExfilPolicy, Mode, NetPolicy, Policy};

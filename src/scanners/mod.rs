@@ -309,6 +309,7 @@ mod tests {
             filesystem: Default::default(),
             exec: bee_core::ExecPolicy { allow },
             network: Default::default(),
+            defaults: Default::default(),
             exfiltration: Default::default(),
         }
     }

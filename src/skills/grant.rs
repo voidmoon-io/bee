@@ -158,13 +158,16 @@ pub async fn resolve_grants(
         };
 
         // 1. Attenuation ceiling — not overridable by consent. `derive` proves candidate ⊆ ceiling.
-        if let Err(e) = ceiling.derive(candidate.clone()) {
-            refused.push((
-                skill.name.clone(),
-                format!("exceeds capability ceiling: {e}"),
-            ));
-            continue;
-        }
+        let candidate = match ceiling.derive(candidate) {
+            Ok(policy) => policy,
+            Err(e) => {
+                refused.push((
+                    skill.name.clone(),
+                    format!("exceeds capability ceiling: {e}"),
+                ));
+                continue;
+            }
+        };
 
         // 2. Human consent, only for a request that is already within the ceiling.
         let request = GrantRequest {
@@ -246,6 +249,7 @@ mod tests {
             filesystem: BTreeMap::new(),
             exec: Default::default(),
             network: Default::default(),
+            defaults: Default::default(),
             exfiltration: Default::default(),
         };
         for (path, access) in fs {

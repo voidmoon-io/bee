@@ -1,20 +1,214 @@
-//! Shared child-execution helper. Every file/process tool routes through here so they all run as
-//! hardened, credential-stripped, scope-confined children (contracts/tool-contracts.md).
-
-use std::process::Stdio;
-
-use tokio::io::AsyncWriteExt;
-use tokio::process::Command as TokioCommand;
+//! Bounded subprocess I/O with one owner for the child and its cancellation cleanup.
 
 use crate::sandbox::Sandbox;
 use crate::tools::ToolResult;
-use crate::transcript::tool_result_from_output;
+use std::io;
+use std::path::PathBuf;
+use std::process::{ExitStatus, Stdio};
+use std::time::{Duration, Instant};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::process::{Child, Command};
 
-/// Run `program args` inside `sandbox`, optionally feeding `stdin_data`, capping output at `cap`.
-///
-/// stdout (and, if non-empty, a `\n[stderr]\n…` section) becomes the result content; `is_error` is
-/// set on any non-zero exit — which is how a kernel denial (`cat: …: Permission denied`, exit 1)
-/// surfaces. A spawn refusal (e.g. a privileged target) is itself an error result, never a panic.
+const CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
+// 200 normalized findings at 4 KiB each fit comfortably. Raw reports need more space;
+// this is a protocol limit, independent of the small model-facing tool-result cap.
+#[cfg(feature = "scanners")]
+const SCANNER_OUTPUT_CAP: usize = 8 * 1024 * 1024;
+
+struct ChildOwner<'a> {
+    child: Child,
+    pgid: i32,
+    cgroup: Option<PathBuf>,
+    sandbox: &'a Sandbox,
+    signaled: bool,
+    finished: bool,
+}
+
+impl ChildOwner<'_> {
+    fn signal(&mut self) -> io::Result<()> {
+        if self.signaled {
+            return Ok(());
+        }
+        // SAFETY: process_group(0) established a dedicated group led by this child.
+        if unsafe { libc::kill(-self.pgid, libc::SIGKILL) } != 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(error);
+            }
+        }
+        if let Some(path) = &self.cgroup {
+            std::fs::write(path.join("cgroup.kill"), "1")?;
+        }
+        self.signaled = true;
+        Ok(())
+    }
+
+    fn cleanup(&mut self) -> io::Result<()> {
+        if self.finished {
+            return Ok(());
+        }
+        self.signal()?;
+        let deadline = Instant::now() + CLEANUP_TIMEOUT;
+        // Drop cannot await. Bounded synchronous cleanup retains the borrowed sandbox (and its
+        // enforcement engine) until the child has exited, including when an outer future cancels.
+        loop {
+            let reaped = self.child.try_wait()?.is_some();
+            let empty = match &self.cgroup {
+                Some(path) => std::fs::read_to_string(path.join("cgroup.events"))?
+                    .lines()
+                    .any(|line| line == "populated 0"),
+                None => true,
+            };
+            if reaped && empty {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "child cleanup could not confirm exit",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        if let Some(path) = &self.cgroup {
+            remove_cgroup_tree(path)?;
+        }
+        self.finished = true;
+        Ok(())
+    }
+}
+
+fn remove_cgroup_tree(root: &std::path::Path) -> io::Result<()> {
+    let mut paths = vec![root.to_path_buf()];
+    let mut index = 0;
+    while index < paths.len() {
+        for entry in std::fs::read_dir(&paths[index])? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                if paths.len() >= 256 {
+                    return Err(io::Error::other(
+                        "invocation cgroup tree exceeds cleanup bound",
+                    ));
+                }
+                paths.push(entry.path());
+            }
+        }
+        index += 1;
+    }
+    for path in paths.iter().rev() {
+        std::fs::remove_dir(path)?;
+    }
+    Ok(())
+}
+
+impl Drop for ChildOwner<'_> {
+    fn drop(&mut self) {
+        if let Err(error) = self.cleanup() {
+            self.sandbox.cleanup_failed(error.to_string());
+        }
+    }
+}
+
+struct Capture {
+    bytes: Vec<u8>,
+    total: usize,
+}
+
+async fn drain(
+    mut pipe: impl AsyncRead + Unpin,
+    cap: usize,
+    reject_overflow: bool,
+) -> io::Result<Capture> {
+    let mut output = Capture {
+        bytes: Vec::new(),
+        total: 0,
+    };
+    let mut chunk = [0; 8192];
+    loop {
+        let n = pipe.read(&mut chunk).await?;
+        if n == 0 {
+            return Ok(output);
+        }
+        output.total = output.total.saturating_add(n);
+        if reject_overflow && output.total > cap {
+            return Err(io::Error::new(
+                io::ErrorKind::FileTooLarge,
+                "subprocess protocol output exceeds byte limit",
+            ));
+        }
+        let keep = n.min(cap.saturating_sub(output.bytes.len()));
+        output.bytes.extend_from_slice(&chunk[..keep]);
+    }
+}
+
+async fn capture(
+    sandbox: &Sandbox,
+    program: &str,
+    args: &[String],
+    input: Option<Vec<u8>>,
+    cap: usize,
+    protocol: bool,
+) -> io::Result<(ExitStatus, Capture, Capture)> {
+    let (command, cgroup) = sandbox
+        .invocation_command(program, args)
+        .map_err(io::Error::other)?;
+    let mut command = Command::from(command);
+    command
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .process_group(0);
+    let child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            if let Some(path) = cgroup {
+                std::fs::remove_dir(path)?;
+            }
+            return Err(error);
+        }
+    };
+    let pgid = child.id().expect("newly spawned child has a pid") as i32;
+    let mut owner = ChildOwner {
+        child,
+        pgid,
+        cgroup,
+        sandbox,
+        signaled: false,
+        finished: false,
+    };
+    let stdout = owner.child.stdout.take().expect("piped stdout");
+    let stderr = owner.child.stderr.take().expect("piped stderr");
+    let stdin = owner.child.stdin.take();
+    let wait = async {
+        let status = owner.child.wait().await?;
+        // Kill background writers before waiting for pipe EOF; they can inherit open pipes.
+        owner.signal()?;
+        Ok::<_, io::Error>(status)
+    };
+    let write = async {
+        if let (Some(data), Some(mut sink)) = (input, stdin) {
+            match sink.write_all(&data).await {
+                Err(e) if e.kind() == io::ErrorKind::BrokenPipe => (),
+                result => result?,
+            }
+        }
+        Ok::<_, io::Error>(())
+    };
+    let (status, out, err, ()) = tokio::try_join!(
+        wait,
+        drain(stdout, cap, protocol),
+        drain(stderr, cap.min(64 * 1024), protocol),
+        write
+    )?;
+    owner.cleanup()?;
+    Ok((status, out, err))
+}
+
 pub async fn run_child(
     sandbox: &Sandbox,
     program: &str,
@@ -22,160 +216,81 @@ pub async fn run_child(
     stdin_data: Option<Vec<u8>>,
     cap: usize,
 ) -> ToolResult {
-    let std_cmd = match sandbox.tool_command(program, args) {
-        Ok(c) => c,
-        Err(e) => return ToolResult::error(format!("{program}: cannot spawn: {e}")),
+    let (status, out, err) = match capture(sandbox, program, args, stdin_data, cap, false).await {
+        Ok(result) => result,
+        Err(e) => return ToolResult::error(format!("{program}: {e}")),
     };
-
-    let mut cmd = TokioCommand::from(std_cmd);
-    cmd.stdin(if stdin_data.is_some() {
-        Stdio::piped()
-    } else {
-        Stdio::null()
-    })
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    // If the loop's per-call timeout drops this future, kill the child rather than leak it.
-    .kill_on_drop(true)
-    // Give the child its own process group so we can reap what it leaves behind. `kill_on_drop`
-    // and the wait below only ever reach the direct child: a shell that backgrounds a redirected
-    // descendant (`cmd >/dev/null 2>&1 &`) exits cleanly while the descendant keeps running. In a
-    // host sandbox there is no cgroup to catch it, so the process group is the only handle.
-    .process_group(0);
-
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => return ToolResult::error(format!("{program}: spawn failed: {e}")),
-    };
-    // `process_group(0)` makes the child its own group leader, so the group id is its pid. Capture
-    // it now — `wait_with_output` consumes the handle.
-    let pgid = child.id().map(|id| id as i32);
-
-    // Write stdin concurrently with output draining to avoid a pipe deadlock on large payloads.
-    if let (Some(data), Some(mut sink)) = (stdin_data, child.stdin.take()) {
-        tokio::spawn(async move {
-            let _ = sink.write_all(&data).await;
-            let _ = sink.shutdown().await;
-        });
+    let mut text = String::from_utf8_lossy(&out.bytes).into_owned();
+    if err.total > 0 {
+        text.push_str("\n[stderr]\n");
+        text.push_str(&String::from_utf8_lossy(&err.bytes));
     }
-
-    let out = match child.wait_with_output().await {
-        Ok(o) => o,
-        Err(e) => {
-            kill_process_group(pgid);
-            return ToolResult::error(format!("{program}: wait failed: {e}"));
+    let total = out
+        .total
+        .saturating_add(err.total)
+        .saturating_add(if err.total > 0 { 10 } else { 0 });
+    let mut result =
+        crate::transcript::tool_result_from_output(text, status.code(), !status.success(), cap);
+    if total > cap {
+        if !result.truncated {
+            let shown = result.content.len();
+            result
+                .content
+                .push_str(&format!("\n[truncated: {total} bytes, showing {shown}]"));
         }
-    };
-    // The direct child is gone; anything it backgrounded is not. A tool call ends when it ends.
-    kill_process_group(pgid);
-
-    let mut content = String::from_utf8_lossy(&out.stdout).into_owned();
-    if !out.stderr.is_empty() {
-        if !content.is_empty() {
-            content.push('\n');
-        }
-        content.push_str("[stderr]\n");
-        content.push_str(&String::from_utf8_lossy(&out.stderr));
+        result.truncated = true;
+        result.original_len = Some(total);
     }
-    tool_result_from_output(content, out.status.code(), !out.status.success(), cap)
+    result
 }
 
-/// What a timed child left behind (016-native-tools, T039a).
-///
-/// Deliberately not a [`ToolResult`]. [`run_child`] folds stderr into the content, caps it, and
-/// reports only "was it non-zero" — all correct for a tool whose output *is* its answer, and all
-/// wrong for a pipeline stage whose output has to be parsed and whose success is decided by
-/// something other than its exit status (research R6). So this returns the pieces separately and
-/// lets the caller judge.
 #[cfg(feature = "scanners")]
 pub struct ChildRun {
     pub stdout: String,
     pub stderr: String,
-    /// `None` when the child was killed by a signal — which is not the same as a non-zero exit and
-    /// must not be read as one.
     pub code: Option<i32>,
     pub success: bool,
 }
 
-/// Why a timed child produced no result at all.
 #[cfg(feature = "scanners")]
 pub enum ChildError {
-    /// The child did not finish within its budget and was killed. Never a partial `Completed`.
-    TimedOut(std::time::Duration),
-    /// It could not be spawned or waited on.
+    TimedOut(Duration),
     Spawn(String),
+    OutputTooLarge,
 }
 
 #[cfg(feature = "scanners")]
 impl std::fmt::Display for ChildError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ChildError::TimedOut(d) => write!(f, "timed out after {}s", d.as_secs()),
-            ChildError::Spawn(e) => f.write_str(e),
+            Self::TimedOut(d) => write!(f, "timed out after {}s", d.as_secs()),
+            Self::Spawn(e) => f.write_str(e),
+            Self::OutputTooLarge => f.write_str("subprocess protocol output exceeds byte limit"),
         }
     }
 }
 
-/// Run `program args` inside `sandbox` under a wall-clock `budget`, keeping stdout and stderr apart.
-///
-/// Same hardened, scope-joined, credential-stripped spawn as [`run_child`] — it goes through the
-/// same [`Sandbox::tool_command`] — and the same process-group cleanup, which matters more here:
-/// a scanner that exceeds its budget is killed mid-walk, and anything it forked has to go with it.
 #[cfg(feature = "scanners")]
 pub async fn run_child_timed(
     sandbox: &Sandbox,
     program: &str,
     args: &[String],
-    budget: std::time::Duration,
+    budget: Duration,
 ) -> Result<ChildRun, ChildError> {
-    let std_cmd = match sandbox.tool_command(program, args) {
-        Ok(c) => c,
-        Err(e) => return Err(ChildError::Spawn(format!("{program}: cannot spawn: {e}"))),
-    };
-
-    let mut cmd = TokioCommand::from(std_cmd);
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .process_group(0);
-
-    let child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => return Err(ChildError::Spawn(format!("{program}: spawn failed: {e}"))),
-    };
-    let pgid = child.id().map(|id| id as i32);
-
-    let out = match tokio::time::timeout(budget, child.wait_with_output()).await {
-        Ok(Ok(o)) => o,
-        Ok(Err(e)) => {
-            kill_process_group(pgid);
-            return Err(ChildError::Spawn(format!("{program}: wait failed: {e}")));
-        }
-        Err(_elapsed) => {
-            // The future is dropped here, so `kill_on_drop` reaps the direct child; the group kill
-            // catches whatever it left running.
-            kill_process_group(pgid);
-            return Err(ChildError::TimedOut(budget));
-        }
-    };
-    kill_process_group(pgid);
-
-    Ok(ChildRun {
-        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        code: out.status.code(),
-        success: out.status.success(),
-    })
-}
-
-/// SIGKILL every process left in the tool child's process group.
-///
-/// The group leader has already been reaped by the time this runs, so the only members left are
-/// descendants the child backgrounded. `ESRCH` (nobody left) is the common, expected outcome.
-fn kill_process_group(pgid: Option<i32>) {
-    let Some(pgid) = pgid else { return };
-    // SAFETY: a negative pid signals the process group with that id. `process_group(0)` made the
-    // child a group leader, so the group contains only it and its descendants — never bee itself.
-    unsafe { libc::kill(-pgid, libc::SIGKILL) };
+    match tokio::time::timeout(
+        budget,
+        capture(sandbox, program, args, None, SCANNER_OUTPUT_CAP, true),
+    )
+    .await
+    {
+        Err(_) => Err(ChildError::TimedOut(budget)),
+        Ok(Err(e)) if e.kind() == io::ErrorKind::FileTooLarge => Err(ChildError::OutputTooLarge),
+        Ok(Err(e)) => Err(ChildError::Spawn(e.to_string())),
+        Ok(Ok((status, out, err))) => Ok(ChildRun {
+            stdout: String::from_utf8_lossy(&out.bytes).into_owned(),
+            stderr: String::from_utf8_lossy(&err.bytes).into_owned(),
+            code: status.code(),
+            success: status.success(),
+        }),
+    }
 }

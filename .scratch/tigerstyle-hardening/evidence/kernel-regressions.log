@@ -1,0 +1,11 @@
+Warning: Permanently added 'vmi.ac-matrix-vm.ac-matrix' (ED25519) to the list of known hosts.
+
+running 5 tests
+test kernel::attenuated_default_is_enforced ... ok
+test kernel::cancellation_removes_setsid_descendants_and_preserves_services ... ok
+test kernel::failed_mandatory_narrowing_stops_execution ... ok
+test kernel::finite_policy_lease_narrows_in_kernel ... ok
+test kernel::granted_executable_keeps_its_inode_pin ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 38.10s
+

@@ -1,0 +1,84 @@
+   Compiling syn v3.0.0
+   Compiling libc v0.2.186
+   Compiling serde_core v1.0.229
+   Compiling crc32fast v1.5.0
+   Compiling serde v1.0.229
+   Compiling hashbrown v0.17.1
+   Compiling memchr v2.8.3
+   Compiling once_cell v1.21.4
+   Compiling bitflags v2.13.1
+   Compiling serde_json v1.0.150
+   Compiling syn v2.0.119
+   Compiling indexmap v2.14.0
+   Compiling time v0.3.53
+   Compiling errno v0.3.14
+   Compiling mio v1.2.2
+   Compiling socket2 v0.6.5
+   Compiling signal-hook-registry v1.4.8
+   Compiling object v0.39.1
+   Compiling serde_derive v1.0.229
+   Compiling thiserror-impl v2.0.19
+   Compiling thiserror v2.0.19
+   Compiling tokio-macros v2.7.1
+   Compiling tokio v1.53.0
+   Compiling aya-obj v0.3.0
+   Compiling toml_datetime v0.6.11
+   Compiling serde_spanned v0.6.9
+   Compiling toml_edit v0.22.27
+   Compiling aya v0.14.0
+   Compiling toml v0.8.23
+   Compiling bee-common v0.1.0 (/home/jg/git/bee/crates/common)
+   Compiling bee-core v0.1.0 (/home/jg/git/bee/crates/core)
+   Compiling bee-userspace v0.1.0 (/home/jg/git/bee/crates/userspace)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 22.51s
+     Running unittests src/lib.rs (target/debug/deps/bee_userspace-5bd41503c7ab5897)
+
+running 45 tests
+test cgroup::tests::cgroup_id_reads_inode ... ok
+test detect::tests::lsm_token_matching ... ok
+test detect::tests::version_parsing ... ok
+test cgroup::tests::cgroup_id_errors_on_missing ... ok
+test hardening::tests::core_dumps_and_dumpable_apply ... ok
+test detect::tests::unsupported_when_all_fail ... ok
+test hardening::tests::selects_only_ld_vars ... ok
+test audit_demux::tests::demux_drops_unsubscribed ... ok
+test audit_demux::tests::demux_routes_by_cgroup_id ... ok
+test detect::tests::min_kernel_boundary ... ok
+test kbtf::tests::mismatch_makes_support_unsupported ... ok
+test plan::tests::a_pin_with_no_identity_is_refused_rather_than_loosened ... ok
+test plan::tests::an_unpinned_rule_carries_no_identity ... ok
+test plan::tests::deny_breaks_equal_specificity_tie ... ok
+test plan::tests::empty_plan_is_installable_and_carries_mode ... ok
+test plan::tests::enabled_exfiltration_fails_closed ... ok
+test plan::tests::executable_length_and_count_fail_closed ... ok
+test plan::tests::filesystem_capacity_and_encoded_length_fail_closed ... ok
+test kbtf::tests::errors_when_member_missing ... ok
+test kbtf::tests::diff_offsets_detects_mismatch ... ok
+test kbtf::tests::honors_bitfield_kflag_encoding ... ok
+test kbtf::tests::errors_on_bad_magic ... ok
+test plan::tests::filesystem_rules_are_ordered_and_write_intent_sets_default_deny ... ok
+test plan::tests::a_pin_installs_carrying_the_identity_it_was_given ... ok
+test kbtf::tests::resolves_member_byte_offsets ... ok
+test plan::tests::network_capacity_fails_closed ... ok
+test plan::tests::network_rules_are_deterministic_deduplicated_and_flagged ... ok
+test plan::tests::unsupported_filesystem_kinds_fail_closed ... ok
+test reload::tests::a_clean_reload_installs_exactly_the_plan ... ok
+test reload::tests::a_failed_rollback_is_reported_as_inconsistent ... ok
+test reload::tests::a_failure_at_any_write_leaves_every_map_as_it_was ... ok
+test reload::tests::a_key_no_ledger_knows_about_is_still_removed ... ok
+test reload::tests::an_unregistered_cgroup_is_refused_before_any_write ... ok
+test reload::tests::other_scopes_are_never_touched ... ok
+test resolve::tests::current_returns_nonempty_paths ... ok
+test plan::tests::later_rule_overrides_same_region ... ok
+test audit_demux::tests::overflow_is_visible_and_does_not_block_other_scopes ... ok
+test resolve::tests::resolve_exec_finds_sh ... ok
+test resolve::tests::resolve_host_parses_ip_literal ... ok
+test spawn::tests::plain_binary_is_not_privileged ... ok
+test spawn::tests::refuses_setuid_target_if_present ... ok
+test spawn::tests::runs_hardened_true ... ok
+test spawn::tests::child_has_no_new_privs_and_only_the_dac_caps ... ok
+test resolve::tests::resolve_exec_rejects_missing ... ok
+test spawn::tests::resolves_absolute_and_path ... ok
+
+test result: ok. 45 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
+

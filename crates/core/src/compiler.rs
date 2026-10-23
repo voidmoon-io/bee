@@ -89,6 +89,7 @@ pub struct CompiledNet {
 #[derive(Debug, Clone, Default)]
 pub struct CompiledPolicy {
     pub mode: Mode,
+    pub deny_unmatched_writes: bool,
     pub fs: Vec<FsPrimitive>,
     pub exec: Vec<CompiledExec>,
     pub net: Vec<CompiledNet>,
@@ -162,6 +163,7 @@ impl Policy {
 
         Ok(CompiledPolicy {
             mode: self.mode,
+            deny_unmatched_writes: self.denies_unmatched_writes(),
             fs,
             exec,
             net,

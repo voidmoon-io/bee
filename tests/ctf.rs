@@ -208,6 +208,7 @@ fn score_report_counts_techniques() {
             duration_ms: 1,
         }],
         audit_trail: Vec::new(),
+        audit_health: Default::default(),
         timing: Timing::default(),
         usage: None,
         score: None,

@@ -39,6 +39,21 @@ pub struct LoopEscalation {
     pub default_ttl: Ttl,
 }
 
+impl LoopEscalation {
+    /// The loop must install any restrictions added while validating its starting policy.
+    pub fn initialize(&self, active: &ActivePolicy, sandbox: &mut Sandbox) -> Result<(), String> {
+        if self.default_ttl == Ttl::Turns(0) {
+            return Err("a finite grant must last at least one turn".into());
+        }
+        let mut supplied = self.base.clone();
+        supplied.defaults.deny_unmatched_writes = supplied.denies_unmatched_writes();
+        if active.active() != &supplied {
+            sandbox.reload(active.active())?;
+        }
+        Ok(())
+    }
+}
+
 /// The result of an escalation attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EscalateOutcome {
@@ -51,6 +66,8 @@ pub enum EscalateOutcome {
     AlreadyHeld,
     /// Refused (beyond ceiling, denied by consent/timeout, or a reload failure). No state changed.
     Refused(String),
+    Denied(String),
+    Terminated(String),
 }
 
 impl EscalateOutcome {
@@ -62,8 +79,9 @@ impl EscalateOutcome {
 }
 
 /// Run the widen cycle for `delta`. Order (contract `consent.md`): attenuation pre-check (no
-/// prompting beyond ceiling) → consent with timeout (elapse → deny) → apply → reload → register
-/// tools. Any failure leaves `active`, the scope, and the registry unchanged (fail-closed).
+/// prompting beyond ceiling) → consent with timeout (elapse → deny) → stage → reload → commit
+/// and register tools. Failure keeps in-memory state unchanged; an inconsistent reload poisons
+/// the sandbox so subsequent dispatch refuses to run.
 #[allow(clippy::too_many_arguments)]
 pub async fn escalate(
     active: &mut ActivePolicy,
@@ -85,7 +103,17 @@ pub async fn escalate(
     //    capabilities they already approved — once per call. Tools are registry membership rather
     //    than policy, so they are filtered against the live registry instead of the policy.
     let mut delta = active.unmet(&delta);
-    delta.tools.retain(|t| !registry.contains(t));
+    let leased_tools = active.granted_tools();
+    let has_new_authority = !delta.filesystem.is_empty()
+        || !delta.exec.is_empty()
+        || !delta.net.is_empty()
+        || delta.tools.iter().any(|t| !registry.contains(t));
+    if !has_new_authority {
+        return EscalateOutcome::AlreadyHeld;
+    }
+    delta
+        .tools
+        .retain(|t| !registry.contains(t) || leased_tools.contains(t));
     if delta.is_empty() {
         return EscalateOutcome::AlreadyHeld;
     }
@@ -116,16 +144,20 @@ pub async fn escalate(
 
     // 3. Apply the lease (re-validates ⊆ ceiling and recomputes `active`).
     let tools = delta.tools.clone();
-    let id = match active.try_apply(origin, delta, ttl, turn) {
+    let mut candidate = active.clone();
+    let id = match candidate.try_apply(origin, delta, ttl, turn) {
         Ok(id) => id,
         Err(e) => return EscalateOutcome::Refused(e),
     };
 
-    // 4. Reload the live scope with the widened policy. On failure, roll the lease back (keep-prior).
-    if let Err(e) = sandbox.reload(active.active()) {
-        active.release(&id);
-        return EscalateOutcome::Refused(format!("reload failed: {e}"));
+    // 4. Install before committing the candidate lease set.
+    if candidate.active() != active.active() {
+        if let Err(e) = sandbox.reload(candidate.active()) {
+            return EscalateOutcome::Refused(format!("reload failed: {e}"));
+        }
     }
+
+    *active = candidate;
 
     // 5. Register granted tools (Layer 1 membership).
     for tool in &tools {
@@ -153,38 +185,17 @@ pub async fn proactive_step(
     sandbox: &mut Sandbox,
     registry: &mut ToolRegistry,
 ) -> Option<EscalateOutcome> {
-    let ev = StepEvent::BeforeToolCall(call);
-    let Flow::Escalate(delta) = crate::hooks::dispatch(&esc.hooks, &ev).await else {
-        return None;
-    };
-    let skill = call
-        .arguments
-        .get("name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("skill")
-        .to_string();
-    Some(
-        escalate(
-            active,
-            GrantOrigin::SkillRequires { skill },
-            delta,
-            esc.default_ttl,
-            turn,
-            esc.consent.as_ref(),
-            esc.timeout,
-            sandbox,
-            registry,
-        )
-        .await,
+    event_step(
+        esc,
+        active,
+        StepEvent::BeforeToolCall(call),
+        turn,
+        sandbox,
+        registry,
     )
+    .await
 }
 
-/// The reactive escalation step (US1), shared by both loops.
-///
-/// Dispatches [`StepEvent::KernelDenial`] for the first denial in this call's drained audit and, if
-/// a hook proposes a grant scoped to the denied resource, runs the widen cycle. The caller decides
-/// whether to retry — it owns the deadline and the transcript — but must retry **only** on
-/// [`EscalateOutcome::is_granted`], and only once (SC-005).
 #[allow(clippy::too_many_arguments)]
 pub async fn reactive_step(
     esc: &LoopEscalation,
@@ -196,27 +207,144 @@ pub async fn reactive_step(
     sandbox: &mut Sandbox,
     registry: &mut ToolRegistry,
 ) -> Option<EscalateOutcome> {
-    let ev = StepEvent::KernelDenial { op, target, call };
-    let Flow::Escalate(delta) = crate::hooks::dispatch(&esc.hooks, &ev).await else {
-        return None;
-    };
-    Some(
-        escalate(
-            active,
-            GrantOrigin::ReactiveDenial {
-                op: op.to_string(),
-                target: target.to_string(),
-            },
-            delta,
-            esc.default_ttl,
-            turn,
-            esc.consent.as_ref(),
-            esc.timeout,
-            sandbox,
-            registry,
-        )
-        .await,
+    event_step(
+        esc,
+        active,
+        StepEvent::KernelDenial { op, target, call },
+        turn,
+        sandbox,
+        registry,
     )
+    .await
+}
+
+fn install_narrowing(
+    active: &mut ActivePolicy,
+    candidate: ActivePolicy,
+    sandbox: &mut Sandbox,
+    registry: &mut ToolRegistry,
+) -> Result<(), String> {
+    if candidate.active() != active.active() {
+        sandbox.reload(candidate.active()).map_err(|e| {
+            let message = format!("mandatory policy narrowing failed: {e}");
+            sandbox.cleanup_failed(message.clone());
+            message
+        })?;
+    }
+    let before = active.granted_tools();
+    let after = candidate.granted_tools();
+    for name in before.difference(&after) {
+        registry.remove(name);
+    }
+    *active = candidate;
+    Ok(())
+}
+
+pub async fn turn_start(
+    esc: &LoopEscalation,
+    active: &mut ActivePolicy,
+    turn: u32,
+    sandbox: &mut Sandbox,
+    registry: &mut ToolRegistry,
+) -> Option<EscalateOutcome> {
+    if let Err(e) = sandbox.check_cleanup() {
+        return Some(EscalateOutcome::Terminated(e));
+    }
+    let mut candidate = active.clone();
+    let expired = match candidate.expire(turn) {
+        Ok(ids) => ids,
+        Err(e) => return Some(EscalateOutcome::Terminated(e)),
+    };
+    if !expired.is_empty() {
+        if let Err(e) = install_narrowing(active, candidate, sandbox, registry) {
+            return Some(EscalateOutcome::Terminated(e));
+        }
+    }
+    event_step(
+        esc,
+        active,
+        StepEvent::TurnStart { turn },
+        turn,
+        sandbox,
+        registry,
+    )
+    .await
+}
+
+/// Interpret every action once, shared by headless and interactive execution.
+pub async fn event_step(
+    esc: &LoopEscalation,
+    active: &mut ActivePolicy,
+    event: StepEvent<'_>,
+    turn: u32,
+    sandbox: &mut Sandbox,
+    registry: &mut ToolRegistry,
+) -> Option<EscalateOutcome> {
+    let action =
+        match tokio::time::timeout(esc.timeout, crate::hooks::dispatch(&esc.hooks, &event)).await {
+            Ok(action) => action,
+            Err(_) => {
+                return Some(EscalateOutcome::Terminated(
+                    "lifecycle hook timed out".into(),
+                ))
+            }
+        };
+    let tool_event = matches!(
+        event,
+        StepEvent::BeforeToolCall(_) | StepEvent::KernelDenial { .. }
+    );
+    match action {
+        Flow::Continue => None,
+        Flow::Terminate(reason) => Some(EscalateOutcome::Terminated(reason)),
+        Flow::Deny(reason) if tool_event => Some(EscalateOutcome::Denied(reason)),
+        Flow::Escalate(delta) if tool_event => {
+            let origin = match event {
+                StepEvent::KernelDenial { op, target, .. } => GrantOrigin::ReactiveDenial {
+                    op: op.into(),
+                    target: target.into(),
+                },
+                StepEvent::BeforeToolCall(call) => GrantOrigin::SkillRequires {
+                    skill: call
+                        .arguments
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("hook")
+                        .into(),
+                },
+                _ => unreachable!(),
+            };
+            Some(
+                escalate(
+                    active,
+                    origin,
+                    delta,
+                    esc.default_ttl,
+                    turn,
+                    esc.consent.as_ref(),
+                    esc.timeout,
+                    sandbox,
+                    registry,
+                )
+                .await,
+            )
+        }
+        Flow::Deescalate(id) if !matches!(event, StepEvent::BeforeModelCall { .. }) => {
+            let mut candidate = active.clone();
+            match candidate.release(&id).and_then(|removed| {
+                if !removed {
+                    return Err(format!("unknown grant: {id}"));
+                }
+                install_narrowing(active, candidate, sandbox, registry)
+            }) {
+                Ok(()) => Some(EscalateOutcome::AlreadyHeld),
+                Err(e) => Some(EscalateOutcome::Terminated(e)),
+            }
+        }
+        other => Some(EscalateOutcome::Terminated(format!(
+            "hook action {other:?} is invalid for {:?}",
+            event.kind()
+        ))),
+    }
 }
 
 /// The first denial in a drained audit batch, as `(op, target)`. Both loops locate the reactive
@@ -359,6 +487,7 @@ mod tests {
             filesystem: BTreeMap::new(),
             exec: Default::default(),
             network: Default::default(),
+            defaults: Default::default(),
             exfiltration: Default::default(),
         };
         for (path, a) in fs {
@@ -383,7 +512,8 @@ mod tests {
         let mut ap = ActivePolicy::new(
             policy("base", &[]),
             policy("ceil", &[("/tmp", Access::Write)]),
-        );
+        )
+        .unwrap();
         let mut reg = ToolRegistry::new();
         let mut sb = host();
         let mut delta = fs_delta("/tmp/w", Access::Write);
@@ -416,7 +546,8 @@ mod tests {
         let mut ap = ActivePolicy::new(
             policy("base", &[]),
             policy("ceil", &[("/tmp", Access::Write)]),
-        );
+        )
+        .unwrap();
         let mut reg = ToolRegistry::new();
         let mut sb = host();
         let out = escalate(
@@ -447,7 +578,8 @@ mod tests {
         let mut ap = ActivePolicy::new(
             policy("base", &[]),
             policy("ceil", &[("/tmp", Access::Write)]),
-        );
+        )
+        .unwrap();
         let mut reg = ToolRegistry::new();
         let mut sb = host();
         let out = escalate(

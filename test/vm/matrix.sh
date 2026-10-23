@@ -43,22 +43,10 @@ STRIPPED=$(mktemp); cp "$BIN" "$STRIPPED"; strip "$STRIPPED" 2>/dev/null || true
 virtctl scp "$STRIPPED" "$TARGET:/home/ubuntu/bee" "${SSHOPTS[@]}" 2>/dev/null
 rm -f "$STRIPPED"
 virtctl scp "$REPO/test/vm/remote-matrix.sh" "$TARGET:/home/ubuntu/remote-matrix.sh" "${SSHOPTS[@]}" 2>/dev/null
+virtctl scp "$REPO/test/vm/cases.txt" "$TARGET:/home/ubuntu/cases.txt" "${SSHOPTS[@]}" 2>/dev/null
 guest "chmod +x /home/ubuntu/bee /home/ubuntu/remote-matrix.sh"
 
 echo "== run matrix (guest, as root) =="
-OUT=$(guest "sudo /home/ubuntu/remote-matrix.sh" || true)
-
-echo
-printf '%-18s %-6s %s\n' CASE STATUS NOTE
-printf '%-18s %-6s %s\n' ------ ------ ----
-fail=0
-while IFS='|' read -r tag name status note; do
-  [ "$tag" = RESULT ] || continue
-  printf '%-18s %-6s %s\n' "$name" "$status" "$note"
-  [ "$status" = PASS ] || fail=1
-done <<< "$OUT"
-
-echo
-echo "$OUT" | grep '^SUMMARY' | sed 's/|/  /g'
-if [ "$fail" -eq 0 ]; then echo "== ALL CASES PASSED =="; else echo "== FAILURES PRESENT =="; fi
-exit "$fail"
+guest_status=0
+OUT=$(guest "sudo /home/ubuntu/remote-matrix.sh") || guest_status=$?
+printf '%s\n' "$OUT" | python3 "$REPO/test/vm/validate_results.py" --guest-status "$guest_status"

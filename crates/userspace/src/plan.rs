@@ -45,9 +45,10 @@ impl EnforcementPlan {
         if !net_rules.is_empty() {
             flags |= FLAG_NET_ENFORCED;
         }
-        if fs_rules.rules[..fs_rules.count as usize]
-            .iter()
-            .any(|rule| AccessMode(rule.mode).contains(AccessMode::WRITE))
+        if compiled.deny_unmatched_writes
+            || fs_rules.rules[..fs_rules.count as usize]
+                .iter()
+                .any(|rule| AccessMode(rule.mode).contains(AccessMode::WRITE))
         {
             flags |= FLAG_FS_WRITE_DEFAULT_DENY;
         }

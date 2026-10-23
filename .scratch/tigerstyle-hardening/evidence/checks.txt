@@ -1,0 +1,4 @@
+cargo fmt --all -- --check: passed
+git diff --check: passed
+Pre-existing README.md diff: preserved exactly
+Pre-existing .specify/feature.json diff: preserved exactly

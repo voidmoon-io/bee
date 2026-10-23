@@ -116,6 +116,7 @@ fn policy(name: &str, fs: &[(&str, Access)]) -> Policy {
         filesystem: Default::default(),
         exec: Default::default(),
         network: Default::default(),
+        defaults: Default::default(),
         exfiltration: Default::default(),
     };
     for (path, a) in fs {
@@ -181,7 +182,8 @@ fn fixture(
         consent,
         timeout,
         default_ttl: Ttl::Forever,
-    });
+    })
+    .unwrap();
 
     // Only the `skill` tool starts registered. `bash` must arrive via the grant or not at all.
     let mut registry = ToolRegistry::new();

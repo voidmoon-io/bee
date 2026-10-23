@@ -1,0 +1,55 @@
+== build (host) ==
+== wait for guest reachability ==
+== ship binaries + runner ==
+== run matrix (guest, as root) ==
+kernel-bpf-lsm                      PASS   lockdown,capability,landlock,yama,apparmor,bpf
+kernel-btf                          PASS   present
+bee-check                           PASS   gates ok
+net-allow                           PASS   http=301
+net-deny                            PASS   connection blocked
+connect-target-audited              PASS   denial names 8.8.8.8:443
+net-unix-denied                     PASS   AF_UNIX connect refused (REFUSED 1)
+file-deny                           PASS   secret not leaked
+file-allow                          PASS   read ok (ac-matrix-vm)
+file-glob-deny                      PASS   *.secret blocked
+file-glob-allow                     PASS   non-matching file opens
+file-segment-refused                PASS   fail-closed on unenforceable rule
+rw-read-source                      PASS   read-only source readable
+rw-write-source-denied              PASS   write to read-only source blocked
+rw-write-scratch                    PASS   write to granted scratch works
+rw-write-default-deny               PASS   unlisted write denied by default
+exec-allow                          PASS   allowlisted exec ran
+exec-deny                           PASS   unlisted exec denied
+exec-pin-allow                      PASS   pinned image ran; unpinned sibling denied
+exec-pin-swapped-denied             PASS   same path, new inode: exec denied after the swap
+exec-unresolvable-denied            PASS   unresolvable exec refused
+file-unresolvable-denied            PASS   unresolvable open refused
+search-in-scope                     PASS   matched allowed file, denied file invisible to the library search
+priv-drop                           PASS   NoNewPrivs=1 CapBnd=0x6 (DAC only, CAP_SYS_ADMIN gone)
+cgroup-migrate-enforced             PASS   migrated to child cgroup, read still denied
+teardown-kills-descendants          PASS   descendant reaped at teardown
+observe-mode                        PASS   allowed + 1 observed events
+atten-reject                        PASS   over-broad subagent refused (rc=64)
+atten-subset-allow                  PASS   child-kept dest connects (http=301)
+atten-subset-deny                   PASS   parent-allowed but child-dropped dest blocked
+scope-isolation                     PASS   host egress unaffected
+episode-file-deny                   PASS   kernel EACCES surfaced in transcript; episode completed
+episode-allow                       PASS   in-scope write succeeded, no denials
+skill-grant-allow                   PASS   within-ceiling grant compiled into scope; write to skgrant allowed
+skill-grant-deny                    PASS   beyond-ceiling grant refused; write to skgrant kernel-denied (EACCES)
+reload-widen-allow                  PASS   denial → escalate → live reload → retry wrote data
+reload-beyond-ceiling               PASS   beyond-ceiling escalation refused; write stayed kernel-denied
+lease-expiry                        PASS   lease expired at turn 1; the kernel denied the same write again
+lease-release                       PASS   lease released at turn 1; the kernel denied the same write again
+scanner-escape-denied               PASS   granted scanner ran in-scope; its out-of-scope read was refused (control run leaked)
+concurrent-audit-isolation          PASS   4 concurrent scopes, no cgroup cross-contamination
+http-latency                        PASS   added median 0.6 ms, p95 1.7 ms over 300 requests (limits 50 / 200)
+http-in-scope                       PASS   curl via proxy: 'code=200\n[stderr]\ncurl: (23) Failure writing output to desti'; in history: True
+http-out-of-scope                   PASS   'code=403\n[stderr]\ncurl: (23) Failure wri', proxy_event=True, upstream_hits=0
+http-direct-target                  PASS   'code=000\n\n[stderr]\ncurl: (7) Failed to connect to 127.0.0.1 ', kernel denials=['', '', '127.0.0.1:18080']
+http-direct-other                   PASS   'code=000\n\n[stderr]\ncurl: (7) Failed to connect to 1.1.1.1 po', kernel denials=['', '', '1.1.1.1:80']
+http-proxy-scope                    PASS   'errno=1', proxy-scope audit=[('connect', '1.1.1.1:443')]
+http-sni-mismatch                   PASS   proxy_event=True
+http-store-protected                PASS   denials=['/home/ubuntu/httpwork/.bee/http/index.sqlite', '/home/ubuntu/httpwork/.bee/http/blobs/x']; output="[stderr]\nhead: cannot open '.bee/http/index.sqlite' for reading: Permission denied\n/usr/bin/sh: 1: cannot create .bee/ht"
+http-proxy-fs-deny                  PASS   'errno=13', proxy-scope audit=True
+ALL 50 CASES PASSED

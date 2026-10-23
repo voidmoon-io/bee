@@ -355,3 +355,11 @@ This plan makes the routine design choices explicit so implementation can procee
 interview. Split a commit further if review exposes an independently verifiable boundary, but keep
 each security behavior change together with its regression test. Completion means all 13 findings
 meet their acceptance criteria, not merely that the default host suite is green.
+
+
+## Comments
+
+2026-10-23: Implemented and integrated with main `50e0ee1` in PR #44. See
+[coverage](../IMPLEMENTATION.md) and [fresh integration verification](../INTEGRATION.md).
+All conflicts were resolved using the shared session/call/turn implementation from main.
+The final live VM matrix passed all 50 required cases, and all five dedicated kernel regressions passed.

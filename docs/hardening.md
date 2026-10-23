@@ -23,8 +23,8 @@ are built. Multiple tool calls in one response share a turn. Interactive exchang
 advancing lease clock. Zero-turn leases and arithmetic overflow are errors. Base tools and tools owned
 by another live lease remain available when a lease ends.
 
-Policy reload requires an empty scope. A live persistent stdio MCP service therefore prevents a
-reload-requiring grant; tool-only grants do not reload policy. If a service starts after a finite policy
+Tool-scope policy reload requires an empty scope. A live persistent stdio MCP service therefore
+prevents a reload-requiring grant; tool-only grants do not reload policy. If a service starts after a finite policy
 grant and prevents its expiry, Bee terminates the run. Quiescing persistent services for reload is not
 implemented.
 

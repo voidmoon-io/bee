@@ -1,0 +1,52 @@
+    Blocking waiting for file lock on build directory
+   Compiling bee v0.1.0 (/tmp/bee-tigerstyle-pr-20261023)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 50.17s
+     Running tests/ctf.rs (target/debug/deps/ctf-2610e61276bcdd1c)
+
+running 6 tests
+test score_report_counts_techniques ... ok
+test give_up_is_not_captured ... ok
+test submit_flag_correct_captures ... ok
+test submit_flag_wrong_then_correct ... ok
+test run_episode_populates_score_for_ctf ... ok
+test turn_limit_in_ctf_is_not_captured ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/hardening.rs (target/debug/deps/hardening-b5da3cf2c2a658b0)
+
+running 12 tests
+test grant_preserves_inherited_executable_pin ... ok
+test deny_hook_prevents_execution ... ok
+test noisy_both_pipes_are_drained_and_bounded ... ok
+test one_turn_grant_expires_before_next_turn ... ok
+test termination_never_dispatches_the_tool ... ok
+test output_bounds_include_decoding_and_early_stdin_close ... ok
+test repl_denial_and_expiry_match_headless_behavior ... ok
+test chat_scrolls_past_u16_rows ... ok
+test episode_deadline_includes_consent ... ok
+test provider_is_bounded_by_episode_deadline ... ok
+test retry_backoff_uses_the_episode_deadline ... ok
+test cancelled_child_cleans_up_descendants ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.41s
+
+     Running tests/operator.rs (target/debug/deps/operator-1be225e0358e86c7)
+
+running 5 tests
+test a_front_end_that_is_gone_refuses ... ok
+test consents_are_recorded_only_when_there_are_any ... ok
+test an_unanswered_interactive_request_times_out_and_is_not_retried ... ok
+test a_start_up_grant_carries_the_whole_request ... ok
+test the_autonomous_operator_records_every_decision_and_asks_nobody ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/transcript_compat.rs (target/debug/deps/transcript_compat-7fc02e29e03ea32f)
+
+running 2 tests
+test a_pre_025_transcript_reads_and_writes_back_unchanged ... ok
+test a_run_without_025_features_writes_no_new_key ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

@@ -451,15 +451,14 @@ fn validate_refs(ledger: &Ledger, refs: Vec<String>) -> Result<Vec<String>, Stri
                 return Err(format!("no recorded exchange `{id}` to cite"));
             }
         }
-        #[cfg(not(feature = "intercept"))]
-        {
-            let _ = id;
-            return Err(
-                "HTTP evidence refs need the exchange store, which this build lacks \
-                 (rebuild with --features intercept)"
-                    .into(),
-            );
-        }
+    }
+    #[cfg(not(feature = "intercept"))]
+    if !refs.is_empty() {
+        return Err(
+            "HTTP evidence refs need the exchange store, which this build lacks \
+             (rebuild with --features intercept)"
+                .into(),
+        );
     }
     Ok(refs)
 }

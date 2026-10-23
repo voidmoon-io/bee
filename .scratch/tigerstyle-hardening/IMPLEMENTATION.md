@@ -11,8 +11,8 @@ implementation from PR #39 is retained. Hardening is applied at the new shared b
 cross-layer policy updates stop dispatch, retries retain completed-attempt evidence, and default
 audit health preserves old transcript round trips. The VM manifest now covers all 50 upstream cases.
 
-The baseline results below are historical. Fresh integration verification is being recorded separately
-in [INTEGRATION.md](INTEGRATION.md) before the draft is marked ready.
+The baseline results below are historical. Fresh integration verification is recorded separately
+in [INTEGRATION.md](INTEGRATION.md).
 
 ## Coverage
 

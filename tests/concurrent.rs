@@ -15,6 +15,10 @@ use bee::{run_loop, EpisodeStatus, EpisodeTranscript, LoopOptions};
 
 fn scenario() -> Scenario {
     Scenario {
+        lease_turns: None,
+        context: Default::default(),
+        stuck: Default::default(),
+        finish: false,
         id: "conc".into(),
         policy_path: "/dev/null".into(),
         system_prompt: "test agent".into(),

@@ -46,6 +46,17 @@ const FORBIDDEN: &[&str] = &[
     "tree-sitter",
     "gix",
     "cvss",
+    // HTTP(S) interception (019-http-intercept, SC-009). The proxy, its TLS stack, the certificate
+    // minting and the exchange store are the application's business; the core compiles `[policy.http]`
+    // into scopes and checks attenuation, as pure data, and never opens a socket or a database.
+    "hyper",
+    "rustls",
+    "tokio-rustls",
+    "rcgen",
+    "rusqlite",
+    "json-patch",
+    "brotli-decompressor",
+    "ruzstd",
 ];
 
 fn workspace_root() -> PathBuf {

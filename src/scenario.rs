@@ -70,6 +70,11 @@ pub struct Scenario {
     pub tools: Vec<String>,
     #[serde(default)]
     pub mode: ScoringMode,
+    /// Whether a standard-mode run is offered `finish` and must end through it (025 US3). Default on;
+    /// `false` keeps the pre-025 ending, where a text-only turn completes the run. Never offered in
+    /// CTF mode, nor in the REPL.
+    #[serde(default = "default_true")]
+    pub finish: bool,
     #[serde(default)]
     pub workdir: WorkdirSetup,
     /// MCP client policy (004-mcp-client). Sourced from the **top-level** `[mcp]` table (a sibling of
@@ -95,6 +100,30 @@ pub struct Scenario {
     /// file, where capabilities live.
     #[serde(default)]
     pub security: crate::security::SecurityConfig,
+    /// Context budget and compaction settings (025). Sourced from the **top-level** `[context]` table,
+    /// like `[mcp]` and `[security]`, and merged over the user's and project's `[context]`.
+    #[serde(default, skip_serializing_if = "is_default_context")]
+    pub context: crate::context::ContextConfig,
+    /// Stuck detection (025 US2). Sourced from the **top-level** `[stuck]` table, like `[context]`,
+    /// and merged over the user's and project's `[stuck]`.
+    #[serde(default, skip_serializing_if = "is_default_stuck")]
+    pub stuck: crate::stuck::StuckConfig,
+    /// How many model turns a capability granted mid-episode lasts before it expires and the scope
+    /// narrows again (007 US4, 024 FR-029). Absent: a grant lasts for the rest of the episode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_turns: Option<u32>,
+}
+
+fn is_default_context(c: &crate::context::ContextConfig) -> bool {
+    *c == crate::context::ContextConfig::default()
+}
+
+fn is_default_stuck(c: &crate::stuck::StuckConfig) -> bool {
+    *c == crate::stuck::StuckConfig::default()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_tools() -> Vec<String> {
@@ -111,6 +140,12 @@ struct ScenarioFile {
     /// The top-level `[security]` table, folded the same way (016-native-tools).
     #[serde(default)]
     security: Option<crate::security::SecurityConfig>,
+    /// The top-level `[context]` table (025), folded the same way.
+    #[serde(default)]
+    context: Option<crate::context::ContextConfig>,
+    /// The top-level `[stuck]` table (025 US2), folded the same way.
+    #[serde(default)]
+    stuck: Option<crate::stuck::StuckConfig>,
 }
 
 impl Scenario {
@@ -130,6 +165,12 @@ impl Scenario {
         }
         if let Some(security) = file.security {
             s.security = security;
+        }
+        if let Some(context) = file.context {
+            s.context = context;
+        }
+        if let Some(stuck) = file.stuck {
+            s.stuck = stuck;
         }
         // Resolve a relative policy_path against the scenario file's directory for portability.
         if s.policy_path.is_relative() {
@@ -164,6 +205,12 @@ impl Scenario {
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
+        if self.lease_turns == Some(0) {
+            return Err(ConfigError::Invalid(
+                "scenario.lease_turns must be at least 1 (omit it for grants that do not expire)"
+                    .into(),
+            ));
+        }
         for (field, val) in [
             ("id", &self.id),
             ("system_prompt", &self.system_prompt),
@@ -206,6 +253,13 @@ impl Scenario {
                 if !self.tools.iter().any(|t| t == "submit_flag") {
                     return Err(ConfigError::Invalid(
                         "mode = \"ctf\" requires \"submit_flag\" in the tools list".into(),
+                    ));
+                }
+                if self.tools.iter().any(|t| t == "finish") {
+                    return Err(ConfigError::Invalid(
+                        "finish is not available in ctf mode; ctf runs end with submit_flag or \
+                         give_up"
+                            .into(),
                     ));
                 }
             }
@@ -281,6 +335,19 @@ value = "FLAG{abc}"
         let s = Scenario::from_path(&p).unwrap();
         assert_eq!(s.skills[0], dir.join("skills"));
         assert_eq!(s.skills[1], PathBuf::from("missing"));
+    }
+
+    #[test]
+    fn lease_turns_is_optional_and_at_least_one() {
+        let s = Scenario::from_path(&write("lease-none", OK)).unwrap();
+        assert_eq!(s.lease_turns, None, "grants do not expire unless asked");
+        let s =
+            Scenario::from_path(&write("lease-two", &format!("{OK}lease_turns = 2\n"))).unwrap();
+        assert_eq!(s.lease_turns, Some(2));
+        assert!(matches!(
+            Scenario::from_path(&write("lease-zero", &format!("{OK}lease_turns = 0\n"))),
+            Err(ConfigError::Invalid(_))
+        ));
     }
 
     #[test]

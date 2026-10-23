@@ -22,6 +22,14 @@ fn text(s: &str) -> RenderSpec {
 /// A recorded `render` call that committed `spec` to `target`.
 fn render_call(id: &str, target: RenderTarget, spec: RenderSpec) -> RecordedCall {
     RecordedCall {
+        denied_attempt_audit: Vec::new(),
+        denied_attempt_proxy_events: Vec::new(),
+        escalations: Vec::new(),
+        retried: false,
+        timed_out: false,
+        not_run: false,
+        refused_by_hook: None,
+        proxy_events: Vec::new(),
         call: ToolCall {
             id: id.into(),
             name: "render".into(),
@@ -34,6 +42,7 @@ fn render_call(id: &str, target: RenderTarget, spec: RenderSpec) -> RecordedCall
 
 fn turn(index: u32, calls: Vec<RecordedCall>) -> TranscriptTurn {
     TranscriptTurn {
+        notes: Vec::new(),
         index,
         assistant_text: None,
         calls,
@@ -43,6 +52,12 @@ fn turn(index: u32, calls: Vec<RecordedCall>) -> TranscriptTurn {
 
 fn transcript(turns: Vec<TranscriptTurn>) -> EpisodeTranscript {
     EpisodeTranscript {
+        consents: Vec::new(),
+        mcp_audit: Default::default(),
+        finish_offered: false,
+        compactions: Vec::new(),
+        summary_usage: None,
+        http_scope: None,
         scenario_id: "s".into(),
         model_id: "mock/x".into(),
         status: EpisodeStatus::Completed,
@@ -105,6 +120,14 @@ fn inline_only_transcript_reconstructs_no_panels() {
 /// A recorded `render` call that requested `ops` on the panel column.
 fn ops_call(id: &str, ops: Vec<bee::render_spec::PanelOp>) -> RecordedCall {
     RecordedCall {
+        denied_attempt_audit: Vec::new(),
+        denied_attempt_proxy_events: Vec::new(),
+        escalations: Vec::new(),
+        retried: false,
+        timed_out: false,
+        not_run: false,
+        refused_by_hook: None,
+        proxy_events: Vec::new(),
         call: ToolCall {
             id: id.into(),
             name: "render".into(),

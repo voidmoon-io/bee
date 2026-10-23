@@ -198,3 +198,137 @@ async fn denied_tools_are_hidden() {
     );
     bridge.teardown();
 }
+
+// ── 019-http-intercept T042: an MCP stdio server is its own attributed caller ────────────────────
+//
+// Runs on the host tier (advisory proxy, no Node needed): the "server" is a shell that records its
+// environment and makes one request through the proxy, then exits. It never completes an MCP
+// handshake — the assertions are about what it was spawned with and how its traffic was recorded.
+#[cfg(all(feature = "intercept", feature = "test-support"))]
+#[path = "support/harness.rs"]
+mod harness;
+#[cfg(all(feature = "intercept", feature = "test-support"))]
+#[path = "support/vuln_target.rs"]
+mod vuln_target;
+
+#[cfg(all(feature = "intercept", feature = "test-support"))]
+mod http_attribution {
+    use super::*;
+
+    #[tokio::test]
+    async fn an_mcp_server_gets_an_mcp_credential_and_its_traffic_is_attributed() {
+        let (http, _, _fx) = vuln_target::start_with(false);
+        let s = harness::Session::start(
+            harness::scope(&format!("targets = [\"127.0.0.1:{}\"]", http.port()), &[]),
+            &[],
+            &[],
+        )
+        .await;
+        let out = s.dir.path().join("mcp-env.txt");
+        let script = format!(
+            "env | grep -i _proxy > {out}; curl -sS -o /dev/null http://127.0.0.1:{port}/search?q=mcp; exit 0",
+            out = out.display(),
+            port = http.port()
+        );
+        let server = McpServerConfig {
+            name: "probe".into(),
+            transport: McpTransport::Stdio,
+            command: Some("sh".into()),
+            args: vec!["-c".into(), script],
+            env: Default::default(),
+            url: None,
+            token_env: None,
+            allowed_tools: None,
+            denied_tools: None,
+        };
+        // The handshake fails (the shell is no MCP server); the bridge reports that and moves on.
+        let _bridge = McpBridge::connect(policy(server), &s.session.sandbox).await;
+
+        let env = std::fs::read_to_string(&out).expect("the server ran");
+        let line = env
+            .lines()
+            .find(|l| l.starts_with("HTTP_PROXY="))
+            .unwrap_or_else(|| panic!("{env}"));
+        assert!(line.starts_with("HTTP_PROXY=http://mcp%3Aprobe:"), "{line}");
+
+        let mut attributed = 0;
+        for _ in 0..100 {
+            attributed = s.icpt.with_store(|st| {
+                st.conn()
+                    .query_row(
+                        "SELECT COUNT(*) FROM exchanges WHERE call_id = 'mcp:probe'",
+                        [],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .unwrap()
+            });
+            if attributed > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            attributed, 1,
+            "the server's request is recorded under mcp:probe"
+        );
+    }
+}
+
+/// 024 FR-027: the builder hands each connected stdio server's own process to the sandbox, so its
+/// kernel events can be told from a tool call's. Host tier: the fixture server needs only Node.
+#[tokio::test]
+async fn the_builder_registers_each_servers_process_with_the_sandbox() {
+    use bee::operator::{NullOutput, Operator};
+    use bee::session::{build, Enforcement, EntryPoint, SessionSpec};
+
+    let script = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/notify_server.mjs"
+    );
+    let cfg = McpServerConfig {
+        name: "nf".into(),
+        transport: McpTransport::Stdio,
+        command: Some("node".into()),
+        args: vec![script.into()],
+        env: Default::default(),
+        url: None,
+        token_env: None,
+        allowed_tools: None,
+        denied_tools: None,
+    };
+    let spec = SessionSpec {
+        entry: EntryPoint::Headless,
+        label: "mcp-wiring".into(),
+        policy: None,
+        ceiling: None,
+        enforcement: Enforcement::Host,
+        tools: Vec::new(),
+        ctf_flag: None,
+        skill_roots: Vec::new(),
+        mcp: policy(cfg),
+        security: Default::default(),
+        workdir: std::env::temp_dir(),
+        system_prompt: "test".into(),
+        strip_env: Vec::new(),
+        http_scope_advisory: false,
+        lease_turns: None,
+        operator: Operator::autonomous(std::sync::Arc::new(NullOutput)),
+        prebuilt_sandbox: None,
+    };
+    let mut session = build(spec, &|_| {}).await.expect("builds");
+    let bridge = session.mcp.clone().expect("an MCP bridge");
+    let tgids = bridge.server_tgids();
+    let registered = session.sandbox.mcp_servers();
+    session.shutdown().await.unwrap();
+
+    assert_eq!(
+        tgids.len(),
+        1,
+        "the fixture connects (needs `node` on PATH)"
+    );
+    assert_eq!(tgids[0].0, "nf");
+    assert_eq!(
+        registered, tgids,
+        "the builder registers what the bridge reports"
+    );
+}

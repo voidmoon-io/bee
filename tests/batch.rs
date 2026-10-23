@@ -199,6 +199,14 @@ fn enforcement_trace_extracts_audit() {
         target: "/etc/shadow".into(),
     };
     let call = RecordedCall {
+        denied_attempt_audit: Vec::new(),
+        denied_attempt_proxy_events: Vec::new(),
+        escalations: Vec::new(),
+        retried: false,
+        timed_out: false,
+        not_run: false,
+        refused_by_hook: None,
+        proxy_events: Vec::new(),
         call: ToolCall {
             id: "c1".into(),
             name: "read_file".into(),
@@ -208,10 +216,17 @@ fn enforcement_trace_extracts_audit() {
         audit: vec![denied.clone()],
     };
     let transcript = EpisodeTranscript {
+        consents: Vec::new(),
+        mcp_audit: Default::default(),
+        finish_offered: false,
+        compactions: Vec::new(),
+        summary_usage: None,
+        http_scope: None,
         scenario_id: "s".into(),
         model_id: "mock/x".into(),
         status: EpisodeStatus::Completed,
         turns: vec![TranscriptTurn {
+            notes: Vec::new(),
             index: 0,
             assistant_text: None,
             calls: vec![call],

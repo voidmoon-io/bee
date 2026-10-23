@@ -36,3 +36,15 @@ search-in-scope
 skill-grant-allow
 skill-grant-deny
 teardown-kills-descendants
+connect-target-audited
+lease-expiry
+lease-release
+http-in-scope
+http-out-of-scope
+http-direct-target
+http-direct-other
+http-proxy-scope
+http-sni-mismatch
+http-store-protected
+http-proxy-fs-deny
+http-latency

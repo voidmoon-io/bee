@@ -29,7 +29,9 @@ if [ "${BEE_SKIP_BUILD:-0}" != 1 ]; then
   # concurrent-audit-isolation one, which used to need a second binary and skipped without it.
   # `sec` is here for the 016 scanner case: without it `scan` is a compiled-out stub that reports
   # `not compiled in` — which is a correct answer, and would sail past a case looking for a leak.
-  ( cd "$REPO" && cargo build --features concurrent,sec --release )
+  # `vm-test` (implies `intercept`) adds the 019 interception proxy and its test-only debug probes,
+  # which the `http-*` cases need; it is never part of a shipping build.
+  ( cd "$REPO" && cargo build --features concurrent,sec,vm-test --release )
 fi
 BIN="$REPO/target/release/bee"
 [ -x "$BIN" ] || { echo "FAIL: $BIN not found (build first)"; exit 1; }

@@ -46,6 +46,14 @@ out=$(run_bee "$WORK/net.toml" -- bash -c 'curl -sS --max-time 8 -o /dev/null -w
 if connected "$out"; then emit net-allow PASS "http=$out"; else emit net-allow FAIL "http=$out"; fi
 out=$(run_bee "$WORK/net.toml" -- bash -c 'curl -sS --max-time 8 -o /dev/null -w %{http_code} https://8.8.8.8')
 if [ "$out" = 000 ]; then emit net-deny PASS "connection blocked"; else emit net-deny FAIL "http=$out (expected block)"; fi
+# 019 P5 (FR-009): the denial just above must name where it was going. Before P5 a kernel connect
+# audit carried an empty target, so the operator saw "connect denied" with no destination and
+# reactive network escalation could not build a grant. Read from the same run's audit stream.
+if grep -q '"op":"connect","decision":"denied","errno":-1,"target":"8.8.8.8:443"' "$WORK/err"; then
+  emit connect-target-audited PASS "denial names 8.8.8.8:443"
+else
+  emit connect-target-audited FAIL "no connect audit naming 8.8.8.8:443: $(grep -o '"op":"connect"[^}]*' "$WORK/err" | head -2 | tr '\n' ' ')"
+fi
 
 # A non-IP destination is still egress. The policy language spells destinations `host:port`, so no
 # rule can ever allow an AF_UNIX socket — and "no rule matches" in an enforcing scope means deny.
@@ -420,6 +428,7 @@ mode = "enforce"
 EOF
   cat >"$WORK/ep-deny.scn.toml" <<EOF
 [scenario]
+finish        = false  # 025: these cases pin the pre-finish ending ("completed")
 id            = "episode-file-deny"
 policy_path   = "$WORK/ep-deny.policy.toml"
 system_prompt = "You are a sandboxed agent."
@@ -463,6 +472,7 @@ mode = "enforce"
 EOF
   cat >"$WORK/ep-allow.scn.toml" <<EOF
 [scenario]
+finish        = false  # 025: these cases pin the pre-finish ending ("completed")
 id            = "episode-allow"
 policy_path   = "$WORK/ep-allow.policy.toml"
 system_prompt = "You are a sandboxed agent."
@@ -540,6 +550,7 @@ EOF
   rm -f /home/ubuntu/skgrant/out.txt
   cat >"$WORK/sk-allow.scn.toml" <<EOF
 [scenario]
+finish        = false  # 025: these cases pin the pre-finish ending ("completed")
 id            = "skill-grant-allow"
 policy_path   = "$WORK/sk-base.policy.toml"
 ceiling_policy_path = "$WORK/sk-ceiling.policy.toml"
@@ -568,6 +579,7 @@ EOF
   rm -f /home/ubuntu/skgrant/out.txt
   cat >"$WORK/sk-deny.scn.toml" <<EOF
 [scenario]
+finish        = false  # 025: these cases pin the pre-finish ending ("completed")
 id            = "skill-grant-deny"
 policy_path   = "$WORK/sk-base.policy.toml"
 system_prompt = "You are a sandboxed agent."
@@ -630,6 +642,7 @@ EOF
   rm -f /home/ubuntu/dyngrant/out.txt
   cat >"$WORK/dyn-allow.scn.toml" <<EOF
 [scenario]
+finish        = false  # 025: these cases pin the pre-finish ending ("completed")
 id            = "reload-widen-allow"
 policy_path   = "$WORK/dyn-base.policy.toml"
 ceiling_policy_path = "$WORK/dyn-ceiling.policy.toml"
@@ -657,6 +670,7 @@ EOF
   rm -f /home/ubuntu/dyngrant/out.txt
   cat >"$WORK/dyn-deny.scn.toml" <<EOF
 [scenario]
+finish        = false  # 025: these cases pin the pre-finish ending ("completed")
 id            = "reload-beyond-ceiling"
 policy_path   = "$WORK/dyn-base.policy.toml"
 ceiling_policy_path = "$WORK/dyn-base.policy.toml"
@@ -676,6 +690,72 @@ EOF
     emit reload-beyond-ceiling PASS "beyond-ceiling escalation refused; write stayed kernel-denied"
   else
     emit reload-beyond-ceiling FAIL "refused escalation did not stay denied ($(tail -1 "$WORK/dyn-deny.log" 2>/dev/null))"
+  fi
+
+  # ------------------------------------------- 024 FR-042: a lease that runs out narrows the kernel
+  # lease-expiry — the same denial → escalate → retry, but the grant lasts one model turn
+  # (`lease_turns = 1`). Turn 0 writes (denied, granted, retried). At the start of turn 1 the lease
+  # expires and the scope is reloaded narrower, so turn 1's identical write is denied by the kernel
+  # again before it is re-escalated. Without expiry the second write succeeds first time and the
+  # transcript holds one denied attempt, not two.
+  cat >"$WORK/lease.prov.toml" <<'EOF'
+[provider]
+provider = "mock"
+[[provider.script]]
+tool = "write_file"
+args = { path = "/home/ubuntu/dyngrant/out.txt", content = "turn 0\n" }
+[[provider.script]]
+tool = "write_file"
+args = { path = "/home/ubuntu/dyngrant/out.txt", content = "turn 1\n" }
+[[provider.script]]
+text = "Done."
+EOF
+  rm -f /home/ubuntu/dyngrant/out.txt
+  cat >"$WORK/lease.scn.toml" <<EOF
+[scenario]
+finish        = false  # 025: these cases pin the pre-finish ending ("completed")
+id            = "lease-expiry"
+policy_path   = "$WORK/dyn-base.policy.toml"
+ceiling_policy_path = "$WORK/dyn-ceiling.policy.toml"
+system_prompt = "You are a sandboxed agent."
+task          = "Write the output twice."
+turn_limit    = 4
+timeout_secs  = 30
+tools         = ["write_file"]
+lease_turns   = 1
+EOF
+  sudo "$BEE" run --scenario "$WORK/lease.scn.toml" --provider "$WORK/lease.prov.toml" \
+    --out "$WORK/lease.json" >"$WORK/lease.log" 2>&1
+  t="$WORK/lease.json"
+  denied_attempts=$(grep -c '"denied_attempt_audit"' "$t" 2>/dev/null || echo 0)
+  if [ -f "$t" ] \
+     && grep -q 'lease expired: g0' "$WORK/lease.log" \
+     && [ "$denied_attempts" -eq 2 ] \
+     && [ "$(cat /home/ubuntu/dyngrant/out.txt 2>/dev/null)" = "turn 1" ]; then
+    emit lease-expiry PASS "lease expired at turn 1; the kernel denied the same write again"
+  else
+    emit lease-expiry FAIL "denied attempts=$denied_attempts; $(grep -o 'lease expired[^"]*' "$WORK/lease.log" | head -1)"
+  fi
+
+  # lease-release — the same two writes, but the grant does not expire: a `Deescalate` hook releases
+  # it at the top of turn 1 (024 SC-010). The hook is the vm-test build's `VmReleaseHook`, set by
+  # `BEE_VM_RELEASE_LEASE`. After the release the scope is reloaded narrower, so turn 1's write is
+  # kernel-denied again before it is re-escalated. Without the release it succeeds first time.
+  sed -e 's/^id .*/id            = "lease-release"/' -e '/^lease_turns/d' \
+    "$WORK/lease.scn.toml" >"$WORK/release.scn.toml"
+  rm -f /home/ubuntu/dyngrant/out.txt
+  sudo env BEE_VM_RELEASE_LEASE=1:g0 "$BEE" run --scenario "$WORK/release.scn.toml" \
+    --provider "$WORK/lease.prov.toml" --out "$WORK/release.json" >"$WORK/release.log" 2>&1
+  t="$WORK/release.json"
+  denied_attempts=$(grep -c '"denied_attempt_audit"' "$t" 2>/dev/null || echo 0)
+  if [ -f "$t" ] \
+     && grep -q 'lease released: g0' "$WORK/release.log" \
+     && ! grep -q 'lease expired' "$WORK/release.log" \
+     && [ "$denied_attempts" -eq 2 ] \
+     && [ "$(cat /home/ubuntu/dyngrant/out.txt 2>/dev/null)" = "turn 1" ]; then
+    emit lease-release PASS "lease released at turn 1; the kernel denied the same write again"
+  else
+    emit lease-release FAIL "denied attempts=$denied_attempts; $(grep -o 'lease [a-z]*: [^"]*' "$WORK/release.log" | head -1)"
   fi
   rm -rf /home/ubuntu/dynwork /home/ubuntu/dyngrant
 else
@@ -761,6 +841,7 @@ EOF
   scan_scenario() { # file  policy
     cat >"$1" <<EOF
 [scenario]
+finish        = false  # 025: these cases pin the pre-finish ending ("completed")
 id            = "scanner-escape"
 policy_path   = "$2"
 system_prompt = "You are a sandboxed agent."
@@ -826,6 +907,7 @@ EOF
   mkdir -p "$WORK/iso-scn" "$WORK/iso-prov"
   cat >"$WORK/iso-scn/iso.scn.toml" <<EOF
 [scenario]
+finish        = false  # 025: these cases pin the pre-finish ending ("completed")
 id            = "iso"
 policy_path   = "$WORK/iso.policy.toml"
 system_prompt = "You are a sandboxed agent."
@@ -871,6 +953,169 @@ EOF
   rm -rf "$ISO"
 else
   echo "RESULT|concurrent-audit-isolation|SKIP|no bee at $BEE"
+fi
+
+# ---------------------------------------------------------------- 019: HTTP interception (US1)
+# One scripted episode under `[policy.http]`, one tool call per probe. Each call is its own credential
+# (its own call id), so every probe is attributed separately in the transcript. The in-VM targets are
+# python http.servers on loopback; 18081 is deliberately NOT in scope and logs every request it gets,
+# so "no upstream connection" is checked at the destination, not inferred.
+HTTP_CASES="http-in-scope http-out-of-scope http-direct-target http-direct-other http-proxy-scope http-sni-mismatch http-store-protected http-proxy-fs-deny http-latency"
+if [ -x "$BEE" ] && "$BEE" run --help 2>/dev/null | grep -q -- '--http-scope-advisory' \
+   && "$BEE" proxy-worker --help >/dev/null 2>&1; then
+  HW=/home/ubuntu/httpwork
+  rm -rf "$HW"; mkdir -p "$HW/www" "$HW/other" "$HW/src"
+  echo "in-scope-ok" >"$HW/www/index.html"
+  echo "project-secret" >"$HW/src/secret.txt"
+  ( cd "$HW/www" && exec python3 -m http.server 18080 --bind 127.0.0.1 ) >/dev/null 2>&1 &
+  T1=$!
+  ( cd "$HW/other" && exec python3 -m http.server 18081 --bind 127.0.0.1 ) >"$HW/other.log" 2>&1 &
+  T2=$!
+  openssl req -x509 -newkey rsa:2048 -nodes -subj "/CN=app.test" -days 1 \
+    -keyout "$HW/key.pem" -out "$HW/cert.pem" >/dev/null 2>&1
+  openssl s_server -accept 127.0.0.1:18443 -cert "$HW/cert.pem" -key "$HW/key.pem" -www -quiet \
+    >/dev/null 2>&1 &
+  T3=$!
+  sleep 1
+  # `dash`: the bash tool runs its command with `sh -c`, and on Ubuntu `sh` is dash — the kernel checks
+  # the resolved image, so the allowlist names `dash`, not `sh`. Without it every tool call here is
+  # refused at exec, and the cases below would be judging a refusal.
+  printf '%s\n' '[policy]' 'name = "http-vm"' 'mode = "enforce"' \
+    '[policy.exec]' 'allow = ["dash", "bash", "curl", "cat", "openssl", "head", "timeout"]' \
+    '[policy.filesystem]' '"/home/ubuntu/httpwork" = "write"' \
+    '[policy.http]' 'targets = ["127.0.0.1:18080", "127.0.0.1:18443"]' >"$HW/policy.toml"
+  printf '%s\n' '[scenario]' 'id = "http-vm"' "policy_path = \"$HW/policy.toml\"" \
+    'system_prompt = "test"' 'task = "probe"' 'turn_limit = 16' 'timeout_secs = 120' \
+    'tools = ["bash", "http_history", "http_debug"]' >"$HW/scn.toml"
+  # The SNI probe reads the call's own proxy credential out of HTTP_PROXY, as any client would.
+  python3 - "$HW" >"$HW/prov.toml" <<'PYPROV'
+import json, sys
+hw = sys.argv[1]
+sni = ("P=${HTTP_PROXY#http://}; U=${P%@*}; HP=${P#*@}; echo | timeout 10 openssl s_client "
+       "-proxy $HP -proxy_user ${U%%:*} -proxy_pass pass:${U#*:} -connect 127.0.0.1:18443 "
+       "-servername other.test 2>&1 | head -5; echo done")
+steps = [
+    ("bash", {"command": "curl -sS -o /dev/null -w 'code=%{http_code}' http://127.0.0.1:18080/"}),
+    ("bash", {"command": "curl -sS -o /dev/null -w 'code=%{http_code}' http://127.0.0.1:18081/"}),
+    ("bash", {"command": "curl -sS --max-time 5 --noproxy '*' -o /dev/null -w 'code=%{http_code}' http://127.0.0.1:18080/; echo"}),
+    ("bash", {"command": "curl -sS --max-time 5 --noproxy '*' -o /dev/null -w 'code=%{http_code}' http://1.1.1.1/; echo"}),
+    ("http_debug", {"connect": "1.1.1.1:443"}),
+    ("bash", {"command": sni}),
+    # No `>/dev/null`: a scope that grants a write denies writes to unlisted paths, /dev/null among
+    # them, and the redirect would fail before the read was ever attempted. The read goes into a
+    # shell variable instead.
+    ("bash", {"command": "x=$(head -c 16 .bee/http/index.sqlite) && [ -n \"$x\" ] && echo READ-OK; echo x > .bee/http/blobs/x && echo WRITE-OK; true"}),
+    ("http_debug", {"read": hw + "/src/secret.txt"}),
+    ("http_history", {}),
+]
+print("[provider]\nprovider = \"mock\"")
+for tool, args in steps:
+    # TOML basic strings are JSON-compatible for these values.
+    inline = ", ".join(f"{k} = {json.dumps(v)}" for k, v in args.items())
+    print(f"[[provider.script]]\ntool = \"{tool}\"\nargs = {{ {inline} }}")
+print("[[provider.script]]\ntext = \"done\"")
+PYPROV
+  ( cd "$HW" && "$BEE" run --scenario "$HW/scn.toml" --provider "$HW/prov.toml" \
+      --out "$HW/t.json" ) >"$HW/run.log" 2>&1
+  # http-latency (SC-007, T093): added latency of the proxy for an in-scope GET, gated here on the
+  # dedicated VM rather than on shared CI runners (research R19a). Direct timings come from this
+  # root shell (outside any scope); proxied ones from a tool child going through the session proxy.
+  LAT_N=300
+  for _ in $(seq 1 50); do curl -s -o /dev/null http://127.0.0.1:18080/; done
+  for _ in $(seq 1 $LAT_N); do curl -s -o /dev/null -w '%{time_total}\n' http://127.0.0.1:18080/; done >"$HW/direct.txt"
+  # Builtins only for the loop: the scope's exec allowlist has no `seq`, and a denied `seq` turns the
+  # tool's output into an `sh:` error instead of timings (the false-result trap in test/vm/README).
+  LATCMD="i=0; while [ \$i -lt 50 ]; do curl -s -o /dev/null http://127.0.0.1:18080/; i=\$((i+1)); done; i=0; while [ \$i -lt $LAT_N ]; do curl -s -o /dev/null -w '%{time_total} ' http://127.0.0.1:18080/; i=\$((i+1)); done"
+  python3 - "$LATCMD" >"$HW/lat.prov.toml" <<'PYLAT'
+import json, sys
+print('[provider]\nprovider = "mock"')
+print(f'[[provider.script]]\ntool = "bash"\nargs = {{ command = {json.dumps(sys.argv[1])} }}')
+print('[[provider.script]]\ntext = "done"')
+PYLAT
+  sed 's/turn_limit = 16/turn_limit = 4/; s/timeout_secs = 120/timeout_secs = 300/' "$HW/scn.toml" >"$HW/lat.scn.toml"
+  ( cd "$HW" && "$BEE" run --scenario "$HW/lat.scn.toml" --provider "$HW/lat.prov.toml" \
+      --out "$HW/lat.json" ) >"$HW/lat.log" 2>&1
+  while IFS='|' read -r c st note; do emit "$c" "$st" "$note"; done < <(python3 - "$HW/direct.txt" "$HW/lat.json" <<'PYLATCHECK'
+import json, sys
+def q(v, p):
+    v = sorted(v)
+    return v[int((len(v) - 1) * p)]
+try:
+    direct = [float(x) for x in open(sys.argv[1]).read().split()]
+    t = json.load(open(sys.argv[2]))
+    proxied = [float(x) for x in t["turns"][0]["calls"][0]["result"]["content"].split()]
+    med = (q(proxied, 0.5) - q(direct, 0.5)) * 1000
+    p95 = (q(proxied, 0.95) - q(direct, 0.95)) * 1000
+    ok = len(proxied) >= 100 and med <= 50 and p95 <= 200
+    print(f"http-latency|{'PASS' if ok else 'FAIL'}|added median {med:.1f} ms, p95 {p95:.1f} ms over {len(proxied)} requests (limits 50 / 200)")
+except Exception as e:
+    # Say what the tool actually printed: a parse error alone hides a denied command or a missing file.
+    try:
+        got = json.load(open(sys.argv[2]))["turns"][0]["calls"][0]["result"]["content"][:160]
+    except Exception as e2:
+        got = f"<no transcript: {e2}>"
+    got = got.replace("|", "/").replace("\n", " ")
+    print(f"http-latency|FAIL|could not measure: {e}; tool output began: {got}")
+PYLATCHECK
+)
+  kill "$T1" "$T2" "$T3" 2>/dev/null
+  if [ ! -f "$HW/t.json" ]; then
+    for c in $HTTP_CASES; do
+      [ "$c" = http-latency ] && continue  # measured separately above
+      emit "$c" FAIL "no transcript: $(tail -3 "$HW/run.log" | tr '\n' ' ')"
+    done
+  else
+    # One python pass over the transcript; prints `case|PASS|note` lines. A case it never printed — the
+    # checker crashed, or skipped it — is a FAIL, not an absence: a missing line must not read as green.
+    seen=""
+    while IFS='|' read -r c st note; do seen="$seen $c"; emit "$c" "$st" "$note"; done < <(python3 - "$HW/t.json" "$HW/other.log" 2>"$HW/check.err" <<'PYCHECK'
+import json, sys
+t = json.load(open(sys.argv[1]))
+other_log = open(sys.argv[2]).read()
+calls = [c for turn in t["turns"] for c in turn.get("calls", [])]
+def res(i): return calls[i]["result"]["content"] if i < len(calls) else ""
+def audit(i): return calls[i].get("audit", []) if i < len(calls) else []
+def pev(i): return calls[i].get("proxy_events", []) if i < len(calls) else []
+def out(case, ok, note): print(f"{case}|{'PASS' if ok else 'FAIL'}|{note}")
+ids = [c["call"]["id"] for c in calls]
+hist = res(8)
+out("http-in-scope", "code=200" in res(0) and bool(ids) and ids[0] in hist,
+    f"curl via proxy: {res(0)[:60]!r}; in history: {bool(ids) and ids[0] in hist}")
+oos = [e for e in pev(1) if e["kind"] == "refused_out_of_scope"]
+out("http-out-of-scope", "code=403" in res(1) and bool(oos) and "GET /" not in other_log,
+    f"{res(1)[:40]!r}, proxy_event={bool(oos)}, upstream_hits={other_log.count('GET /')}")
+def kdeny(i, target):
+    return [a for a in audit(i) if a["op"] == "connect" and a["decision"] == "denied"
+            and a.get("scope_id") != "proxy" and (target is None or a["target"] == target)]
+out("http-direct-target", "code=000" in res(2) and bool(kdeny(2, "127.0.0.1:18080")),
+    f"{res(2).strip()[:60]!r}, kernel denials={[a['target'] for a in kdeny(2, None)]}")
+out("http-direct-other", "code=000" in res(3) and bool(kdeny(3, "1.1.1.1:80")),
+    f"{res(3).strip()[:60]!r}, kernel denials={[a['target'] for a in kdeny(3, None)]}")
+px = [a for a in audit(4) if a.get("scope_id") == "proxy" and a["op"] == "connect"
+      and a["target"] == "1.1.1.1:443"]
+out("http-proxy-scope", "errno=1" in res(4) and bool(px),
+    f"{res(4)!r}, proxy-scope audit={[(a['op'], a['target']) for a in audit(4)]}")
+sni = [e for e in pev(5) if e["kind"] == "refused_sni_mismatch"]
+out("http-sni-mismatch", bool(sni) and "BEGIN CERTIFICATE" not in res(5), f"proxy_event={bool(sni)}")
+fs = [a for a in audit(6) if a["op"] == "file_open" and a["decision"] == "denied"
+      and ".bee/http" in a["target"]]
+out("http-store-protected", "READ-OK" not in res(6) and "WRITE-OK" not in res(6) and len(fs) >= 2,
+    f"denials={[a['target'] for a in fs]}; output={res(6).strip()[:120]!r}")
+pf = [a for a in audit(7) if a.get("scope_id") == "proxy" and a["op"] == "file_open"
+      and "secret.txt" in a["target"]]
+out("http-proxy-fs-deny", "errno=13" in res(7) and bool(pf), f"{res(7)!r}, proxy-scope audit={bool(pf)}")
+PYCHECK
+)
+    for c in $HTTP_CASES; do
+      [ "$c" = http-latency ] && continue  # judged separately above
+      case " $seen " in *" $c "*) ;; *) emit "$c" FAIL "not judged: $(tail -1 "$HW/check.err" 2>/dev/null)" ;; esac
+    done
+  fi
+  rm -rf "$HW"
+else
+  for c in $HTTP_CASES; do
+    emit "$c" FAIL "bee was not built with --features vm-test (see test/vm/README.md)"
+  done
 fi
 
 rm -rf "$WORK"

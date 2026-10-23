@@ -127,19 +127,23 @@ fn write_all<M: ScopeMaps>(
     maps.set_meta(cgroup_id, plan.meta)?;
     undo.push(Undo::Meta(prev_meta));
 
+    // An undo is recorded only for a write that happened: undoing a no-op would delete a key that
+    // is not there, which the kernel reports as a failure.
     if plan.has_fs_rules {
         maps.set_fs(cgroup_id, plan.fs_rules)?;
+        undo.push(Undo::Fs(prev_fs));
     } else if prev_fs.is_some() {
         maps.remove_fs(cgroup_id)?;
+        undo.push(Undo::Fs(prev_fs));
     }
-    undo.push(Undo::Fs(prev_fs));
 
     if plan.has_exec_rules {
         maps.set_exec(cgroup_id, plan.exec_rules)?;
+        undo.push(Undo::Exec(prev_exec));
     } else if prev_exec.is_some() {
         maps.remove_exec(cgroup_id)?;
+        undo.push(Undo::Exec(prev_exec));
     }
-    undo.push(Undo::Exec(prev_exec));
 
     for key in installed.iter().filter(|k| !wanted.contains(k)) {
         maps.remove_net(key)?;
@@ -272,8 +276,7 @@ mod tests {
         }
         fn remove_fs(&mut self, c: u64) -> Result<(), String> {
             self.tick()?;
-            self.fs.remove(&c);
-            Ok(())
+            self.fs.remove(&c).map(|_| ()).ok_or_else(absent)
         }
         fn exec(&self, c: u64) -> Result<Option<DenyList>, String> {
             Ok(self.exec.get(&c).copied())
@@ -285,8 +288,7 @@ mod tests {
         }
         fn remove_exec(&mut self, c: u64) -> Result<(), String> {
             self.tick()?;
-            self.exec.remove(&c);
-            Ok(())
+            self.exec.remove(&c).map(|_| ()).ok_or_else(absent)
         }
         fn net_keys(&self, c: u64) -> Result<Vec<NetKey>, String> {
             Ok(self
@@ -303,9 +305,17 @@ mod tests {
         }
         fn remove_net(&mut self, k: &NetKey) -> Result<(), String> {
             self.tick()?;
-            self.net.remove(&(k.cgroup_id, k.port));
-            Ok(())
+            self.net
+                .remove(&(k.cgroup_id, k.port))
+                .then_some(())
+                .ok_or_else(absent)
         }
+    }
+
+    /// The fake deletes strictly, as the kernel does: removing an absent key is an error. `apply`
+    /// must never ask for one.
+    fn absent() -> String {
+        "ENOENT: no such key".into()
     }
 
     /// A live scope holding fs + exec rules and egress to ports 1 and 2, beside an unrelated scope.
@@ -366,6 +376,31 @@ mod tests {
                 );
                 assert_eq!(f.state(), live().state(), "{name} write {k} left a mixture");
             }
+        }
+    }
+
+    #[test]
+    fn a_scope_without_fs_or_exec_rules_rolls_back_cleanly() {
+        // Neither the scope nor the plan has fs or exec rules, so there is nothing to undo there. A
+        // failure on the last write must still roll back to `Refused`, not trip over a delete of a
+        // key that was never written.
+        let bare = || {
+            let mut f = Fake::default();
+            f.meta.insert(CG, meta(1));
+            f.net.insert((CG, 1));
+            f
+        };
+        let p = plan(2, None, None, &[2]);
+        let mut probe = bare();
+        apply(&mut probe, CG, &p).unwrap();
+        for k in 0..probe.writes {
+            let mut f = Fake {
+                fail_at: Some(k),
+                ..bare()
+            };
+            let err = apply(&mut f, CG, &p).unwrap_err();
+            assert!(matches!(err, ReloadError::Refused(_)), "write {k}: {err}");
+            assert_eq!(f.state(), bare().state(), "write {k} left a mixture");
         }
     }
 

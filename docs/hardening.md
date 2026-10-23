@@ -14,7 +14,8 @@ only strengthen it. Explicit root write rules retain their existing default-deny
 Startup and dynamic grants install the policy returned by derivation, including inherited executable
 pins. Lease addition, release, and expiry use the same normalization. Grant transitions install the
 candidate policy before changing the active lease set or tool membership. A refused widening keeps
-the current state. A failed mandatory narrowing terminates execution and makes the sandbox refuse
+the current state. Cancellation during a kernel/proxy policy transition stops further dispatch
+because the two layers may disagree. A failed mandatory narrowing terminates execution and makes the sandbox refuse
 further tool dispatch.
 
 `Turns(1)` grants last through the granting model turn and expire before the next turn's tool schemas
@@ -28,7 +29,9 @@ grant and prevents its expiry, Bee terminates the run. Quiescing persistent serv
 implemented.
 
 Hooks interpret every action in both execution loops. `Continue` and `Terminate` are valid at every
-event. `Deny` and `Escalate` apply before a tool call or after a kernel denial. `Deescalate` also works
+event. `Deny` and `Escalate` apply before a tool call, after a kernel denial, or after a proxy refusal.
+`RefreshTools` applies at turn start. Hooks compose through the shared dispatcher; denial takes
+precedence over escalation. `Deescalate` also works
 at turn start and after tool results. Other combinations terminate with a contract error. A reactive
 grant permits at most one retry; a reactive denial prevents retry but cannot undo the first attempt.
 
@@ -110,7 +113,8 @@ an empty ring. Retention is capped at 4,096 events across a sandbox's lifetime, 
 REPL exchanges. Call records and the transcript trail can hold copies of these retained events.
 Overflow, retention loss, dispatcher failure, and incomplete drain state propagate through additive
 `audit_health` fields. Bee displays a warning and scoring sets `evidence_incomplete`; incomplete
-evidence cannot count as a captured flag. Older transcripts deserialize with default health fields.
+evidence cannot count as a captured flag. Older transcripts deserialize with default health fields; the health key is omitted when all
+fields are at their default, preserving round trips of existing transcripts.
 
 Kernel ring-buffer reservation loss is not counted. Absence of a userspace loss flag is therefore
 not proof of complete audit evidence.

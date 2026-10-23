@@ -2,16 +2,16 @@
 //!
 //! Built on the same session construction as `bee run`, so the enforcement path for a headless and
 //! an interactive session is one piece of code rather than two that happen to agree. What stays
-//! here is what genuinely belongs to an interactive session: the consent prompt, the startup
-//! banner, the front-end choice, and the transcript on exit.
+//! here is what genuinely belongs to an interactive session: its Operator — consent asked of the
+//! person at the terminal, through the front-end's own reader — the startup banner, the front-end
+//! choice, and the transcript on exit.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Args;
 
-use bee::repl::{run_repl, ReplConfig};
-use bee::tools::registry_for;
+use bee::repl::{run_repl, ReplConfig, ReplTerminal};
 
 use crate::app::config::{self, Flags};
 use crate::app::session::{self, EX_IOERR, EX_SOFTWARE, EX_USAGE};
@@ -79,6 +79,11 @@ pub struct ReplArgs {
     /// Required to start an unenforced session — bee will not fall back to one silently.
     #[arg(long, conflicts_with = "policy")]
     pub host: bool,
+    /// Accept `[policy.http]` interception enforced by the proxy alone, when the kernel will not
+    /// block (a policy in `mode = "observe"`). Without it such a session refuses to start.
+    /// Deliberately not settable from any configuration file.
+    #[arg(long)]
+    pub http_scope_advisory: bool,
 }
 
 impl ReplArgs {
@@ -152,126 +157,142 @@ async fn repl(args: ReplArgs) -> ExitCode {
         Err(e) => return session::fail(CMD, &e),
     };
 
-    let mut registry = registry_for(&cfg.tools, None);
+    // The context budget (025), built now so a bad `[context]` is refused before anything starts and
+    // a guessed window is announced once.
+    let context_inputs = bee::context::ContextInputs {
+        config: cfg.context,
+        provider_window: cfg.provider.context_window,
+        max_tokens: cfg.provider.max_tokens,
+    };
+    let context = match bee::context::ContextManager::for_session(
+        &context_inputs,
+        None,
+        session.model.id(),
+    ) {
+        Ok((ctx, notice)) => {
+            if let Some(n) = notice {
+                eprintln!("{CMD}: {n}");
+            }
+            ctx
+        }
+        Err(e) => {
+            eprintln!("{CMD}: invalid [context]: {e}");
+            return ExitCode::from(EX_USAGE);
+        }
+    };
+    // Stuck detection (025 US2), refused here for the same reason.
+    let stuck = match cfg.stuck.resolve() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{CMD}: invalid [stuck]: {e}");
+            return ExitCode::from(EX_USAGE);
+        }
+    };
 
-    // Strip the provider key plus any MCP token variables from tool children (FR-018/FR-041).
-    #[cfg(feature = "mcp")]
-    let mcp_policy = match &cfg.mcp_config {
+    // MCP servers come from the configured file; a bad one is a usage error before anything starts.
+    let mcp = match &cfg.mcp_config {
         Some(path) => match bee::McpPolicy::from_path(path) {
-            Ok(p) => Some(p),
+            Ok(p) => p,
             Err(e) => {
                 eprintln!("{CMD}: mcp config error: {e}");
                 return ExitCode::from(EX_USAGE);
             }
         },
-        None => None,
+        None => bee::McpPolicy::default(),
     };
-
-    #[cfg_attr(not(feature = "mcp"), allow(unused_mut))]
+    // Strip the provider key plus any MCP token variables from tool children (FR-018/FR-041).
     let mut strip_env = session::strip_vars(session.key_env.as_deref());
-    #[cfg(feature = "mcp")]
-    if let Some(p) = &mcp_policy {
-        strip_env.extend(p.token_env_names());
-    }
+    strip_env.extend(mcp.token_env_names());
 
-    let skills = session::discover_skills(&cwd, CMD);
-
-    // Grants resolve before the scope compiles, so the widened policy is what gets enforced.
-    let resolved_policy = session::resolve_grants(
-        cfg.policy.as_ref(),
-        cfg.ceiling.as_ref(),
-        &skills,
-        &mut registry,
-        &(prompt_consent as fn(&bee::skills::GrantRequest<'_>) -> bool),
-        CMD,
-    )
-    .await;
-
-    // The model-facing `skill` tool; `/skill` reads the same registry regardless.
-    if skills.model_facing().next().is_some() {
-        registry.insert(Box::new(bee::tools::skill::SkillTool::new(skills.clone())));
-    }
-
-    // Give the security tools the session's ledger and scanner grants (016-native-tools). After
-    // grant resolution, so a scanner a skill widened the policy to include is visible; before the
-    // policy is moved into the scope, which is the last point it can be read.
-    bee::tools::configure_security_tools(
-        &mut registry,
-        &cfg.security,
-        resolved_policy.as_ref(),
-        &format!("repl-{}", std::process::id()),
-    );
-
-    // Dynamic capability grants (007-dynamic-grants). The floor is the resolved policy — the one the
-    // scope is about to compile — so escalation can only ever widen what is actually enforced. The
-    // ceiling is the operator's; absent one it equals the base, which disables widening entirely.
-    //
-    // Consent here is the same interactive prompt that gated the startup grants, not the episode
-    // path's `AllowWithinCeiling`: the operator is sitting in front of this session, so a capability
-    // asked for mid-session is a question, not a pre-authorization.
-    let escalation = resolved_policy
-        .as_ref()
-        .map(|base| {
-            let ceiling = cfg.ceiling.clone().unwrap_or_else(|| base.clone());
-            let hooks: Vec<Box<dyn bee::hooks::LoopHook>> = vec![
-                Box::new(bee::grants::escalate::DenialEscalationHook {
-                    enabled: cfg.ceiling.is_some(),
-                }),
-                Box::new(bee::grants::escalate::SkillEscalationHook::new(
-                    skills.clone(),
-                )),
-            ];
-            bee::repl::ReplEscalation::new(bee::grants::escalate::LoopEscalation {
-                base: base.clone(),
-                ceiling,
-                hooks,
-                consent: std::sync::Arc::new(
-                    prompt_consent as fn(&bee::skills::GrantRequest<'_>) -> bool,
-                ),
-                timeout: std::time::Duration::from_secs(120),
-                default_ttl: bee::grants::Ttl::Forever,
-            })
-        })
-        .transpose();
-    let escalation = match escalation {
-        Ok(value) => value,
-        Err(detail) => {
-            eprintln!("{CMD}: {detail}");
-            return ExitCode::from(EX_SOFTWARE);
-        }
-    };
-
-    let (mut sbox, policy_label) =
-        match session::build_sandbox(resolved_policy, cfg.policy_path.as_deref(), strip_env) {
-            Ok(pair) => pair,
-            Err(detail) => {
-                eprintln!("{CMD}: {detail}");
-                return ExitCode::from(EX_SOFTWARE);
-            }
+    // The operator is sitting in front of this session, so a capability asked for is a question, not
+    // a pre-authorization (024 FR-001). The inline REPL opens its terminal first: the questions asked
+    // while the session is built and those asked while it runs share its one line reader.
+    let use_tui = choose_frontend(&args);
+    let (consent, consent_rx) = bee::operator::ChannelConsent::new();
+    let (operator, mut terminal, mut tui_consent) = if use_tui {
+        // The TUI asks in a modal; the operator reports into each turn's chat once it runs.
+        (
+            bee::operator::Operator::interactive(
+                consent,
+                std::sync::Arc::new(bee::operator::NullOutput),
+            ),
+            None,
+            Some(consent_rx),
+        )
+    } else {
+        // Off a terminal there is nobody to ask: the channel's far end is dropped, so every request
+        // is refused, and `run_repl` reports why the session cannot start.
+        let terminal = ReplTerminal::open().map(|t| t.with_consent(consent_rx));
+        let output: std::sync::Arc<dyn bee::operator::SessionOutput> = match &terminal {
+            Ok(t) => t.output(),
+            Err(_) => std::sync::Arc::new(bee::operator::NullOutput),
         };
-
-    // Connect MCP servers, register their tools alongside the built-ins, and build the per-turn
-    // refresh hook (FR-043). The bridge owns the stdio children for the session and is dropped
-    // before the scope, so the children die inside the scope they were launched in.
-    #[cfg(feature = "mcp")]
-    let (mcp_bridge, mcp_summary, mcp_refresh) = match mcp_policy {
-        Some(policy) => {
-            let bridge = std::sync::Arc::new(bee::mcp::McpBridge::connect(policy, &sbox).await);
-            bridge.register_into(&mut registry);
-            let summary = bridge.summary();
-            let hook = bridge.clone();
-            let refresh: Box<dyn Fn(&mut bee::ToolRegistry) + Send + Sync> = Box::new(move |reg| {
-                if hook.take_dirty() {
-                    reg.remove_mcp_tools();
-                    hook.register_into(reg);
-                }
-            });
-            (Some(bridge), Some(summary), Some(refresh))
-        }
-        None => (None, None, None),
+        (
+            bee::operator::Operator::interactive(consent, output),
+            Some(terminal),
+            None,
+        )
     };
+
+    // The session, built the one way every entry point builds it (024 FR-006).
+    let spec = bee::session::SessionSpec {
+        entry: if use_tui {
+            bee::session::EntryPoint::Tui
+        } else {
+            bee::session::EntryPoint::Repl
+        },
+        label: "repl".into(),
+        policy: cfg.policy.clone(),
+        ceiling: cfg.ceiling.clone(),
+        enforcement: if args.host {
+            bee::session::Enforcement::Host
+        } else {
+            bee::session::Enforcement::Kernel
+        },
+        tools: cfg.tools.clone(),
+        ctf_flag: None,
+        skill_roots: bee::SkillRegistry::default_roots(&cwd),
+        mcp,
+        security: cfg.security.clone(),
+        workdir: cwd.clone(),
+        system_prompt: cfg
+            .system
+            .clone()
+            .unwrap_or_else(|| ReplConfig::default().system_prompt),
+        strip_env,
+        http_scope_advisory: args.http_scope_advisory,
+        lease_turns: None,
+        operator,
+        prebuilt_sandbox: None,
+    };
+    let report = |line: &str| eprintln!("{CMD}: {line}");
+    let building = bee::session::build(spec, &report);
+    let built = match (terminal.as_mut(), tui_consent.as_mut()) {
+        (Some(Ok(t)), _) => t.serve_startup(building).await,
+        #[cfg(feature = "tui")]
+        (_, Some(rx)) => bee::tui::serve_startup(building, rx).await,
+        _ => building.await,
+    };
+    let mut built = match built {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{CMD}: {e}");
+            return ExitCode::from(EX_USAGE);
+        }
+    };
+    #[cfg(feature = "intercept")]
+    if let Some(h) = &built.http {
+        eprintln!(
+            "{CMD}: HTTP interception on 127.0.0.1:{} ({} enforcement)",
+            h.interceptor.port(),
+            h.interceptor.enforcement().label()
+        );
+    }
+    let policy_label = policy_label(&cfg, args.host);
 
     let config = ReplConfig {
+        // The base prompt: `run_repl` adds the notes for the tools the session holds, as the builder
+        // did for the snapshot.
         system_prompt: cfg
             .system
             .clone()
@@ -280,54 +301,100 @@ async fn repl(args: ReplArgs) -> ExitCode {
         policy_label: policy_label.clone(),
         mascot: !args.no_bee && std::env::var_os("BEE_MASCOT").is_none_or(|v| v != "0"),
         #[cfg(feature = "mcp")]
-        mcp_summary,
-        #[cfg(feature = "mcp")]
-        refresh_tools: mcp_refresh,
-        skills: skills.clone(),
+        mcp_summary: built.mcp.as_ref().map(|b| b.summary()),
+        tool_refresh: built.tool_refresh.clone(),
+        skills: built.skills.clone(),
         visual: cfg.visual,
-        escalation,
+        escalation: match built
+            .escalation
+            .take()
+            .map(bee::repl::ReplEscalation::new)
+            .transpose()
+        {
+            Ok(escalation) => escalation,
+            Err(e) => {
+                eprintln!("bee: invalid escalation configuration: {e}");
+                return ExitCode::FAILURE;
+            }
+        },
+        #[cfg(feature = "intercept")]
+        http_pane: built
+            .http
+            .as_ref()
+            .map(|h| bee::intercept::pane::pane_source(h.interceptor.clone())),
+        context: context_inputs,
+        stuck,
+        state: std::sync::Mutex::new(bee::repl::ReplState::with_context(context)),
         ..ReplConfig::default()
     };
 
     print_banner(&session, &cfg, &policy_label, &config);
 
-    let use_tui = choose_frontend(&args);
     let session_out: Option<bee::repl::ReplSession> = {
         #[cfg(feature = "tui")]
         {
             if use_tui {
-                if let Err(e) =
-                    bee::tui::run(session.model.as_ref(), &mut registry, &mut sbox, &config).await
+                if let Err(e) = bee::tui::run(
+                    session.model.as_ref(),
+                    &mut built.registry,
+                    &mut built.sandbox,
+                    &config,
+                    tui_consent.take(),
+                )
+                .await
                 {
                     eprintln!("{CMD}: tui error: {e}");
                 }
                 None
             } else {
-                Some(run_repl(session.model.as_ref(), &mut registry, &mut sbox, &config).await)
+                Some(
+                    run_repl(
+                        terminal
+                            .take()
+                            .expect("the inline REPL opened its terminal"),
+                        session.model.as_ref(),
+                        &mut built.registry,
+                        &mut built.sandbox,
+                        &config,
+                    )
+                    .await,
+                )
             }
         }
         #[cfg(not(feature = "tui"))]
         {
-            if use_tui {
-                eprintln!("{CMD}: --tui requires building with --features tui; running inline");
-            }
-            Some(run_repl(session.model.as_ref(), &mut registry, &mut sbox, &config).await)
+            Some(
+                run_repl(
+                    terminal
+                        .take()
+                        .expect("the inline REPL opened its terminal"),
+                    session.model.as_ref(),
+                    &mut built.registry,
+                    &mut built.sandbox,
+                    &config,
+                )
+                .await,
+            )
         }
     };
 
-    // Drop the refresh hook (its bridge clone lives in `config`), then the bridge, killing the MCP
-    // children — which live in the scope cgroup — before the scope itself is torn down.
-    #[cfg(feature = "mcp")]
-    {
-        drop(config);
-        drop(mcp_bridge);
-    }
-    if let Err(e) = sbox.teardown() {
+    // The record of `[policy.http]`, read before the Interceptor is shut down.
+    let http_header = built.http_header();
+    // The config holds clones of the refresh source; drop it so shutdown releases the MCP servers,
+    // then tear down in the session's one order: MCP servers, the Interceptor, the scopes (FR-012).
+    drop(config);
+    if let Err(e) = built.shutdown().await {
         eprintln!("{CMD}: WARNING: {e} — a process may have outlived enforcement");
     }
 
     if let Some(path) = &args.save {
-        if let Some(transcript) = session_out.as_ref().and_then(|s| s.transcript.as_ref()) {
+        if let Some(mut transcript) = session_out
+            .as_ref()
+            .and_then(|s| s.transcript.as_ref())
+            .cloned()
+        {
+            transcript.http_scope = http_header;
+            let transcript = &transcript;
             match std::fs::write(path, transcript.to_json()) {
                 Ok(()) => eprintln!("{CMD}: saved transcript to {}", path.display()),
                 Err(e) => {
@@ -339,6 +406,15 @@ async fn repl(args: ReplArgs) -> ExitCode {
     }
 
     ExitCode::SUCCESS
+}
+
+/// The banner's policy line: what the session runs under.
+fn policy_label(cfg: &config::EffectiveConfig, host: bool) -> String {
+    match (&cfg.policy_path, host) {
+        (Some(p), false) => format!("{} (enforced)", p.display()),
+        (None, false) => "policy (enforced)".to_string(),
+        (_, true) => "none — host mode (no kernel scope)".to_string(),
+    }
 }
 
 fn print_banner(
@@ -393,7 +469,10 @@ fn choose_frontend(args: &ReplArgs) -> bool {
     }
     #[cfg(not(feature = "tui"))]
     {
-        args.tui && !args.no_tui
+        if args.tui && !args.no_tui {
+            eprintln!("{CMD}: --tui requires building with --features tui; running inline");
+        }
+        false
     }
 }
 
@@ -420,35 +499,4 @@ fn terminal_rows() -> Option<u16> {
         }
     }
     None
-}
-
-/// Interactive skill-grant consent: prompt on stderr, read a y/N line from stdin. Any non-`y`
-/// answer — including end-of-input — refuses, so the default is deny.
-///
-/// A plain function rather than a trait impl: `ConsentSink` is blanket-implemented for any
-/// `Fn(&GrantRequest) -> bool`, which is exactly what a prompt is. This is the interactive
-/// session's whole contribution to the otherwise-shared grant path.
-fn prompt_consent(request: &bee::skills::GrantRequest<'_>) -> bool {
-    use std::io::Write;
-    // Every field here is skill-authored. Skill loading already refuses control characters in
-    // frontmatter, but this prompt is the consent boundary itself and takes a `GrantRequest` from
-    // any source, so it escapes what it prints rather than trusting an upstream check: a forged
-    // prompt is a granted capability. One line per field, so nothing can smuggle in a second line.
-    let safe = bee::safe_text::safe_line;
-    eprintln!(
-        "\nskill '{}' requests extra capabilities:",
-        safe(request.skill)
-    );
-    if !request.tools.is_empty() {
-        let tools: Vec<_> = request.tools.iter().map(|t| safe(t)).collect();
-        eprintln!("  tools: {}", tools.join(", "));
-    }
-    for (path, access) in request.filesystem {
-        eprintln!("  filesystem: {} = {}", safe(path), safe(access));
-    }
-    eprint!("grant these (within the ceiling)? [y/N] ");
-    let _ = std::io::stderr().flush();
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line).is_ok()
-        && matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }

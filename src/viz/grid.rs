@@ -19,13 +19,22 @@ impl Status {
     /// `Captured` pass; hard failures and `NotCaptured` fail; a text-only turn is neutral.
     pub fn from_episode(status: &EpisodeStatus) -> Status {
         match status {
-            EpisodeStatus::Completed | EpisodeStatus::Captured { .. } => Status::Pass,
+            EpisodeStatus::Completed
+            | EpisodeStatus::Captured { .. }
+            | EpisodeStatus::Finished {
+                outcome: crate::tools::finish::FinishOutcome::Completed,
+                ..
+            } => Status::Pass,
             EpisodeStatus::NoToolCalls => Status::Skip,
             EpisodeStatus::Timeout
             | EpisodeStatus::ApiError { .. }
             | EpisodeStatus::InfraError { .. }
             | EpisodeStatus::NotCaptured
-            | EpisodeStatus::Terminated { .. } => Status::Fail,
+            | EpisodeStatus::Terminated { .. }
+            | EpisodeStatus::ContextExhausted { .. }
+            | EpisodeStatus::Stuck { .. }
+            | EpisodeStatus::Finished { .. }
+            | EpisodeStatus::EndedWithoutFinish => Status::Fail,
         }
     }
 }

@@ -420,6 +420,7 @@ impl Tool for ScanTool {
                 (
                     f.to_finding(&args.scanner),
                     Sighting {
+                        evidence_refs: Vec::new(),
                         run_id: self.run_id.clone(),
                         at: time::OffsetDateTime::now_utc(),
                         line: f.line,
@@ -441,7 +442,10 @@ impl Tool for ScanTool {
             .collect();
 
         let body = render(&args.scanner, &findings, recorded, &rejected);
-        ToolOutcome::completed_truncated(body, outcome.truncated).into_tool_result(|b| b)
+        // Scanner messages quote the scanned code: child output, framed as untrusted data (019 P1).
+        ToolOutcome::completed_truncated(body, outcome.truncated)
+            .into_tool_result(|b| b)
+            .with_provenance(crate::tools::Provenance::Child)
     }
 }
 

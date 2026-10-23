@@ -35,3 +35,75 @@ _Avoid_: Issue, alert, hit
 **Verdict**:
 A person's adjudication of a finding — confirmed, false positive, fixed, duplicate, deferred — recorded only through `bee findings adjudicate`. It is never writable by an agent: a verdict is worth something precisely because a human formed it.
 _Avoid_: Status, triage state, disposition
+
+**Target scope**:
+The hosts a session may test, declared in `[policy.http]` as `targets` (testable) and `egress` (reachable as tunnels only, never testable), with `inspect` naming the hosts whose TLS is decrypted. It is policy data, attenuated like the rest of a policy, and widened only by an operator's consent within the ceiling.
+_Avoid_: Allowlist, target list, in-scope list
+
+**Exchange**:
+One recorded HTTP request and its response (or its refusal), with the call that caused it, stored in `.bee/http/` and named by an id like `E1a2b3c4-42`. Tools return exchange ids and bounded slices, never whole bodies.
+_Avoid_: Request log entry, flow, history item
+
+**Lead**:
+A passive observation over recorded traffic — a reflected parameter, a weak session cookie — offered for the model to check. Never a finding until the model confirms it and records one citing exchanges; its summary is bee's own words, never the target's.
+_Avoid_: Finding, alert, issue
+
+**Proxy scope**:
+The kernel scope the interception proxy runs in, separate from the tool scope: it may reach only the resolved target and egress addresses, write nothing, and read a reduced filesystem. Tool children reach only the proxy.
+_Avoid_: Proxy sandbox, sidecar container
+
+**Interceptor**:
+The session's HTTP(S) interception proxy as a whole — the confined `bee proxy-worker` and the harness side that drives it and owns the exchange store.
+_Avoid_: MITM, Burp, proxy server
+
+**Operator**:
+The one seam where autonomous and interactive Bee differ: it decides consent requests and receives session output. The **Interactive** operator asks a person through the REPL/TUI input path; the **Autonomous** operator never waits for one, granting within the ceiling and refusing beyond it, and records every decision.
+_Avoid_: Mode, frontend, approver
+
+**Session builder**:
+The one library module that turns a session specification and an Operator into a running session — policy, grants, sandbox, Interceptor, tool surface, escalation, system prompt — for every entry point. A combination it cannot provide is refused before any scope exists, never silently dropped.
+_Avoid_: Session setup, bootstrap, factory
+
+**Tool surface**:
+The tools the model can call in a session right now, each constructed with its session dependencies (Interceptor, finding ledger, scanner grants). Derivable from one place; a tool granted mid-session is indistinguishable from one present from the start.
+_Avoid_: Tool list, registry contents
+
+**Call lifecycle**:
+Everything that happens to one tool call, from the model's request to its recorded outcome: opening the call, running the tool, collecting its audit, escalating and retrying at most once, closing the call. Owned by one module that every loop — and codemode — runs calls through.
+_Avoid_: Tool execution, call wrapper
+
+**Context budget**:
+The most a session may send the model in one request: the model's context window less room for its reply. Bee estimates each request's size before sending it and never sends one it measures as over budget; a run that cannot be brought within it ends as context exhausted.
+_Avoid_: Context limit, token limit, max context
+
+**Preamble**:
+The start of the model's conversation that compaction never touches: the system prompt and the first message (the task, or the REPL's first user message).
+_Avoid_: Prompt, header
+
+**Recent window**:
+The newest turns of the conversation, kept verbatim: at least the last two turns, and as many more as fit in a share of the context budget.
+_Avoid_: Tail, short-term memory
+
+**Middle region**:
+The turns between the preamble and the recent window — the only part of the conversation compaction edits.
+_Avoid_: History, old context
+
+**Elision**:
+Replacing a bulky tool result in the middle region with a one-line stub that keeps what the call was, how it ended, its size and what was denied. The first, cheapest step of compaction.
+_Avoid_: Truncation, pruning
+
+**Summarization**:
+Folding the oldest turns of the middle region into one running summary written by the model, kept right after the preamble and framed as untrusted data, because it is the model's rewrite of tool output. If the summary call fails, those turns are removed instead and a marker says so.
+_Avoid_: Memory, recap
+
+**Compaction**:
+Keeping a long session's conversation within its context budget by elision, then summarization. It edits only what the model is sent; the session record keeps every turn in full. Off unless `[context] compaction = true`.
+_Avoid_: Context management, garbage collection
+
+**Streak**:
+A run of identical tool calls — the same tool with structurally equal arguments, one after another. A long streak earns the model a reminder; a long streak of failing calls ends the run, or the REPL exchange.
+_Avoid_: Loop, repetition
+
+**Finish tool**:
+How an autonomous run ends: the model calls `finish` with an outcome (completed, blocked, abandoned) and a summary. Offered to headless standard-mode runs only; without it, prose ends such a run only after one reminder, as "ended without finish".
+_Avoid_: Done tool, stop tool, submit

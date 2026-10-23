@@ -26,7 +26,11 @@ fn scenario() -> Scenario {
         mcp: Default::default(),
         skills: vec![],
         ceiling_policy_path: None,
+        finish: Default::default(),
+        lease_turns: None,
         security: Default::default(),
+        context: Default::default(),
+        stuck: Default::default(),
     }
 }
 
@@ -154,8 +158,8 @@ fn options(grant: bool) -> LoopOptions {
             base: policy.clone(),
             ceiling: policy,
             hooks: vec![Box::new(Hook { grant })],
-            consent: Arc::new(bee::skills::AllowWithinCeiling),
-            timeout: Duration::from_secs(1),
+            operator: bee::operator::Operator::autonomous(Arc::new(bee::operator::NullOutput))
+                .with_timeout(Duration::from_secs(1)),
             default_ttl: Ttl::Turns(1),
         }),
         ..Default::default()
@@ -182,7 +186,11 @@ async fn deny_hook_prevents_execution() {
     .await;
     let result = &transcript.turns[0].calls[0].result;
     assert!(result.is_error);
-    assert_eq!(result.content, "audit refusal");
+    assert_eq!(
+        transcript.turns[0].calls[0].refused_by_hook.as_deref(),
+        Some("audit refusal")
+    );
+    assert!(result.content.contains("the tool did not run"));
     assert!(!marker.exists());
 }
 
@@ -520,8 +528,8 @@ mod kernel {
                     service_command: std::sync::Mutex::new(service_command),
                     service: Default::default(),
                 })],
-                consent: Arc::new(bee::skills::AllowWithinCeiling),
-                timeout: Duration::from_secs(2),
+                operator: bee::operator::Operator::autonomous(Arc::new(bee::operator::NullOutput))
+                    .with_timeout(Duration::from_secs(2)),
                 default_ttl: Ttl::Turns(1),
             }),
             ..Default::default()
@@ -600,8 +608,7 @@ mod kernel {
             },
             Ttl::Forever,
             0,
-            &bee::skills::AllowWithinCeiling,
-            Duration::from_secs(1),
+            &bee::operator::Operator::autonomous(Arc::new(bee::operator::NullOutput)),
             &mut sandbox,
             &mut ToolRegistry::new(),
         )
@@ -835,8 +842,8 @@ fn measure_ledger_batch() {
 
 struct NeverConsent;
 #[async_trait::async_trait]
-impl bee::skills::ConsentSink for NeverConsent {
-    async fn confirm(&self, _: &bee::skills::GrantRequest<'_>) -> bee::skills::Decision {
+impl bee::operator::Consent for NeverConsent {
+    async fn decide(&self, _: &bee::operator::ConsentRequest) -> bee::skills::Decision {
         std::future::pending().await
     }
 }
@@ -847,8 +854,11 @@ async fn episode_deadline_includes_consent() {
     scenario.timeout_secs = 1;
     let mut opts = options(true);
     let escalation = opts.escalation.as_mut().unwrap();
-    escalation.timeout = Duration::from_secs(30);
-    escalation.consent = Arc::new(NeverConsent);
+    escalation.operator = bee::operator::Operator::with_consent(
+        bee::operator::OperatorKind::Autonomous,
+        Arc::new(NeverConsent),
+    )
+    .with_timeout(Duration::from_secs(30));
     let model = MockModel::scripted(vec![Turn::calls(vec![call("1")])]);
     let mut registry = ToolRegistry::new();
     let result = tokio::time::timeout(

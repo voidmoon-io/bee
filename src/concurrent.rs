@@ -15,11 +15,13 @@ use bee_userspace::{AuditDemux, EnforcementPlan, Engine, ScopeMode, SystemResolv
 use tokio::task::JoinSet;
 
 use crate::config::ProviderConfig;
-use crate::episode::{materialize_workdir, run_loop, LoopOptions, ProgressSink};
+use crate::episode::{
+    materialize_workdir, run_loop, spec_from_scenario, EpisodeOptions, LoopOptions, ProgressSink,
+};
 use crate::provider::model_from_config;
 use crate::sandbox::{self, Sandbox};
 use crate::scenario::{Scenario, ScoringMode};
-use crate::tools;
+use crate::session::{EntryPoint, SessionSpec};
 use crate::transcript::{EpisodeStatus, EpisodeTranscript, ScoreReport};
 
 struct PreparedEpisode {
@@ -27,6 +29,7 @@ struct PreparedEpisode {
     scenario: Scenario,
     provider: ProviderConfig,
     plan: EnforcementPlan,
+    spec: SessionSpec,
 }
 
 fn sanitize(s: &str) -> String {
@@ -43,8 +46,24 @@ fn prepare_episodes(
     let mut failures = Vec::new();
 
     for (index, (scenario, provider)) in episodes.into_iter().enumerate() {
-        let result = Policy::from_path(&scenario.policy_path)
-            .map_err(|e| format!("policy {}: {e}", scenario.policy_path.display()))
+        // The session this episode asks for, as a concurrent batch entry. What a shared-engine batch
+        // cannot run — MCP servers, `[policy.http]`, a widening ceiling, skills — is refused here, by
+        // name, before any scope exists (024 FR-008); it used to be silently left out.
+        let strip_env = sandbox::key_vars(
+            (!provider.api_key_env.is_empty()).then_some(provider.api_key_env.as_str()),
+        );
+        // Autonomous, like any headless run; a concurrent batch has no progress stream to report on.
+        let operator =
+            crate::operator::Operator::autonomous(std::sync::Arc::new(crate::operator::NullOutput));
+        let mut spec =
+            spec_from_scenario(&scenario, strip_env, &EpisodeOptions::default(), operator);
+        spec.entry = EntryPoint::Batch { concurrent: true };
+        let result = crate::session::refuse_unsupported(&spec)
+            .map_err(|e| e.to_string())
+            .and_then(|()| {
+                Policy::from_path(&scenario.policy_path)
+                    .map_err(|e| format!("policy {}: {e}", scenario.policy_path.display()))
+            })
             .and_then(|policy| {
                 policy
                     .compile(resolver)
@@ -61,6 +80,7 @@ fn prepare_episodes(
                 scenario,
                 provider,
                 plan,
+                spec,
             }),
             Err(detail) => failures.push((
                 index,
@@ -140,6 +160,7 @@ pub async fn run_concurrent(
         scenario,
         provider,
         plan,
+        mut spec,
     } in prepared
     {
         // Record a setup failure as this episode's error transcript and move on.
@@ -194,26 +215,46 @@ pub async fn run_concurrent(
             });
         }
 
-        let strip_env = sandbox::key_vars(
-            (!provider.api_key_env.is_empty()).then_some(provider.api_key_env.as_str()),
-        );
-        let mut sb = Sandbox::concurrent(scope, subscription, strip_env);
+        spec.prebuilt_sandbox = Some(Sandbox::concurrent(
+            scope,
+            subscription,
+            spec.strip_env.clone(),
+        ));
         cgroups.push(cgroup_id);
+        // The rest of the session — tool surface, escalation, system prompt — is built the way every
+        // entry point builds it (024 FR-006), around the scope created on the shared engine.
+        let mut session = match crate::session::build(spec, &|_| {}).await {
+            Ok(s) => s,
+            Err(e) => fail!(EpisodeStatus::InfraError {
+                detail: e.to_string()
+            }),
+        };
 
-        let flag = scenario.workdir.flag.as_ref().map(|f| f.value.clone());
         tasks.spawn(async move {
-            let mut registry = tools::registry_for(&scenario.tools, flag.as_deref());
             let opts = LoopOptions {
                 metrics: crate::metrics::Recorder::new(
                     "batch",
                     format!("batch:{}:{}", scenario.id, std::process::id()),
                 ),
+                escalation: session.escalation.take(),
                 ..LoopOptions::default()
             };
-            let mut t = run_loop(model.as_ref(), &scenario, &mut registry, &mut sb, &opts).await;
-            if let Err(e) = sb.teardown() {
+            let scenario = Scenario {
+                system_prompt: session.system_prompt.clone(),
+                ..scenario
+            };
+            let mut t = run_loop(
+                model.as_ref(),
+                &scenario,
+                &mut session.registry,
+                &mut session.sandbox,
+                &opts,
+            )
+            .await;
+            t.consents = session.operator.take_log();
+            if let Err(e) = session.shutdown().await {
+                t.status = EpisodeStatus::InfraError { detail: e.clone() };
                 eprintln!("bee: scope cleanup failed: {e}");
-                t.status = EpisodeStatus::InfraError { detail: e };
             }
             if scenario.mode == ScoringMode::Ctf {
                 t.score = Some(ScoreReport::from_transcript(&t));
@@ -269,6 +310,10 @@ mod tests {
 
     fn scenario(id: &str, policy_path: PathBuf) -> Scenario {
         Scenario {
+            lease_turns: None,
+            context: Default::default(),
+            stuck: Default::default(),
+            finish: false,
             id: id.into(),
             policy_path,
             system_prompt: "test".into(),
@@ -287,6 +332,7 @@ mod tests {
 
     fn provider() -> ProviderConfig {
         ProviderConfig {
+            context_window: None,
             provider: ProviderType::Mock,
             base_url: None,
             model: String::new(),

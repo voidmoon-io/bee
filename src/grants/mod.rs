@@ -15,9 +15,8 @@ use bee_core::{Access, Policy};
 
 pub mod escalate;
 
-pub use crate::skills::grant::{
-    resolve_grants, AllowWithinCeiling, ConsentSink, Decision, DenyAll, GrantOutcome, GrantRequest,
-};
+pub use crate::operator::{AllowWithinCeiling, Consent, ConsentRequest, Decision, DenyAll};
+pub use crate::skills::grant::{resolve_grants, GrantOutcome};
 
 /// Stable identifier for a lease, targetable by de-escalation. Deterministic (a per-policy counter),
 /// so tests and audits are reproducible.
@@ -32,6 +31,9 @@ pub struct GrantDelta {
     pub filesystem: BTreeMap<String, Access>,
     pub exec: Vec<String>,
     pub net: Vec<String>,
+    /// `host:port` entries to add to the interception **target** scope (019 US3). Folded into
+    /// `[policy.http].targets`; the ceiling's `[policy.http]` bounds them like any other grant.
+    pub http_targets: Vec<String>,
 }
 
 impl GrantDelta {
@@ -41,18 +43,51 @@ impl GrantDelta {
             && self.filesystem.is_empty()
             && self.exec.is_empty()
             && self.net.is_empty()
+            && self.http_targets.is_empty()
+    }
+
+    /// Fold `other` into this delta: the union of both, a path asked for twice taking the more
+    /// permissive access. How grants proposed by several hooks for one event combine (024 FR-034).
+    pub fn merge(&mut self, other: GrantDelta) {
+        fn union(mine: &mut Vec<String>, theirs: Vec<String>) {
+            for x in theirs {
+                if !mine.contains(&x) {
+                    mine.push(x);
+                }
+            }
+        }
+        union(&mut self.tools, other.tools);
+        union(&mut self.exec, other.exec);
+        union(&mut self.net, other.net);
+        union(&mut self.http_targets, other.http_targets);
+        for (path, access) in other.filesystem {
+            let merged = match self.filesystem.get(&path) {
+                Some(&mine) => more_permissive(mine, access),
+                None => access,
+            };
+            self.filesystem.insert(path, merged);
+        }
     }
 }
 
 /// Why a lease was granted — provenance for the audit trail (Constitution IV).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum GrantOrigin {
+    /// A discovered skill's `requires`, resolved before the session's first turn (024).
+    Startup { skill: String },
     /// A tool hit a kernel denial and the grant covers that resource.
     ReactiveDenial { op: String, target: String },
     /// A loaded skill's `requires` block asked for it.
     SkillRequires { skill: String },
     /// Explicitly requested (e.g. a de-escalatable manual grant).
     Explicit,
+    /// The interception proxy refused a call's request to `host:port` (019 US3).
+    ProxyRefusal {
+        host: String,
+        port: u16,
+        call: String,
+    },
 }
 
 /// How long a grant lives. Turn counts are deterministic (the default, reproducible in scored runs);
@@ -109,6 +144,18 @@ fn fold_delta(policy: &mut Policy, delta: &GrantDelta) {
     for n in &delta.net {
         if !policy.network.allow.contains(n) {
             policy.network.allow.push(n.clone());
+        }
+    }
+    // Target-scope additions (019). A malformed entry is dropped here and so cannot widen; with no
+    // `[policy.http]` section there is nothing to add to — and the ceiling check then refuses the
+    // grant, because a section created from nothing has no parent to be a subset of.
+    for t in &delta.http_targets {
+        let Ok(hp) = bee_core::HostPort::try_from(t.clone()) else {
+            continue;
+        };
+        let http = policy.http.get_or_insert_with(Default::default);
+        if !http.targets.contains(&hp) {
+            http.targets.push(hp);
         }
     }
 }
@@ -196,12 +243,29 @@ impl ActivePolicy {
     /// Attenuation pre-check: would widening by `delta` stay `⊆ ceiling`? Does **not** mutate — used
     /// by [`escalate::escalate`] to refuse a beyond-ceiling request *before* consulting consent.
     pub fn check_widen(&self, delta: &GrantDelta) -> Result<(), String> {
+        self.check_net_enforceable(delta)?;
         let mut candidate = self.active.clone();
         fold_delta(&mut candidate, delta);
         self.ceiling
             .derive(candidate)
             .map(|_| ())
             .map_err(|e| format!("exceeds capability ceiling: {e}"))
+    }
+
+    /// Under an active `[policy.http]` the tool scope's only network rule is the proxy loopback:
+    /// every reload re-applies it over `network.allow` (019), and `compile_http` refuses a policy
+    /// that names both. A direct `net` grant would therefore be approved, recorded and never
+    /// enforced — and break the next recompile. Refused before consent, so nobody is asked.
+    fn check_net_enforceable(&self, delta: &GrantDelta) -> Result<(), String> {
+        let intercepting = self.active.http.as_ref().is_some_and(|h| h.is_active());
+        if intercepting && !delta.net.is_empty() {
+            return Err(format!(
+                "direct network grant {:?} has no effect under [policy.http]: tool traffic goes \
+                 through the proxy; grant an http target instead",
+                delta.net
+            ));
+        }
+        Ok(())
     }
 
     /// The part of `delta` that `active` does not already grant.
@@ -251,6 +315,17 @@ impl ActivePolicy {
                 out.net.push(n.clone());
             }
         }
+        for t in &delta.http_targets {
+            let held = bee_core::HostPort::try_from(t.clone()).is_ok_and(|hp| {
+                self.active
+                    .http
+                    .as_ref()
+                    .is_some_and(|h| h.targets.contains(&hp))
+            });
+            if !held {
+                out.http_targets.push(t.clone());
+            }
+        }
         out
     }
 
@@ -278,6 +353,7 @@ impl ActivePolicy {
         if self.next_id == u64::MAX {
             return Err("grant id space exhausted".into());
         }
+        self.check_net_enforceable(&delta)?;
         let mut candidate = self.active.clone();
         fold_delta(&mut candidate, &delta);
         let candidate = self
@@ -340,6 +416,7 @@ mod tests {
             network: Default::default(),
             defaults: Default::default(),
             exfiltration: Default::default(),
+            http: None,
         };
         for (path, access) in fs {
             p.filesystem.insert(path.to_string(), *access);
@@ -351,6 +428,28 @@ mod tests {
         let mut d = GrantDelta::default();
         d.filesystem.insert(path.to_string(), access);
         d
+    }
+
+    #[test]
+    fn a_direct_net_grant_is_refused_while_intercepting() {
+        // Review of #21: the reload re-applies the proxy loopback over `network.allow`, so the grant
+        // would be approved and never enforced.
+        let mut base = policy("base", &[]);
+        base.http = Some(bee_core::policy::HttpPolicy {
+            targets: vec![bee_core::HostPort::try_from("app.test:443".to_string()).unwrap()],
+            ..Default::default()
+        });
+        let mut ceiling = base.clone();
+        ceiling.network.allow.push("10.0.0.5:443".into());
+        let mut ap = ActivePolicy::new(base, ceiling).unwrap();
+        let d = GrantDelta {
+            net: vec!["10.0.0.5:443".into()],
+            ..Default::default()
+        };
+        assert!(ap.check_widen(&d).unwrap_err().contains("[policy.http]"));
+        assert!(ap
+            .try_apply(GrantOrigin::Explicit, d, Ttl::Forever, 0)
+            .is_err());
     }
 
     // ── `unmet` — what is left of a delta once what is already held is taken out ────────────────

@@ -38,8 +38,11 @@ use crate::provider::{
 use crate::render_spec::{EffectSpec, RenderSpec};
 use crate::sandbox::Sandbox;
 use crate::tools::{ToolRegistry, ToolResult};
-use crate::transcript::{EpisodeStatus, EpisodeTranscript, RecordedCall, Timing, TranscriptTurn};
+use crate::transcript::{
+    EpisodeStatus, EpisodeTranscript, HarnessNote, NoteKind, RecordedCall, Timing, TranscriptTurn,
+};
 
+pub mod consent_input;
 pub mod terminal;
 
 pub use terminal::TerminalOutput;
@@ -68,10 +71,9 @@ pub struct ReplConfig {
     /// Pre-rendered `/mcp` output: configured MCP servers, their status, and the domain policy
     /// (004-mcp-client, US10). `None` when MCP is not configured / the `mcp` feature is off.
     pub mcp_summary: Option<String>,
-    /// Optional per-turn tool-refresh hook (004-mcp-client, FR-043): re-registers MCP tools when a
-    /// server sent `tools/list_changed`. rmcp-agnostic (a plain closure); `None` is a no-op.
-    #[allow(clippy::type_complexity)]
-    pub refresh_tools: Option<Box<dyn Fn(&mut ToolRegistry) + Send + Sync>>,
+    /// A source of tools that can change mid-session — the MCP bridge (004 FR-043). Refreshed at turn
+    /// start through [`crate::turn::RefreshHook`] (024 FR-030). `None`: nothing to refresh.
+    pub tool_refresh: Option<Arc<dyn crate::turn::ToolRefresh>>,
     /// Discovered skills (006-skills), shared with the `skill` tool. Backs the `/skill` command and
     /// the system-prompt nudge. Defaults to an empty registry (no skills, no `/skill`).
     pub skills: Arc<crate::skills::SkillRegistry>,
@@ -84,22 +86,96 @@ pub struct ReplConfig {
     /// episode, the operator is present, so consent can be a prompt rather than a pre-authorizing
     /// ceiling file.
     pub escalation: Option<ReplEscalation>,
+    /// The live HTTP history pane (019 US9): returns a fresh table when exchanges have arrived since
+    /// the last call, `None` otherwise. Set only in a session with `[policy.http]`.
+    #[allow(clippy::type_complexity)]
+    pub http_pane:
+        Option<std::sync::Arc<dyn Fn() -> Option<crate::render_spec::RenderSpec> + Send + Sync>>,
+    /// The context settings below the session (025): user and project `[context]`, and the provider
+    /// file's window and reply limit.
+    pub context: crate::context::ContextInputs,
+    /// Stuck detection (025 US2), already validated: the front-end resolves `[stuck]` at start-up so a
+    /// bad table is refused before the first message.
+    pub stuck: crate::stuck::ResolvedStuck,
+    /// State that outlives one exchange (025): the context manager and bee's queued notes. Behind a
+    /// lock for the reason [`ReplEscalation`] is: [`run_exchange`] takes `&ReplConfig`. Never held
+    /// across an `.await`.
+    pub state: Mutex<ReplState>,
+}
+
+/// The REPL's session-lifetime context state (025). [`ReplState::reset`] is `/clear`'s half of it.
+#[derive(Debug, Default)]
+pub struct ReplState {
+    /// Built on first use from [`ReplConfig::context`] and the model's id, unless the front-end built
+    /// it at start-up (to report a bad `[context]` before the first message).
+    pub context: Option<crate::context::ContextManager>,
+    /// bee's notes for the next model call, recorded on the turn they precede (025 FR-028).
+    pub pending: Vec<crate::transcript::HarnessNote>,
+    /// The current streak of identical calls (025 US2). Built on first use from
+    /// [`ReplConfig::stuck`]. Spans exchanges — a streak can cross user messages — and `/clear`
+    /// forgets it.
+    pub stuck: Option<crate::stuck::StreakTracker>,
+    /// Model turns since the session began (024 D3): what lease lifetimes are counted in, and the turn
+    /// a call is stamped with. Monotonic across exchanges, and not reset by `/clear` — a lease
+    /// outlives the conversation that asked for it.
+    pub model_turns: u32,
+}
+
+impl ReplState {
+    /// State with a context manager the front-end has already built.
+    pub fn with_context(context: crate::context::ContextManager) -> ReplState {
+        ReplState {
+            context: Some(context),
+            pending: Vec::new(),
+            stuck: None,
+            model_turns: 0,
+        }
+    }
+
+    /// The streak tracker, built from `cfg` if there is none yet.
+    fn stuck_for(&mut self, cfg: crate::stuck::ResolvedStuck) -> &mut crate::stuck::StreakTracker {
+        self.stuck
+            .get_or_insert_with(|| crate::stuck::StreakTracker::new(cfg))
+    }
+
+    /// The context manager, built from `inputs` for `model_id` if there is none yet.
+    fn context_for(
+        &mut self,
+        inputs: &crate::context::ContextInputs,
+        model_id: &str,
+    ) -> Result<&mut crate::context::ContextManager, crate::context::ConfigError> {
+        if self.context.is_none() {
+            let (ctx, _notice) =
+                crate::context::ContextManager::for_session(inputs, None, model_id)?;
+            self.context = Some(ctx);
+        }
+        Ok(self.context.as_mut().expect("just built"))
+    }
+
+    /// Forget per-conversation state (`/clear`, 025 FR-019).
+    pub fn reset(&mut self) {
+        if let Some(c) = &mut self.context {
+            c.reset();
+        }
+        self.pending.clear();
+        if let Some(t) = &mut self.stuck {
+            t.reset();
+        }
+    }
 }
 
 /// Session-lifetime escalation state for the REPL.
 ///
 /// A grant outlives the exchange that requested it — the point of a capability is that the next
 /// message can use it — but [`run_exchange`] takes `&ReplConfig`, so the mutable half lives behind a
-/// lock rather than in the signature. The turn counter is monotonic across exchanges for the same
-/// reason: a `Ttl::Turns` lease measured per-exchange would silently reset every time the user
-/// pressed enter.
+/// lock rather than in the signature. Lease lifetimes are counted in model turns by
+/// [`ReplState::model_turns`], which is monotonic across exchanges: a `Ttl::Turns` lease measured
+/// per exchange would silently reset every time the user pressed enter.
 pub struct ReplEscalation {
     /// The static half: base, ceiling, hooks, consent sink, timeout, default TTL.
     pub config: crate::grants::escalate::LoopEscalation,
     /// The mutable half. `tokio::sync::Mutex` because it is held across the consent `await`.
     pub active: tokio::sync::Mutex<crate::grants::ActivePolicy>,
-    /// Turns elapsed since the session began, for lease TTL accounting.
-    turn: std::sync::atomic::AtomicU32,
 }
 
 impl ReplEscalation {
@@ -109,19 +185,7 @@ impl ReplEscalation {
         Ok(ReplEscalation {
             config,
             active: tokio::sync::Mutex::new(active),
-            turn: std::sync::atomic::AtomicU32::new(0),
         })
-    }
-
-    /// The current session turn, incrementing it for the next caller.
-    fn next_turn(&self) -> Result<u32, String> {
-        self.turn
-            .fetch_update(
-                std::sync::atomic::Ordering::Relaxed,
-                std::sync::atomic::Ordering::Relaxed,
-                |n| n.checked_add(1),
-            )
-            .map_err(|_| "session turn counter exhausted".into())
     }
 }
 
@@ -138,10 +202,14 @@ impl Default for ReplConfig {
             policy_label: "none".to_string(),
             mascot: true,
             mcp_summary: None,
-            refresh_tools: None,
+            tool_refresh: None,
             skills: Arc::new(crate::skills::SkillRegistry::default()),
             visual: crate::config::VisualConfig::default(),
             escalation: None,
+            http_pane: None,
+            context: crate::context::ContextInputs::default(),
+            stuck: crate::stuck::ResolvedStuck::default(),
+            state: Mutex::new(ReplState::default()),
         }
     }
 }
@@ -162,6 +230,11 @@ pub trait ReplOutput: Send + Sync {
     fn error(&self, msg: &str);
     /// An informational line (banners, warnings, meta-command output).
     fn info(&self, msg: &str);
+    /// A proxy-layer event (019 T045): a refusal by the interception proxy, or a rule notice. Its
+    /// wording is distinct from a kernel denial on purpose — the two layers are never conflated.
+    fn proxy_event(&self, ev: &crate::proxy_event::ProxyEvent) {
+        self.info(&render_proxy_event(ev));
+    }
     /// A block the sender declares to be **markdown** — a skill's instructions, say (010). Defaults
     /// to [`ReplOutput::info`], which prints the source verbatim: that is the honest rendering for a
     /// scrolling terminal, and markdown source is meant to be readable as-is. The full-screen TUI
@@ -231,7 +304,18 @@ pub enum ExchangeOutcome {
     /// A provider error (after retries) ended the exchange.
     ApiError(String),
     Terminated(String),
+    /// The next request could not be brought within the context budget (025 FR-002, FR-014).
+    ContextExhausted(String),
+    /// The same failing call was repeated until stuck detection ended the exchange (025 FR-029). The
+    /// session continues.
+    Stuck {
+        tool: String,
+        repeats: u32,
+    },
 }
+
+/// The longest a summary call made while preparing a REPL request may take (025).
+const SUMMARY_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The result of running one user→agent exchange (used by [`run_repl`] and by tests).
 pub struct ExchangeResult {
@@ -249,6 +333,8 @@ pub struct ExchangeResult {
     pub audit: Vec<AuditEvent>,
     /// Token usage summed across this exchange's model calls, when the provider reports it.
     pub usage: Option<Usage>,
+    /// Compactions of the conversation during this exchange (025 FR-017).
+    pub compactions: Vec<crate::transcript::CompactionEvent>,
 }
 
 /// The session record produced when the REPL exits.
@@ -450,6 +536,25 @@ async fn consume_stream(
 /// Tell the user what an escalation did. Only a grant or a refusal is worth a line: `AlreadyHeld` is
 /// the ordinary case — a skill re-stating capabilities it was given at startup — and narrating it on
 /// every call would be noise that trains the user to ignore the ones that matter.
+/// What a turn start changed, as info lines — none when it changed nothing.
+fn report_turn_start(output: &dyn ReplOutput, report: &crate::turn::TurnStartReport) {
+    for id in &report.released {
+        output.info(&format!("capability lease {id} released"));
+    }
+    for id in &report.expired {
+        output.info(&format!("capability lease {id} expired"));
+    }
+    if !report.removed_tools.is_empty() {
+        output.info(&format!(
+            "tools withdrawn: {}",
+            report.removed_tools.join(", ")
+        ));
+    }
+    if let Some(e) = &report.narrow_error {
+        output.error(&format!("scope narrowing: {e}"));
+    }
+}
+
 fn report_escalation(
     output: &dyn ReplOutput,
     subject: &str,
@@ -462,9 +567,6 @@ fn report_escalation(
         }
         EscalateOutcome::Refused(reason) => {
             output.info(&format!("capability refused for {subject} — {reason}"))
-        }
-        EscalateOutcome::Denied(reason) | EscalateOutcome::Terminated(reason) => {
-            output.error(reason)
         }
         EscalateOutcome::AlreadyHeld => {}
     }
@@ -499,86 +601,153 @@ pub async fn run_exchange(
     let mut tool_calls = 0u32;
     let mut denials = 0u32;
     let mut usage_total: Option<Usage> = None;
+    let mut compactions: Vec<crate::transcript::CompactionEvent> = Vec::new();
 
-    macro_rules! stop_exchange {
-        ($detail:expr) => {{
-            let detail = $detail;
-            output.error(&detail);
+    macro_rules! terminate {
+        ($reason:expr) => {{
             return ExchangeResult {
-                outcome: ExchangeOutcome::Terminated(detail),
+                outcome: ExchangeOutcome::Terminated($reason),
                 model_calls,
                 tool_calls,
                 denials,
                 turns,
                 audit: audit_all,
                 usage: usage_total,
+                compactions,
             };
         }};
     }
+    if let Some(esc) = &config.escalation {
+        let active = esc.active.lock().await;
+        if let Err(e) = esc.config.initialize(&active, sandbox) {
+            terminate!(e);
+        }
+    }
     for _step in 0..config.agent_turn_budget {
-        if let Err(detail) = sandbox.check_cleanup() {
-            stop_exchange!(detail);
-        }
-        let turn_no = match config
-            .escalation
-            .as_ref()
-            .map(|e| e.next_turn())
-            .transpose()
-        {
-            Ok(turn) => turn,
-            Err(detail) => {
-                stop_exchange!(detail);
-            }
-        };
-        if let (Some(esc), Some(turn_no)) = (config.escalation.as_ref(), turn_no) {
-            let mut active = esc.active.lock().await;
-            if turn_no == 0 {
-                if let Err(detail) = esc.config.initialize(&active, sandbox) {
-                    stop_exchange!(detail);
-                }
-            }
-
-            if let Some(crate::grants::escalate::EscalateOutcome::Terminated(detail)) =
-                crate::grants::escalate::turn_start(
-                    &esc.config,
-                    &mut active,
-                    turn_no,
-                    sandbox,
-                    registry,
-                )
-                .await
-            {
-                stop_exchange!(detail);
-            }
-        }
-
         // Fold in any steering the user typed since the last model call — the agent catches it now.
         drain_steering(steering, conversation, output);
 
-        // Refresh MCP tools if a server sent `tools/list_changed` (FR-043), then snapshot schemas.
-        if let Some(refresh) = &config.refresh_tools {
-            refresh(&mut *registry);
-        }
-        let schemas = registry.schemas();
-        if let (Some(esc), Some(turn_no)) = (config.escalation.as_ref(), turn_no) {
-            let mut active = esc.active.lock().await;
-            if let Some(crate::grants::escalate::EscalateOutcome::Terminated(detail)) =
-                crate::grants::escalate::event_step(
-                    &esc.config,
-                    &mut active,
-                    crate::hooks::StepEvent::BeforeModelCall {
-                        convo: conversation,
-                        schemas: &schemas,
-                    },
-                    turn_no,
-                    sandbox,
-                    registry,
-                )
-                .await
-            {
-                stop_exchange!(detail);
+        // The top of the model turn (024): one session-wide model-turn count, then the turn start —
+        // released and expired leases narrow the scope, the MCP tools refresh if they changed.
+        let model_turn = {
+            let mut state = lock_state(config);
+            let t = state.model_turns;
+            state.model_turns = match state.model_turns.checked_add(1) {
+                Some(n) => n,
+                None => {
+                    terminate!("session turn counter exhausted".into());
+                }
+            };
+            t
+        };
+        {
+            let mut active = match config.escalation.as_ref() {
+                Some(esc) => Some(esc.active.lock().await),
+                None => None,
+            };
+            let report = crate::turn::turn_start(
+                model_turn,
+                config
+                    .escalation
+                    .as_ref()
+                    .map_or(&[], |e| e.config.hooks.as_slice()),
+                active.as_deref_mut(),
+                sandbox,
+                registry,
+                config.tool_refresh.as_ref(),
+            )
+            .await;
+            report_turn_start(output, &report);
+            if let Some(e) = report.narrow_error {
+                terminate!(e);
             }
         }
+        let schemas = registry.schemas();
+        if let Some(esc) = &config.escalation {
+            let mut active = esc.active.lock().await;
+            if let Err(e) = crate::grants::escalate::lifecycle_step(
+                &esc.config,
+                &mut active,
+                crate::hooks::StepEvent::BeforeModelCall {
+                    convo: conversation,
+                    schemas: &schemas,
+                },
+                sandbox,
+                registry,
+            )
+            .await
+            {
+                terminate!(e);
+            }
+        }
+
+        // Harness notes for this turn (019 US8: "N new passive leads", 025 reminders) — bee's own
+        // words, recorded on the turn they precede.
+        let mut turn_notes: Vec<HarnessNote> = Vec::new();
+        for note in sandbox.turn_notes() {
+            output.info(&note);
+            conversation.push(Message::User { text: note.clone() });
+            turn_notes.push(HarnessNote::new(NoteKind::Passive, note));
+        }
+        let queued = std::mem::take(&mut lock_state(config).pending);
+        for note in queued {
+            output.info(&note.text);
+            conversation.push(Message::User {
+                text: note.text.clone(),
+            });
+            turn_notes.push(note);
+        }
+
+        // The context budget (025): compact if it is on and called for, and never send a request
+        // over the budget. The manager leaves the state for the await, so no lock is held across it.
+        let ctx = {
+            let mut state = lock_state(config);
+            match state.context_for(&config.context, model.id()) {
+                Ok(_) => Ok(state.context.take().expect("just built")),
+                Err(e) => Err(e),
+            }
+        };
+        let prepared = match ctx {
+            Err(e) => Err(format!("invalid [context]: {e}")),
+            Ok(mut ctx) => {
+                let r = ctx
+                    .prepare(
+                        conversation,
+                        &schemas,
+                        model,
+                        Instant::now() + SUMMARY_TIMEOUT,
+                        model_turn,
+                    )
+                    .await;
+                for e in ctx.take_events() {
+                    output.info(&crate::context::describe(&e, ctx.budget().tokens()));
+                    compactions.push(e);
+                }
+                lock_state(config).context = Some(ctx);
+                r.map_err(|e| e.detail)
+            }
+        };
+        if let Ok(p) = &prepared {
+            if let Some(u) = p.summary_usage {
+                usage_total = Some(usage_total.map_or(u, |acc| acc + u));
+            }
+        }
+        let prepared = match prepared {
+            Ok(p) => p,
+            Err(detail) => {
+                output.error(&format!("context exhausted: {detail}"));
+                return ExchangeResult {
+                    outcome: ExchangeOutcome::ContextExhausted(detail),
+                    model_calls,
+                    tool_calls,
+                    denials,
+                    turns,
+                    audit: audit_all,
+                    usage: usage_total,
+                    compactions,
+                };
+            }
+        };
 
         let turn_start = Instant::now();
         // Show a "working" indicator from the instant the call is dispatched — this covers the
@@ -602,13 +771,14 @@ pub async fn run_exchange(
                         );
                     }
                     return ExchangeResult {
-                        outcome: ExchangeOutcome::ApiError(detail),
+                        outcome: exchange_error(detail),
                         model_calls,
                         tool_calls,
                         denials,
                         turns,
                         audit: audit_all,
                         usage: usage_total,
+                        compactions,
                     };
                 }
             };
@@ -627,17 +797,21 @@ pub async fn run_exchange(
                     );
                 }
                 return ExchangeResult {
-                    outcome: ExchangeOutcome::ApiError(detail),
+                    outcome: exchange_error(detail),
                     model_calls,
                     tool_calls,
                     denials,
                     turns,
                     audit: audit_all,
                     usage: usage_total,
+                    compactions,
                 };
             }
         };
         model_calls += 1;
+        if let Some(ctx) = lock_state(config).context.as_mut() {
+            ctx.observe(prepared.sent_bytes, turn.usage.as_ref());
+        }
         if let Some(rec) = recorder {
             rec.record(
                 model.id(),
@@ -663,6 +837,7 @@ pub async fn run_exchange(
                 tool_calls: Vec::new(),
             });
             turns.push(TranscriptTurn {
+                notes: std::mem::take(&mut turn_notes),
                 index: turns.len() as u32,
                 assistant_text,
                 calls: Vec::new(),
@@ -677,6 +852,7 @@ pub async fn run_exchange(
                     turns,
                     audit: audit_all,
                     usage: usage_total,
+                    compactions,
                 };
             }
             continue;
@@ -692,155 +868,79 @@ pub async fn run_exchange(
             tool_calls += 1;
             output.tool_call(&tc.name, &tc.arguments);
 
-            // Proactive escalation (007, US2): a hook may request a grant before this call runs —
-            // a loaded skill's `requires`, above all. In an interactive session the consent sink is
-            // a prompt, which is why the cycle only ever asks for what is not already held.
-            let mut refusal = None;
-            if let (Some(esc), Some(turn_no)) = (config.escalation.as_ref(), turn_no) {
-                let mut active = esc.active.lock().await;
-                if let Some(out) = crate::grants::escalate::proactive_step(
-                    &esc.config,
-                    &mut active,
-                    tc,
-                    turn_no,
-                    sandbox,
-                    registry,
-                )
-                .await
-                {
-                    report_escalation(output, "capability", &out);
-                    match out {
-                        crate::grants::escalate::EscalateOutcome::Denied(reason) => {
-                            refusal = Some(ToolResult::error(reason))
-                        }
-                        crate::grants::escalate::EscalateOutcome::Terminated(reason) => {
-                            turns.push(TranscriptTurn {
-                                index: turns.len() as u32,
-                                assistant_text,
-                                calls: recorded,
-                                duration_ms: turn_start.elapsed().as_millis() as u64,
-                            });
-                            stop_exchange!(reason);
-                        }
-                        _ => (),
-                    }
-                }
-            }
-
-            let mut result = if let Some(refusal) = refusal {
-                refusal
-            } else {
-                match tokio::time::timeout(
-                    Duration::from_secs(config.tool_timeout_secs),
-                    registry.execute(tc, sandbox),
-                )
-                .await
-                {
-                    Ok(r) => r,
-                    Err(_) => ToolResult::error(format!(
-                        "tool timed out after {}s",
-                        config.tool_timeout_secs
-                    )),
-                }
+            // The call, start to finish: escalation, the timed attempt, its audit, at most one retry,
+            // the proxy and late drains (024, src/call.rs). A retry shares the call's time limit
+            // (FR-024). The active policy is locked once for the whole call.
+            let mut active_guard = match config.escalation.as_ref() {
+                Some(esc) => Some(esc.active.lock().await),
+                None => None,
             };
-
-            // Correlate the kernel audit events this call produced (FR-008). `settle` lets the async
-            // demux path deliver this call's events; it is a no-op for the sync sandboxes.
-            sandbox.settle().await;
-            let mut audit = sandbox.drain_audit();
-            sandbox.retain_audit(&mut audit);
-            audit_all.extend(audit.iter().cloned());
-
-            // Reactive escalation (007, US1): a kernel denial may be escalated and the call retried
-            // exactly once under the widened scope, so the user sees one result rather than a
-            // denial followed by a mysterious success.
-            if let (Some(esc), Some(turn_no)) = (config.escalation.as_ref(), turn_no) {
-                if let Some((op, target)) = crate::grants::escalate::first_denial(&audit) {
-                    let mut active = esc.active.lock().await;
-                    if let Some(out) = crate::grants::escalate::reactive_step(
-                        &esc.config,
-                        &mut active,
-                        &op,
-                        &target,
-                        tc,
-                        turn_no,
-                        sandbox,
-                        registry,
-                    )
-                    .await
-                    {
-                        report_escalation(output, &format!("{op} {target}"), &out);
-                        match &out {
-                            crate::grants::escalate::EscalateOutcome::Denied(reason) => {
-                                result = ToolResult::error(reason.clone())
-                            }
-                            crate::grants::escalate::EscalateOutcome::Terminated(reason) => {
-                                let detail = reason.clone();
-                                recorded.push(RecordedCall {
-                                    call: tc.clone(),
-                                    result,
-                                    audit,
-                                });
-                                turns.push(TranscriptTurn {
-                                    index: turns.len() as u32,
-                                    assistant_text,
-                                    calls: recorded,
-                                    duration_ms: turn_start.elapsed().as_millis() as u64,
-                                });
-                                stop_exchange!(detail);
-                            }
-                            _ => (),
-                        }
-                        if out.is_granted() {
-                            result = tokio::time::timeout(
-                                Duration::from_secs(config.tool_timeout_secs),
-                                registry.execute(tc, sandbox),
-                            )
-                            .await
-                            .unwrap_or_else(|_| ToolResult::error("tool retry timed out"));
-                            sandbox.settle().await;
-                            let mut retry_audit = sandbox.drain_audit();
-                            sandbox.retain_audit(&mut retry_audit);
-                            audit_all.extend(retry_audit.iter().cloned());
-                            audit = retry_audit;
-                        }
+            let escalation = match (config.escalation.as_ref(), active_guard.as_mut()) {
+                (Some(esc), Some(active)) => Some(crate::call::Escalation {
+                    config: &esc.config,
+                    active,
+                    lease_turn: model_turn,
+                }),
+                _ => None,
+            };
+            let outcome = crate::call::run_call(
+                crate::call::CallInput {
+                    call: tc,
+                    turn: model_turn,
+                    origin: crate::sandbox::CallOrigin::Tool,
+                    timeout: crate::call::TimeoutPolicy::PerCall(Duration::from_secs(
+                        config.tool_timeout_secs,
+                    )),
+                },
+                sandbox,
+                registry,
+                escalation,
+            )
+            .await;
+            drop(active_guard);
+            if let Some(warning) = sandbox.audit_warning() {
+                output.error(&warning);
+            }
+            if let Some(detail) = outcome
+                .terminated
+                .as_ref()
+                .cloned()
+                .or_else(|| sandbox.check_cleanup().err())
+            {
+                audit_all.extend(outcome.audit_trail().cloned());
+                recorded.push(outcome.to_recorded(tc));
+                turns.push(TranscriptTurn {
+                    index: turns.len() as u32,
+                    assistant_text,
+                    calls: recorded,
+                    duration_ms: turn_start.elapsed().as_millis() as u64,
+                    notes: turn_notes,
+                });
+                terminate!(detail);
+            }
+            for rec in &outcome.escalations {
+                let subject = match &rec.trigger {
+                    crate::call::Trigger::Proactive => "capability".to_string(),
+                    crate::call::Trigger::KernelDenial { op, target } => format!("{op} {target}"),
+                    crate::call::Trigger::ProxyRefusal { host, port } => {
+                        format!("http target {host}:{port}")
                     }
-                }
+                };
+                report_escalation(output, &subject, &rec.outcome);
             }
 
-            if let (Some(esc), Some(turn_no)) = (config.escalation.as_ref(), turn_no) {
-                let mut active = esc.active.lock().await;
-                if let Some(crate::grants::escalate::EscalateOutcome::Terminated(detail)) =
-                    crate::grants::escalate::event_step(
-                        &esc.config,
-                        &mut active,
-                        crate::hooks::StepEvent::AfterToolResult {
-                            call: tc,
-                            result: &result,
-                            audit: &audit,
-                        },
-                        turn_no,
-                        sandbox,
-                        registry,
-                    )
-                    .await
-                {
-                    recorded.push(RecordedCall {
-                        call: tc.clone(),
-                        result,
-                        audit,
-                    });
-                    turns.push(TranscriptTurn {
-                        index: turns.len() as u32,
-                        assistant_text,
-                        calls: recorded,
-                        duration_ms: turn_start.elapsed().as_millis() as u64,
-                    });
-                    stop_exchange!(detail);
-                }
+            denials += outcome.tool_denials() as u32;
+            let audit: Vec<AuditEvent> = outcome
+                .audit
+                .iter()
+                .chain(&outcome.proxy_audit)
+                .cloned()
+                .collect();
+            let result = &outcome.result;
+            output.tool_result(result, &audit);
+            for ev in &outcome.proxy_events {
+                output.proxy_event(ev);
             }
-            denials += audit.iter().filter(|e| e.decision == "denied").count() as u32;
-            output.tool_result(&result, &audit);
             // If the tool produced a visualization (the `render` tool), surface it — routed by its
             // target: inline into chat, or upserted into a named panel (008-grid-tui, FR-008). The
             // model still receives only `result.content` (the text summary), never the art (FR-023).
@@ -863,23 +963,85 @@ pub async fn run_exchange(
                 output.panel_op(op);
             }
 
+            // The model sees the capped result; the record keeps the tool's own (025 FR-022). What
+            // its stub would say is noted now, while the call's audit is at hand (R5).
+            let content = match lock_state(config).context.as_mut() {
+                Some(ctx) => {
+                    ctx.note_call(
+                        &tc.id,
+                        crate::context::compact::CallNote::from_outcome(tc, &outcome),
+                    );
+                    ctx.cap(&result.content, result.original_len)
+                }
+                None => result.content.clone(),
+            };
             conversation.push(Message::ToolResult {
                 call_id: tc.id.clone(),
                 name: tc.name.clone(),
-                content: result.content.clone(),
+                content,
                 is_error: result.is_error,
+                provenance: result.provenance.clone(),
             });
-            if let Some(warning) = sandbox.audit_warning() {
-                output.error(&warning);
+            // The session's audit keeps the denial a retry replaced (FR-021).
+            audit_all.extend(outcome.audit_trail().cloned());
+            recorded.push(outcome.to_recorded(tc));
+
+            let signal = lock_state(config)
+                .stuck_for(config.stuck)
+                .observe(tc, &outcome);
+            match signal {
+                crate::stuck::StuckSignal::None => {}
+                crate::stuck::StuckSignal::Remind(r) => {
+                    lock_state(config).pending.push(r.into_note())
+                }
+                crate::stuck::StuckSignal::Stop { tool, repeats, .. } => {
+                    output.error(&format!(
+                        "stopped: {tool} was repeated {repeats} times with the same failing result"
+                    ));
+                    // The session goes on, so the conversation must stay well formed: every call the
+                    // model made gets a result, including the ones this stop kept from running.
+                    let ran = recorded.len();
+                    for skipped in &turn.tool_calls[ran..] {
+                        if let Some(ctx) = lock_state(config).context.as_mut() {
+                            ctx.note_call(
+                                &skipped.id,
+                                crate::context::compact::CallNote::not_run(skipped),
+                            );
+                        }
+                        conversation.push(Message::ToolResult {
+                            call_id: skipped.id.clone(),
+                            name: skipped.name.clone(),
+                            content: format!(
+                                "[bee] not run: the exchange was stopped after {tool} was repeated \
+                                 {repeats} times"
+                            ),
+                            is_error: true,
+                            provenance: crate::provider::Provenance::Harness,
+                        });
+                    }
+                    turns.push(TranscriptTurn {
+                        notes: std::mem::take(&mut turn_notes),
+                        index: turns.len() as u32,
+                        assistant_text,
+                        calls: recorded,
+                        duration_ms: turn_start.elapsed().as_millis() as u64,
+                    });
+                    return ExchangeResult {
+                        outcome: ExchangeOutcome::Stuck { tool, repeats },
+                        model_calls,
+                        tool_calls,
+                        denials,
+                        turns,
+                        audit: audit_all,
+                        usage: usage_total,
+                        compactions,
+                    };
+                }
             }
-            recorded.push(RecordedCall {
-                call: tc.clone(),
-                result,
-                audit,
-            });
         }
 
         turns.push(TranscriptTurn {
+            notes: std::mem::take(&mut turn_notes),
             index: turns.len() as u32,
             assistant_text,
             calls: recorded,
@@ -899,6 +1061,22 @@ pub async fn run_exchange(
         turns,
         audit: audit_all,
         usage: usage_total,
+        compactions,
+    }
+}
+
+/// The REPL's session state, recovering from a poisoned lock: the state is plain data, and a panic
+/// elsewhere must not wedge the session.
+fn lock_state(config: &ReplConfig) -> std::sync::MutexGuard<'_, ReplState> {
+    config.state.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The outcome for a provider error: a refusal for length is the context budget, not the provider.
+fn exchange_error(detail: String) -> ExchangeOutcome {
+    if crate::context::is_context_overflow(&detail) {
+        ExchangeOutcome::ContextExhausted(detail)
+    } else {
+        ExchangeOutcome::ApiError(detail)
     }
 }
 
@@ -971,16 +1149,25 @@ fn build_transcript(
     start: Instant,
     turns: &[TranscriptTurn],
     audit_trail: &[AuditEvent],
-    audit_health: crate::transcript::AuditHealth,
     usage: Option<Usage>,
+    compactions: &[crate::transcript::CompactionEvent],
 ) -> EpisodeTranscript {
     EpisodeTranscript {
+        audit_health: Default::default(),
+        consents: Vec::new(),
+        mcp_audit: Default::default(),
+        finish_offered: false,
+        compactions: compactions.to_vec(),
+        summary_usage: compactions
+            .iter()
+            .filter_map(|e| e.usage)
+            .reduce(|a, b| a + b),
+        http_scope: None,
         scenario_id: "repl".to_string(),
         model_id: model_id.to_string(),
         status: EpisodeStatus::Completed,
         turns: turns.to_vec(),
         audit_trail: audit_trail.to_vec(),
-        audit_health,
         timing: Timing {
             started_at: rfc3339(started_at),
             ended_at: rfc3339(OffsetDateTime::now_utc()),
@@ -1072,6 +1259,115 @@ fn history_path() -> Option<PathBuf> {
     Some(dir.join("repl_history"))
 }
 
+/// The inline REPL's terminal: its one line reader, the printer that writes above it, and the end of
+/// the operator's consent channel it answers (024 R3). Opened before the session is built, so the
+/// start-up consent questions are asked through the same reader the session then uses — never a raw
+/// `stdin` read, never a second reader.
+pub struct ReplTerminal {
+    /// The editor, when no read is outstanding.
+    editor: Option<DefaultEditor>,
+    /// A read still outstanding when start-up ended, handed to the session as its first read.
+    pending: Option<ReadHandle>,
+    hist_path: Option<PathBuf>,
+    output: Arc<TerminalOutput>,
+    consent_rx: Option<crate::operator::ConsentReceiver>,
+}
+
+impl ReplTerminal {
+    /// Open the terminal: the line editor with its history, and its printer.
+    pub fn open() -> Result<Self, String> {
+        let mut editor =
+            DefaultEditor::new().map_err(|e| format!("could not initialize readline: {e}"))?;
+        let hist_path = history_path();
+        if let Some(p) = &hist_path {
+            let _ = editor.load_history(p);
+        }
+        let printer = editor
+            .create_external_printer()
+            .map_err(|e| format!("could not initialize terminal output: {e}"))?;
+        Ok(ReplTerminal {
+            editor: Some(editor),
+            pending: None,
+            hist_path,
+            output: Arc::new(TerminalOutput::new(Box::new(printer))),
+            consent_rx: None,
+        })
+    }
+
+    /// Answer consent from `rx`: the operator's questions come here, start-up and in-loop alike.
+    pub fn with_consent(mut self, rx: crate::operator::ConsentReceiver) -> Self {
+        self.consent_rx = Some(rx);
+        self
+    }
+
+    /// Where the session's lines go before the session runs.
+    pub fn output(&self) -> Arc<dyn crate::operator::SessionOutput> {
+        self.output.clone()
+    }
+
+    /// Drive `fut` — the session being built — to completion, answering the start-up consent
+    /// questions it asks from this terminal's reader. An answer that is not `y`/`n` repeats the
+    /// question; end of input or Ctrl-C refuses. A read still open when `fut` finishes (the operator
+    /// stopped waiting) becomes the session's first read.
+    pub async fn serve_startup<F: std::future::Future>(&mut self, fut: F) -> F::Output {
+        tokio::pin!(fut);
+        let mut asking: Option<consent_input::Pending> = None;
+        let mut rx = self.consent_rx.take();
+        let output = self.output.clone();
+        let result = loop {
+            if asking.is_some() && self.pending.is_none() {
+                if let Some(editor) = self.editor.take() {
+                    self.pending = Some(issue_read(editor, "> ".to_string()));
+                }
+            }
+            tokio::select! {
+                r = &mut fut => break r,
+                Some(ask) = next_ask(&mut rx) => {
+                    let question = consent_input::Pending::new(ask);
+                    question.show(&*output);
+                    asking = Some(question);
+                }
+                joined = async { self.pending.as_mut().expect("guarded").await },
+                    if self.pending.is_some() =>
+                {
+                    self.pending = None;
+                    let (editor, line) = joined.expect("readline task panicked");
+                    self.editor = Some(editor);
+                    match line {
+                        Ok(line) => match consent_input::route(&mut asking, &line) {
+                            consent_input::Routed::Answered => {}
+                            consent_input::Routed::TooLate => output.info(consent_input::TOO_LATE),
+                            consent_input::Routed::Steering => {
+                                if let Some(q) = &asking {
+                                    q.show(&*output);
+                                }
+                            }
+                        },
+                        // End of input or Ctrl-C: refuse what is being asked.
+                        Err(_) => {
+                            if let Some(q) = asking.take() {
+                                q.refuse();
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        self.consent_rx = rx;
+        result
+    }
+}
+
+/// The next consent question, or never when there is no channel.
+async fn next_ask(
+    rx: &mut Option<crate::operator::ConsentReceiver>,
+) -> Option<crate::operator::ConsentAsk> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
 /// The type of the outstanding readline: an editor moved onto a blocking thread that returns it (so
 /// its history survives) alongside the line it read.
 type ReadHandle = tokio::task::JoinHandle<(DefaultEditor, Result<String, ReadlineError>)>;
@@ -1100,6 +1396,22 @@ fn remember(editor: &mut DefaultEditor, path: &Option<PathBuf>, line: &str) {
 /// aware visuals exist and nudges it to use them when a chart/table/status grid reads better than
 /// prose. When `render` is not among the enabled tools, the base prompt is returned unchanged so the
 /// agent is never told about a tool it doesn't have.
+/// `refused by proxy: <host>:<port> (<kind>)` — the one rendering of a proxy event, shared by every
+/// front-end, all of whose text is escaped (the host can come from a target).
+pub fn render_proxy_event(ev: &crate::proxy_event::ProxyEvent) -> String {
+    let what = if ev.kind.is_refusal() {
+        "refused by proxy"
+    } else {
+        "proxy"
+    };
+    format!(
+        "{what}: {}:{} ({})",
+        crate::safe_text::safe_line(&ev.host),
+        ev.port,
+        ev.kind.as_str()
+    )
+}
+
 pub(crate) fn effective_system_prompt(base: &str, registry: &ToolRegistry) -> String {
     let mut prompt = base.to_string();
     if registry.contains("render") {
@@ -1137,6 +1449,7 @@ pub(crate) fn effective_system_prompt(base: &str, registry: &ToolRegistry) -> St
 /// `/history`, `/retry`, `/save`, `/audit`, `/clear`, `/quit`) are handled inline. Returns the
 /// [`ReplSession`] record when the user quits or EOF is reached.
 pub async fn run_repl(
+    terminal: Result<ReplTerminal, String>,
     model: &dyn Model,
     registry: &mut ToolRegistry,
     sandbox: &mut Sandbox,
@@ -1151,6 +1464,7 @@ pub async fn run_repl(
     };
     let mut turns: Vec<TranscriptTurn> = Vec::new();
     let mut audit_trail: Vec<AuditEvent> = Vec::new();
+    let mut compactions: Vec<crate::transcript::CompactionEvent> = Vec::new();
     let mut usage_total: Option<Usage> = None;
     let mut exchanges = 0u32;
     let mut total_tool_calls = 0u32;
@@ -1158,20 +1472,18 @@ pub async fn run_repl(
     let mut message_log: Vec<String> = Vec::new();
     let mut last_user_message: Option<String> = None;
 
-    // Build the editor and take an external printer from it *before* moving it onto the read thread;
-    // the printer keeps working across every subsequent readline.
-    let mut editor = match DefaultEditor::new() {
-        Ok(e) => e,
+    let terminal = match terminal {
+        Ok(t) => t,
         Err(e) => {
-            eprintln!("bee-repl: could not initialize readline: {e}");
+            eprintln!("bee-repl: {e}");
             let transcript = build_transcript(
                 model.id(),
                 started_at,
                 start,
                 &turns,
                 &audit_trail,
-                sandbox.audit_health(),
                 usage_total,
+                &compactions,
             );
             return ReplSession {
                 conversation,
@@ -1182,33 +1494,20 @@ pub async fn run_repl(
             };
         }
     };
-    let hist_path = history_path();
-    if let Some(p) = &hist_path {
-        let _ = editor.load_history(p);
+    let ReplTerminal {
+        editor,
+        pending: startup_read,
+        hist_path,
+        output: output_arc,
+        consent_rx,
+    } = terminal;
+    let mut consent_rx = consent_rx;
+    let output: &TerminalOutput = &output_arc;
+    // The operator's own lines (each consent decision) go to this terminal too.
+    let operator = config.escalation.as_ref().map(|e| &e.config.operator);
+    if let Some(op) = operator {
+        op.set_output(output_arc.clone());
     }
-    let printer = match editor.create_external_printer() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("bee-repl: could not initialize terminal output: {e}");
-            let transcript = build_transcript(
-                model.id(),
-                started_at,
-                start,
-                &turns,
-                &audit_trail,
-                sandbox.audit_health(),
-                usage_total,
-            );
-            return ReplSession {
-                conversation,
-                exchanges,
-                total_tool_calls,
-                total_denials,
-                transcript: Some(transcript),
-            };
-        }
-    };
-    let output = TerminalOutput::new(Box::new(printer));
 
     // Publish the drawable width so the render tool can reject widgets this terminal can't show
     // (008-grid-tui). Height is unbounded here — the inline REPL scrolls — and off a tty (piped
@@ -1249,8 +1548,14 @@ pub async fn run_repl(
 
     let steering: SteeringQueue = Arc::new(Mutex::new(VecDeque::new()));
     let prompt = "bee> ".to_string();
-    // Exactly one readline is outstanding at all times.
-    let mut pending = issue_read(editor, prompt.clone());
+    // Exactly one readline is outstanding at all times. A read left over from start-up consent is
+    // that read: the operator stopped waiting while it was open, so an answer typed into it is late.
+    let mut late_startup_answer = startup_read.is_some();
+    let mut pending = match (startup_read, editor) {
+        (Some(read), _) => read,
+        (None, Some(editor)) => issue_read(editor, prompt.clone()),
+        (None, None) => unreachable!("a terminal always holds its editor or its read"),
+    };
 
     loop {
         // Idle: wait for the next full line.
@@ -1269,6 +1574,11 @@ pub async fn run_repl(
             }
         };
         let line = line.trim().to_string();
+        if std::mem::take(&mut late_startup_answer) && consent_input::parse(&line).is_ok() {
+            output.info(consent_input::TOO_LATE);
+            pending = issue_read(editor, prompt.clone());
+            continue;
+        }
         if line.is_empty() {
             pending = issue_read(editor, prompt.clone());
             continue;
@@ -1326,6 +1636,7 @@ pub async fn run_repl(
                 },
                 MetaCommand::Clear => {
                     conversation.messages.clear();
+                    lock_state(config).reset();
                     // Before the info line, so a front-end that wipes its transcript still shows the
                     // acknowledgement afterwards rather than clearing it away again (010).
                     output.clear_history();
@@ -1333,15 +1644,19 @@ pub async fn run_repl(
                 }
                 MetaCommand::Save(path) => {
                     let path = path.unwrap_or_else(|| "bee-repl-session.json".to_string());
-                    let transcript = build_transcript(
+                    let mut transcript = build_transcript(
                         model.id(),
                         started_at,
                         start,
                         &turns,
                         &audit_trail,
-                        sandbox.audit_health(),
                         usage_total,
+                        &compactions,
                     );
+                    transcript.consents = operator.map(|op| op.log()).unwrap_or_default();
+                    // Each MCP server's own kernel events so far (024 FR-027).
+                    transcript.mcp_audit = sandbox.mcp_audit().clone();
+                    transcript.audit_health = sandbox.audit_health();
                     match std::fs::write(&path, transcript.to_json()) {
                         Ok(()) => output.info(&format!("saved transcript to {path}")),
                         Err(e) => output.error(&format!("could not write {path}: {e}")),
@@ -1380,23 +1695,41 @@ pub async fn run_repl(
                 registry,
                 sandbox,
                 config,
-                &output,
+                output,
                 &steering,
                 recorder.as_ref(),
             );
             tokio::pin!(fut);
+            // A consent question from the operator, waiting on this terminal's one reader.
+            let mut asking: Option<consent_input::Pending> = None;
             loop {
                 tokio::select! {
                     r = &mut fut => break r,
+                    Some(ask) = next_ask(&mut consent_rx) => {
+                        let question = consent_input::Pending::new(ask);
+                        question.show(output);
+                        asking = Some(question);
+                    }
                     joined = &mut pending => {
                         let (mut editor, line_res) = joined.expect("readline task panicked");
                         match line_res {
                             Ok(l) => {
                                 let l = l.trim().to_string();
-                                if !l.is_empty() {
-                                    remember(&mut editor, &hist_path, &l);
-                                    output.steering(&format!("↳ queued: {l}"));
-                                    steering.lock().expect("steering queue").push_back(l);
+                                match consent_input::route(&mut asking, &l) {
+                                    consent_input::Routed::Answered => {}
+                                    consent_input::Routed::TooLate => {
+                                        output.info(consent_input::TOO_LATE);
+                                    }
+                                    consent_input::Routed::Steering => {
+                                        if !l.is_empty() {
+                                            remember(&mut editor, &hist_path, &l);
+                                            output.steering(&format!("↳ queued: {l}"));
+                                            steering.lock().expect("steering queue").push_back(l);
+                                        }
+                                        if let Some(q) = &asking {
+                                            q.show(output);
+                                        }
+                                    }
                                 }
                             }
                             // Ctrl-D mid-exchange: quit once this exchange finishes.
@@ -1424,6 +1757,7 @@ pub async fn run_repl(
             turns.push(t);
         }
         audit_trail.extend(result.audit);
+        compactions.extend(result.compactions);
 
         if quit_after {
             break;
@@ -1437,15 +1771,18 @@ pub async fn run_repl(
         plural(total_denials, "denial")
     ));
 
-    let transcript = build_transcript(
+    let mut transcript = build_transcript(
         model.id(),
         started_at,
         start,
         &turns,
         &audit_trail,
-        sandbox.audit_health(),
         usage_total,
+        &compactions,
     );
+    transcript.consents = operator.map(|op| op.log()).unwrap_or_default();
+    transcript.mcp_audit = sandbox.finish_mcp_audit().await;
+    transcript.audit_health = sandbox.audit_health();
     ReplSession {
         conversation,
         exchanges,
@@ -1800,6 +2137,7 @@ mod tests {
     fn footer_reads_cleanly() {
         let result = ExchangeResult {
             outcome: ExchangeOutcome::Responded,
+            compactions: Vec::new(),
             model_calls: 2,
             tool_calls: 1,
             denials: 0,
@@ -1832,6 +2170,7 @@ mod tests {
         // First turn: cache written but not yet read.
         let write_only = ExchangeResult {
             outcome: ExchangeOutcome::Responded,
+            compactions: Vec::new(),
             model_calls: 1,
             tool_calls: 0,
             denials: 0,
@@ -1867,6 +2206,7 @@ mod tests {
     fn footer_omits_cost_for_unpriced_model() {
         let result = ExchangeResult {
             outcome: ExchangeOutcome::Responded,
+            compactions: Vec::new(),
             model_calls: 1,
             tool_calls: 0,
             denials: 0,

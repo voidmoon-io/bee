@@ -77,6 +77,25 @@ jobs:
         run: cargo test --features mcp,sec,astgrep-rust --locked
       - name: VM result parser fixtures
         run: python3 -m unittest discover -s test/vm -p 'test_*.py'
+      - name: test (test-support targets)
+        # 024 R1: the call-lifecycle orchestration tests drive the host sandbox's scripted audit
+        # source. `test-support` is test-only and never in a shipping feature set
+        # (tests/test_support_absent.rs, run in the default step above). Only the targets that need
+        # the feature are run here, with and without `intercept` — the loops compile a different
+        # call path (the proxy-refusal retry) under it. The 019 suites build their session through
+        # the builder's test-support seam (024 T048), so they run here too.
+        run: |
+          cargo test --features test-support --locked \
+            --test call_characterization --test call_lifecycle --test hooks_leases \
+            --test operator --test stuck_detection --test finish_tool --test transcript_compat \
+            --test context_compaction --test episode_progress_strings --test session_parity
+          cargo test --features intercept,test-support --locked \
+            --test call_characterization --test call_lifecycle --test hooks_leases \
+            --test operator --test stuck_detection --test finish_tool --test transcript_compat \
+            --test context_compaction --test episode_progress_strings --test session_parity \
+            --test intercept_tools --test intercept_replay --test intercept_fuzz \
+            --test intercept_rules --test intercept_leads --test intercept_escalation \
+            --test intercept_har --test intercept_tls --test intercept_ops
 
   enforce-check:
     name: enforce and concurrency type-check

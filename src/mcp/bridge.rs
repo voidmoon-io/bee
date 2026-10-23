@@ -11,6 +11,19 @@
 //! the tool list and updates a shared cache, then sets the bridge-wide **dirty** flag. The agent
 //! loop calls [`McpBridge::take_dirty`] each turn and, when set, re-registers the current tools so
 //! the change reaches the model on its next turn.
+//!
+//! ## Attribution (024 FR-027)
+//! A stdio server runs in the session's tool scope for its whole lifetime. Its own process's kernel
+//! events are told apart by `tgid`, recorded at spawn and exposed by [`McpBridge::server_tgids`]. A
+//! call made to the server keeps them in its audit, so its denials are fed back and can escalate;
+//! otherwise the session records them under the server, never in an unrelated open call's audit.
+//! Limits, until MCP servers run in their own scope (018-subagent-scopes):
+//! - **processes a server spawns are not attributed**: their events stay in the tool scope's stream,
+//!   and land in whichever call is open;
+//! - the `tgid` is the pid in bee's own PID namespace. Inside a separate one (bee in a container) it
+//!   does not match the kernel's, and server events fall back to the open call;
+//! - a server that exits keeps its `tgid` entry, so a process that later reuses the pid is filed
+//!   under the server.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -178,6 +191,9 @@ pub struct ConnectedServer {
     tools: SharedTools,
     status: ServerStatus,
     handle: Option<ServerHandle>,
+    /// The stdio child's `tgid`, for attributing its kernel events (FR-027). `None` for a remote
+    /// server or one that never connected.
+    tgid: Option<u32>,
 }
 
 impl ConnectedServer {
@@ -265,6 +281,16 @@ impl McpBridge {
         self.servers.iter().map(|(k, v)| (k.as_str(), v))
     }
 
+    /// Each connected stdio server's own process, as `(name, tgid)` (FR-027). The session hands these
+    /// to its sandbox so the server's kernel events are recorded under it.
+    pub fn server_tgids(&self) -> Vec<(String, u32)> {
+        self.servers
+            .iter()
+            .filter(|(_, s)| matches!(s.status, ServerStatus::Connected))
+            .filter_map(|(name, s)| Some((name.clone(), s.tgid?)))
+            .collect()
+    }
+
     /// The policy this bridge was built from (exposes the domain allowlist for `/mcp`).
     pub fn policy(&self) -> &McpPolicy {
         &self.policy
@@ -318,6 +344,7 @@ fn failed_server(cfg: &McpServerConfig, why: String) -> ConnectedServer {
         tools: Arc::new(Mutex::new(Vec::new())),
         status: ServerStatus::Failed(why),
         handle: None,
+        tgid: None,
     }
 }
 
@@ -343,6 +370,7 @@ async fn finalize_connection(
             service: running,
             peer,
         }),
+        tgid: None,
     }
 }
 
@@ -367,7 +395,18 @@ async fn connect_stdio(
     dirty: Arc<AtomicBool>,
 ) -> ConnectedServer {
     let deadline = tokio::time::Instant::now() + STDIO_STARTUP_TIMEOUT;
-    let transport = match spawn_stdio(sandbox, cfg) {
+    // Under interception the server gets its own proxy credential for its lifetime, issued (and
+    // acknowledged) before it can make a request (019 T042). A no-op without `[policy.http]`.
+    if tokio::time::timeout_at(
+        deadline,
+        sandbox.begin_side_call(&super::transport::mcp_call(&cfg.name)),
+    )
+    .await
+    .is_err()
+    {
+        return failed_server(cfg, "MCP credential setup deadline exceeded".into());
+    }
+    let (transport, tgid) = match spawn_stdio(sandbox, cfg) {
         Ok(t) => t,
         Err(e) => return failed_server(cfg, e),
     };
@@ -385,7 +424,10 @@ async fn connect_stdio(
             )
         }
     };
-    finalize_connection(cfg, running, shared, deadline).await
+    ConnectedServer {
+        tgid,
+        ..finalize_connection(cfg, running, shared, deadline).await
+    }
 }
 
 /// Connect one remote MCP server over Streamable HTTP. The domain gate is checked **first** — a
@@ -435,6 +477,19 @@ async fn connect_remote(
         }
     };
     finalize_connection(cfg, running, shared, deadline).await
+}
+
+/// The bridge's tools change when a server sends `tools/list_changed`; turn start refreshes them
+/// through [`crate::turn::RefreshHook`] (004 FR-043, 024 FR-030).
+impl crate::turn::ToolRefresh for McpBridge {
+    fn take_dirty(&self) -> bool {
+        McpBridge::take_dirty(self)
+    }
+
+    fn reregister(&self, registry: &mut ToolRegistry) {
+        registry.remove_mcp_tools();
+        self.register_into(registry);
+    }
 }
 
 #[cfg(test)]

@@ -14,8 +14,10 @@ use crate::metrics::{stop_label, Recorder};
 use crate::provider::{Conversation, Message, Model, ModelError, Turn, Usage};
 use crate::sandbox::{self, Sandbox};
 use crate::scenario::{Scenario, ScoringMode, WorkdirSetup};
-use crate::tools::{self, ToolRegistry};
-use crate::transcript::{EpisodeStatus, EpisodeTranscript, RecordedCall, Timing, TranscriptTurn};
+use crate::tools::ToolRegistry;
+use crate::transcript::{
+    EpisodeStatus, EpisodeTranscript, HarnessNote, NoteKind, RecordedCall, Timing, TranscriptTurn,
+};
 
 /// A sink for human-readable live progress lines (research-agnostic; the CLI wires it to stderr).
 /// The loop owns the formatting; the sink just renders. `None` ⇒ silent (the default).
@@ -30,16 +32,18 @@ pub struct LoopOptions {
     /// Optional metrics recorder — one [`crate::metrics::CallRecord`] per model call. `None` (the
     /// default, and what host tests use) records nothing.
     pub metrics: Option<Recorder>,
-    /// Optional per-turn tool-refresh hook (004-mcp-client, FR-043). Called at the top of each turn
-    /// with `&mut registry`; the MCP path installs a closure that re-registers tools when an MCP
-    /// server sent `tools/list_changed`. rmcp-agnostic (a plain closure) so non-MCP callers are
-    /// unaffected. `None` (the default) is a no-op.
-    #[allow(clippy::type_complexity)]
-    pub refresh_tools: Option<Box<dyn Fn(&mut ToolRegistry) + Send + Sync>>,
+    /// A source of tools that can change mid-session — the MCP bridge (004 FR-043). Refreshed at turn
+    /// start through [`crate::turn::RefreshHook`] (024 FR-030). `None` (the default): nothing to refresh.
+    pub tool_refresh: Option<std::sync::Arc<dyn crate::turn::ToolRefresh>>,
     /// Dynamic capability grants (007-dynamic-grants). `None` ⇒ escalation is off and the loop
     /// behaves exactly as before. When set, the loop builds an [`crate::grants::ActivePolicy`] and
     /// drives the escalation hooks each step.
     pub escalation: Option<crate::grants::escalate::LoopEscalation>,
+    /// The context settings below the scenario: user and project `[context]`, and the provider's
+    /// window and reply limit (025). The scenario's own `[context]` is merged over them.
+    pub context: crate::context::ContextInputs,
+    /// User and project `[stuck]` (025 US2). The scenario's own `[stuck]` is merged over it.
+    pub stuck: crate::stuck::StuckConfig,
 }
 
 impl Default for LoopOptions {
@@ -48,8 +52,10 @@ impl Default for LoopOptions {
             max_retries: 5,
             progress: None,
             metrics: None,
-            refresh_tools: None,
+            tool_refresh: None,
             escalation: None,
+            context: crate::context::ContextInputs::default(),
+            stuck: crate::stuck::StuckConfig::default(),
         }
     }
 }
@@ -76,7 +82,34 @@ fn preview(s: &str, max: usize) -> String {
     }
 }
 
-fn status_label(s: &EpisodeStatus) -> String {
+/// Progress lines for what a turn start changed — none when it changed nothing, so an episode without
+/// leases prints exactly what it did before.
+fn emit_turn_start(opts: &LoopOptions, report: &crate::turn::TurnStartReport) {
+    if !report.released.is_empty() {
+        emit(
+            opts,
+            format!("  lease released: {}", report.released.join(", ")),
+        );
+    }
+    if !report.expired.is_empty() {
+        emit(
+            opts,
+            format!("  lease expired: {}", report.expired.join(", ")),
+        );
+    }
+    if !report.removed_tools.is_empty() {
+        emit(
+            opts,
+            format!("  tools withdrawn: {}", report.removed_tools.join(", ")),
+        );
+    }
+    if let Some(e) = &report.narrow_error {
+        emit(opts, format!("  WARNING: scope narrowing: {e}"));
+    }
+}
+
+/// The words the `done:` progress line and the batch summary use for `s`.
+pub fn status_label(s: &EpisodeStatus) -> String {
     match s {
         EpisodeStatus::Completed => "completed".into(),
         EpisodeStatus::Terminated { detail } => format!("terminated ({detail})"),
@@ -86,6 +119,43 @@ fn status_label(s: &EpisodeStatus) -> String {
         EpisodeStatus::InfraError { detail } => format!("infra_error ({detail})"),
         EpisodeStatus::Captured { turn } => format!("captured (turn {turn})"),
         EpisodeStatus::NotCaptured => "not_captured".into(),
+        EpisodeStatus::ContextExhausted { detail } => format!("context exhausted ({detail})"),
+        EpisodeStatus::Stuck { .. } => "stuck".into(),
+        EpisodeStatus::Finished { outcome, .. } => format!("finished ({outcome})"),
+        EpisodeStatus::EndedWithoutFinish => "ended without finish".into(),
+    }
+}
+
+/// `bee run`'s exit code: the run ended without completing its task (025, contracts/finish.md).
+pub const EXIT_INCOMPLETE: u8 = 3;
+/// `EX_UNAVAILABLE` (sysexits): the provider failed.
+const EXIT_UNAVAILABLE: u8 = 69;
+/// `EX_SOFTWARE` (sysexits): bee could not set the episode up.
+const EXIT_SOFTWARE: u8 = 70;
+
+/// The process exit code for an episode that ended with `status` (contracts/finish.md). In the
+/// library, not the CLI, so the mapping is testable and an embedder gets the same answer
+/// (Constitution V). When `finish` was offered, only `finish` with outcome `completed` is success: a
+/// run that timed out had not finished its task.
+pub fn exit_code(status: &EpisodeStatus, finish_offered: bool) -> u8 {
+    use crate::tools::finish::FinishOutcome;
+    match status {
+        EpisodeStatus::InfraError { .. } => EXIT_SOFTWARE,
+        EpisodeStatus::ApiError { .. } => EXIT_UNAVAILABLE,
+        EpisodeStatus::Terminated { .. }
+        | EpisodeStatus::ContextExhausted { .. }
+        | EpisodeStatus::Stuck { .. }
+        | EpisodeStatus::EndedWithoutFinish => EXIT_INCOMPLETE,
+        EpisodeStatus::Finished { outcome, .. } => match outcome {
+            FinishOutcome::Completed => 0,
+            FinishOutcome::Blocked | FinishOutcome::Abandoned => EXIT_INCOMPLETE,
+        },
+        EpisodeStatus::Timeout if finish_offered => EXIT_INCOMPLETE,
+        EpisodeStatus::Completed
+        | EpisodeStatus::Timeout
+        | EpisodeStatus::NoToolCalls
+        | EpisodeStatus::Captured { .. }
+        | EpisodeStatus::NotCaptured => 0,
     }
 }
 
@@ -100,7 +170,7 @@ fn rfc3339(t: OffsetDateTime) -> String {
 
 /// One provider round-trip with bounded exponential backoff on transient errors (FR-017). Never
 /// sleeps past `deadline`. Returns a human-readable detail string on terminal failure.
-async fn complete_with_retry(
+pub(crate) async fn complete_with_retry(
     model: &dyn Model,
     convo: &Conversation,
     schemas: &[crate::provider::ToolSchema],
@@ -142,19 +212,6 @@ async fn complete_with_retry(
     }
 }
 
-async fn bounded_hook(
-    deadline: Instant,
-    step: impl std::future::Future<Output = Option<crate::grants::escalate::EscalateOutcome>>,
-) -> Option<crate::grants::escalate::EscalateOutcome> {
-    tokio::time::timeout_at(deadline.into(), step)
-        .await
-        .unwrap_or_else(|_| {
-            Some(crate::grants::escalate::EscalateOutcome::Terminated(
-                "episode deadline exceeded".into(),
-            ))
-        })
-}
-
 /// Run the loop over a ready sandbox. The sandbox is `&mut` so audit can be drained between calls.
 pub async fn run_loop(
     model: &dyn Model,
@@ -179,28 +236,57 @@ pub async fn run_loop(
 
     let mut convo = Conversation::new(&scenario.system_prompt, &scenario.task);
 
+    // The context budget (025): never send a request over it, and cap each result the model sees.
+    let mut ctx = match crate::context::ContextManager::for_session(
+        &opts.context,
+        Some(&scenario.context),
+        model.id(),
+    ) {
+        Ok((ctx, notice)) => {
+            if let Some(n) = notice {
+                emit(opts, format!("  {n}"));
+            }
+            ctx
+        }
+        Err(e) => return infra_error(scenario, model, format!("invalid [context]: {e}")),
+    };
+    // 025 US3: a standard run whose surface has `finish` must end through it. The surface decides,
+    // so a loop driven with a hand-built registry keeps its old ending unless it registers `finish`.
+    let finish_offered = scenario.mode == ScoringMode::Standard && registry.contains("finish");
+    // Whether the one reminder to call `finish` has been sent (FR-035).
+    let mut finish_reminded = false;
+
+    // Stuck detection (025 US2): every call is observed, in order, across turns.
+    let mut stuck = match opts.stuck.merge(scenario.stuck).resolve() {
+        Ok(cfg) => crate::stuck::StreakTracker::new(cfg).with_finish_offered(finish_offered),
+        Err(e) => return infra_error(scenario, model, format!("invalid [stuck]: {e}")),
+    };
+    // bee's notes for the next model call (025 FR-028), queued by stuck detection and the finish
+    // reminder and recorded on the turn they precede.
+    let mut pending: Vec<HarnessNote> = Vec::new();
+
     let mut turns: Vec<TranscriptTurn> = Vec::new();
     let mut audit_trail = Vec::new();
     let mut usage_total: Option<Usage> = None;
     let mut any_tool_called = false;
+    let mut compactions: Vec<crate::transcript::CompactionEvent> = Vec::new();
+    let mut summary_usage: Option<Usage> = None;
 
     // Dynamic capability grants (007-dynamic-grants): the mutable active policy, present only when
     // escalation is configured. Starts at `base`, bounded by `ceiling`.
     let mut active_policy = match opts
         .escalation
         .as_ref()
-        .map(|e| crate::grants::ActivePolicy::new(e.base.clone(), e.ceiling.clone()))
+        .map(|e| {
+            let active = crate::grants::ActivePolicy::new(e.base.clone(), e.ceiling.clone())?;
+            e.initialize(&active, sandbox)?;
+            Ok::<_, String>(active)
+        })
         .transpose()
     {
         Ok(active) => active,
-        Err(detail) => return infra_error(scenario, model, detail),
+        Err(e) => return infra_error(scenario, model, e),
     };
-
-    if let (Some(esc), Some(active)) = (opts.escalation.as_ref(), active_policy.as_ref()) {
-        if let Err(detail) = esc.initialize(active, sandbox) {
-            return infra_error(scenario, model, detail);
-        }
-    }
 
     // If the loop runs out of turns without the agent stopping, it hit the turn limit (FR-007). In
     // CTF mode (US3) a turn-limit-expired episode means the agent *failed* to capture the flag, so
@@ -212,64 +298,102 @@ pub async fn run_loop(
     };
 
     'outer: for index in 0..scenario.turn_limit {
-        macro_rules! stop_run {
-            ($detail:expr) => {{
-                status = if Instant::now() >= deadline {
-                    EpisodeStatus::Timeout
-                } else {
-                    EpisodeStatus::Terminated { detail: $detail }
-                };
-                break 'outer;
-            }};
-        }
-
         let turn_start = Instant::now();
         if Instant::now() >= deadline {
             status = EpisodeStatus::Timeout;
             break;
         }
 
-        if let Err(detail) = sandbox.check_cleanup() {
-            stop_run!(detail);
+        // The top of the model turn (024): hooks may release leases, leases whose lifetime ran out
+        // expire, the scope narrows if either happened, and the MCP tools refresh if they changed.
+        // Then a fresh schema snapshot for this turn.
+        let report = tokio::time::timeout_at(
+            deadline.into(),
+            crate::turn::turn_start(
+                index,
+                opts.escalation.as_ref().map_or(&[], |e| e.hooks.as_slice()),
+                active_policy.as_mut(),
+                sandbox,
+                registry,
+                opts.tool_refresh.as_ref(),
+            ),
+        )
+        .await;
+        let report = match report {
+            Ok(r) => r,
+            Err(_) => {
+                status = EpisodeStatus::Timeout;
+                break;
+            }
+        };
+        emit_turn_start(opts, &report);
+        if let Some(detail) = report.narrow_error {
+            status = EpisodeStatus::Terminated { detail };
+            break;
         }
-        if let (Some(esc), Some(active)) = (opts.escalation.as_ref(), active_policy.as_mut()) {
-            if let Some(crate::grants::escalate::EscalateOutcome::Terminated(detail)) =
-                bounded_hook(
-                    deadline,
-                    crate::grants::escalate::turn_start(esc, active, index, sandbox, registry),
-                )
-                .await
-            {
-                stop_run!(detail);
+        let schemas = registry.schemas();
+        if let (Some(config), Some(active)) = (opts.escalation.as_ref(), active_policy.as_mut()) {
+            let step = crate::grants::escalate::lifecycle_step(
+                config,
+                active,
+                crate::hooks::StepEvent::BeforeModelCall {
+                    convo: &convo,
+                    schemas: &schemas,
+                },
+                sandbox,
+                registry,
+            );
+            match tokio::time::timeout_at(deadline.into(), step).await {
+                Ok(Ok(())) => (),
+                Ok(Err(detail)) => {
+                    status = EpisodeStatus::Terminated { detail };
+                    break;
+                }
+                Err(_) => {
+                    status = EpisodeStatus::Timeout;
+                    break;
+                }
             }
         }
 
-        // Refresh MCP tools if a server sent `tools/list_changed` since last turn (FR-043), then take
-        // a fresh schema snapshot for this turn.
-        if let Some(refresh) = &opts.refresh_tools {
-            refresh(registry);
+        // Harness notes for this turn (019 US8: "N new passive leads", 025 reminders) — bee's own
+        // words, recorded on the turn they precede.
+        let mut turn_notes: Vec<HarnessNote> = Vec::new();
+        for note in sandbox.turn_notes() {
+            emit(opts, format!("  {note}"));
+            convo.push(Message::User { text: note.clone() });
+            turn_notes.push(HarnessNote::new(NoteKind::Passive, note));
         }
-        let schemas = registry.schemas();
-        if let (Some(esc), Some(active)) = (opts.escalation.as_ref(), active_policy.as_mut()) {
-            if let Some(crate::grants::escalate::EscalateOutcome::Terminated(detail)) =
-                bounded_hook(
-                    deadline,
-                    crate::grants::escalate::event_step(
-                        esc,
-                        active,
-                        crate::hooks::StepEvent::BeforeModelCall {
-                            convo: &convo,
-                            schemas: &schemas,
-                        },
-                        index,
-                        sandbox,
-                        registry,
-                    ),
-                )
-                .await
-            {
-                stop_run!(detail);
+        for note in std::mem::take(&mut pending) {
+            emit(opts, format!("  {}", note.text));
+            convo.push(Message::User {
+                text: note.text.clone(),
+            });
+            turn_notes.push(note);
+        }
+
+        // The context budget (025): compact if it is on and called for, and never send a request
+        // over the budget. A summary call's cost is the session's too (FR-013).
+        let prepared = ctx
+            .prepare(&mut convo, &schemas, model, deadline, index)
+            .await;
+        for e in ctx.take_events() {
+            emit(
+                opts,
+                format!("  {}", crate::context::describe(&e, ctx.budget().tokens())),
+            );
+            compactions.push(e);
+        }
+        let prepared = match prepared {
+            Ok(p) => p,
+            Err(e) => {
+                status = EpisodeStatus::ContextExhausted { detail: e.detail };
+                break;
             }
+        };
+        if let Some(u) = prepared.summary_usage {
+            usage_total = Some(usage_total.map_or(u, |acc| acc + u));
+            summary_usage = Some(summary_usage.map_or(u, |acc| acc + u));
         }
 
         let call_start = Instant::now();
@@ -287,8 +411,12 @@ pub async fn run_loop(
                             "error",
                         );
                     }
+                    // A provider refusal for length means the estimate ran low: report it as the
+                    // budget it is, not as a provider fault (plan risk 2).
                     status = if Instant::now() >= deadline {
                         EpisodeStatus::Timeout
+                    } else if crate::context::is_context_overflow(&detail) {
+                        EpisodeStatus::ContextExhausted { detail }
                     } else {
                         EpisodeStatus::ApiError { detail }
                     };
@@ -307,6 +435,7 @@ pub async fn run_loop(
             );
         }
 
+        ctx.observe(prepared.sent_bytes, turn.usage.as_ref());
         if let Some(u) = turn.usage {
             usage_total = Some(usage_total.map_or(u, |acc| acc + u));
         }
@@ -324,6 +453,7 @@ pub async fn run_loop(
         // (a model that never engages — SC-007, no hang).
         if turn.tool_calls.is_empty() {
             turns.push(TranscriptTurn {
+                notes: std::mem::take(&mut turn_notes),
                 index,
                 assistant_text: assistant_text.clone(),
                 calls: Vec::new(),
@@ -333,6 +463,17 @@ pub async fn run_loop(
                 text: assistant_text,
                 tool_calls: Vec::new(),
             });
+            // With `finish` offered, prose does not end the run: the first time, the model is told
+            // how a run ends; the second time, the run ends without finishing (FR-035).
+            if finish_offered {
+                if finish_reminded {
+                    status = EpisodeStatus::EndedWithoutFinish;
+                    break;
+                }
+                finish_reminded = true;
+                pending.push(HarnessNote::new(NoteKind::FinishRequired, FINISH_REMINDER));
+                continue;
+            }
             status = if any_tool_called {
                 EpisodeStatus::Completed
             } else {
@@ -347,13 +488,14 @@ pub async fn run_loop(
         });
 
         let mut recorded: Vec<RecordedCall> = Vec::new();
-        for tc in &turn.tool_calls {
+        for (at, tc) in turn.tool_calls.iter().enumerate() {
             any_tool_called = true;
 
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 status = EpisodeStatus::Timeout;
                 turns.push(TranscriptTurn {
+                    notes: std::mem::take(&mut turn_notes),
                     index,
                     assistant_text,
                     calls: recorded,
@@ -371,214 +513,125 @@ pub async fn run_loop(
                 ),
             );
 
-            // Proactive escalation (007, US2): a hook may request a grant before this call runs
-            // (e.g. a loaded skill's `requires`). The grant applies (or is refused) in place; the
-            // call then executes normally under the possibly-widened scope.
-            let mut refusal = None;
-            if let (Some(esc), Some(active)) = (opts.escalation.as_ref(), active_policy.as_mut()) {
-                if let Some(out) = bounded_hook(
-                    deadline,
-                    crate::grants::escalate::proactive_step(
-                        esc, active, tc, index, sandbox, registry,
-                    ),
-                )
-                .await
-                {
-                    emit(opts, format!("  escalate(proactive): {out:?}"));
-                    match out {
-                        crate::grants::escalate::EscalateOutcome::Denied(reason) => {
-                            refusal = Some(crate::tools::ToolResult::error(reason))
-                        }
-                        crate::grants::escalate::EscalateOutcome::Terminated(reason) => {
-                            turns.push(TranscriptTurn {
-                                index,
-                                assistant_text,
-                                calls: recorded,
-                                duration_ms: ms_since(turn_start),
-                            });
-                            stop_run!(reason);
-                        }
-                        _ => (),
-                    }
-                }
-            }
-
-            if Instant::now() >= deadline {
-                stop_run!("episode deadline exceeded".into());
-            }
-
-            let (mut result, mut timed_out) = if let Some(refusal) = refusal {
-                (refusal, false)
-            } else {
-                match tokio::time::timeout_at(deadline.into(), registry.execute(tc, sandbox)).await
-                {
-                    Ok(r) => (r, false),
-                    Err(_) => (
-                        crate::tools::ToolResult::error(
-                            "tool aborted: episode wall-clock deadline reached",
-                        ),
-                        true,
-                    ),
-                }
-            };
-
-            // Correlate the kernel audit events this call produced (FR-008). `settle` lets the async
-            // demux path (US4) deliver this call's events; it is a no-op for the sync paths.
-            sandbox.settle().await;
-            let mut audit = sandbox.drain_audit();
-            sandbox.retain_audit(&mut audit);
-            audit_trail.extend(audit.iter().cloned());
-
-            // Reactive escalation (007, US1): a kernel denial may be escalated (a grant scoped to the
-            // denied resource) and the call retried ONCE under the widened scope. Runs before the
-            // result is recorded, so the model sees the single (post-reload) outcome.
-            if audit.iter().any(|e| e.decision == "denied") {
-                if let (Some(esc), Some(active)) =
-                    (opts.escalation.as_ref(), active_policy.as_mut())
-                {
-                    if let Some((op, target)) = crate::grants::escalate::first_denial(&audit) {
-                        if let Some(out) = bounded_hook(
-                            deadline,
-                            crate::grants::escalate::reactive_step(
-                                esc, active, &op, &target, tc, index, sandbox, registry,
-                            ),
-                        )
-                        .await
-                        {
-                            emit(opts, format!("  escalate(reactive): {out:?}"));
-                            match &out {
-                                crate::grants::escalate::EscalateOutcome::Denied(reason) => {
-                                    result = crate::tools::ToolResult::error(reason.clone())
-                                }
-                                crate::grants::escalate::EscalateOutcome::Terminated(reason) => {
-                                    let detail = reason.clone();
-                                    recorded.push(RecordedCall {
-                                        call: tc.clone(),
-                                        result,
-                                        audit,
-                                    });
-                                    turns.push(TranscriptTurn {
-                                        index,
-                                        assistant_text,
-                                        calls: recorded,
-                                        duration_ms: ms_since(turn_start),
-                                    });
-                                    stop_run!(detail);
-                                }
-                                _ => (),
-                            }
-                            // Retry the call exactly once under the widened scope (SC-005). Only on
-                            // a genuine widening: `AlreadyHeld` changed nothing, so the retry would
-                            // be denied exactly as the first attempt was.
-                            if out.is_granted() {
-                                let retried = if Instant::now() >= deadline {
-                                    None
-                                } else {
-                                    tokio::time::timeout_at(
-                                        deadline.into(),
-                                        registry.execute(tc, sandbox),
-                                    )
-                                    .await
-                                    .ok()
-                                };
-                                result = retried.unwrap_or_else(|| {
-                                    timed_out = true;
-                                    crate::tools::ToolResult::error(
-                                        "tool retry aborted: episode wall-clock deadline reached",
-                                    )
-                                });
-                                sandbox.settle().await;
-                                let mut retry_audit = sandbox.drain_audit();
-                                sandbox.retain_audit(&mut retry_audit);
-                                audit_trail.extend(retry_audit.iter().cloned());
-                                audit = retry_audit;
-                            }
-                        }
-                    }
-                }
-            }
-
-            if let (Some(esc), Some(active)) = (opts.escalation.as_ref(), active_policy.as_mut()) {
-                if let Some(crate::grants::escalate::EscalateOutcome::Terminated(detail)) =
-                    bounded_hook(
-                        deadline,
-                        crate::grants::escalate::event_step(
-                            esc,
-                            active,
-                            crate::hooks::StepEvent::AfterToolResult {
-                                call: tc,
-                                result: &result,
-                                audit: &audit,
-                            },
-                            index,
-                            sandbox,
-                            registry,
-                        ),
-                    )
-                    .await
-                {
-                    recorded.push(RecordedCall {
-                        call: tc.clone(),
-                        result,
-                        audit,
-                    });
-                    turns.push(TranscriptTurn {
-                        index,
-                        assistant_text,
-                        calls: recorded,
-                        duration_ms: ms_since(turn_start),
-                    });
-                    stop_run!(detail);
-                }
-            }
-
+            // The call, start to finish: escalation, the timed attempt, its audit, at most one retry,
+            // the proxy and late drains (024, src/call.rs). Rendering the outcome stays here.
+            let outcome = crate::call::run_call(
+                crate::call::CallInput {
+                    call: tc,
+                    turn: index,
+                    origin: crate::sandbox::CallOrigin::Tool,
+                    timeout: crate::call::TimeoutPolicy::Deadline(deadline),
+                },
+                sandbox,
+                registry,
+                match (opts.escalation.as_ref(), active_policy.as_mut()) {
+                    (Some(config), Some(active)) => Some(crate::call::Escalation {
+                        config,
+                        active,
+                        lease_turn: index,
+                    }),
+                    _ => None,
+                },
+            )
+            .await;
+            audit_trail.extend(outcome.audit_trail().cloned());
             if let Some(warning) = sandbox.audit_warning() {
                 emit(opts, warning);
             }
-            let denied = audit.iter().any(|e| e.decision == "denied");
-            let tag = if denied {
+            if let Some(detail) = outcome
+                .terminated
+                .as_ref()
+                .cloned()
+                .or_else(|| sandbox.check_cleanup().err())
+            {
+                recorded.push(outcome.to_recorded(tc));
+                turns.push(TranscriptTurn {
+                    index,
+                    assistant_text,
+                    calls: recorded,
+                    duration_ms: ms_since(turn_start),
+                    notes: turn_notes,
+                });
+                status = EpisodeStatus::Terminated { detail };
+                break 'outer;
+            }
+            for rec in &outcome.escalations {
+                let kind = match rec.trigger {
+                    crate::call::Trigger::Proactive => "proactive",
+                    crate::call::Trigger::KernelDenial { .. } => "reactive",
+                    crate::call::Trigger::ProxyRefusal { .. } => "proxy",
+                };
+                emit(opts, format!("  escalate({kind}): {:?}", rec.outcome));
+            }
+            for ev in &outcome.proxy_events {
+                emit(opts, format!("  {}", crate::repl::render_proxy_event(ev)));
+            }
+
+            // `DENIED` is the tool's own denial only — never the proxy scope's (FR-022).
+            let tag = if outcome.tool_denials() > 0 {
                 "DENIED"
-            } else if result.is_error {
+            } else if outcome.result.is_error {
                 "ERR"
             } else {
                 "ok"
             };
-            let exit = result
+            let exit = outcome
+                .result
                 .exit_code
                 .map(|c| format!(" (exit {c})"))
                 .unwrap_or_default();
             emit(
                 opts,
-                format!("  result {tag}{exit}: {}", preview(&result.content, 120)),
+                format!(
+                    "  result {tag}{exit}: {}",
+                    preview(&outcome.result.content, 120)
+                ),
             );
-            for e in &audit {
+            for e in outcome.audit.iter().chain(&outcome.proxy_audit) {
                 if e.decision == "denied" {
                     emit(opts, format!("  audit: {} denied {}", e.op, e.target));
                 }
             }
+            let timed_out = outcome.timed_out;
+            let result = &outcome.result;
 
             convo.push(Message::ToolResult {
                 call_id: tc.id.clone(),
                 name: tc.name.clone(),
-                content: result.content.clone(),
+                // The model sees the capped result; the record keeps the tool's own (025 FR-022).
+                content: ctx.cap(&result.content, result.original_len),
                 is_error: result.is_error,
+                provenance: result.provenance.clone(),
             });
+            ctx.note_call(
+                &tc.id,
+                crate::context::compact::CallNote::from_outcome(tc, &outcome),
+            );
 
             // A terminal tool (`submit_flag`/`give_up`, US3) ends the episode immediately. The loop
             // stays tool-name-agnostic except for the one distinction that decides the status:
             // `submit_flag` with a non-error (correct) result ⇒ Captured, anything else ⇒ NotCaptured.
             if result.terminal {
-                status = if tc.name == "submit_flag" && !result.is_error {
-                    EpisodeStatus::Captured { turn: index }
-                } else {
-                    EpisodeStatus::NotCaptured
+                status = match tc.name.as_str() {
+                    "submit_flag" if !result.is_error => EpisodeStatus::Captured { turn: index },
+                    // `finish` is terminal only for arguments it accepted, so they parse here.
+                    "finish" => match crate::tools::finish::parse(&tc.arguments) {
+                        Some((outcome, summary)) => EpisodeStatus::Finished {
+                            outcome,
+                            summary,
+                            turn: index,
+                        },
+                        None => EpisodeStatus::EndedWithoutFinish,
+                    },
+                    _ => EpisodeStatus::NotCaptured,
                 };
-                recorded.push(RecordedCall {
-                    call: tc.clone(),
-                    result,
-                    audit,
-                });
+                recorded.push(outcome.to_recorded(tc));
+                // Calls after a terminal one in the same turn are recorded, never run (FR-034).
+                for skipped in &turn.tool_calls[at + 1..] {
+                    recorded.push(not_run(skipped));
+                }
                 turns.push(TranscriptTurn {
+                    notes: std::mem::take(&mut turn_notes),
                     index,
                     assistant_text,
                     calls: recorded,
@@ -587,15 +640,12 @@ pub async fn run_loop(
                 break 'outer;
             }
 
-            recorded.push(RecordedCall {
-                call: tc.clone(),
-                result,
-                audit,
-            });
+            recorded.push(outcome.to_recorded(tc));
 
             if timed_out {
                 status = EpisodeStatus::Timeout;
                 turns.push(TranscriptTurn {
+                    notes: std::mem::take(&mut turn_notes),
                     index,
                     assistant_text,
                     calls: recorded,
@@ -603,9 +653,41 @@ pub async fn run_loop(
                 });
                 break 'outer;
             }
+
+            match stuck.observe(tc, &outcome) {
+                crate::stuck::StuckSignal::None => {}
+                crate::stuck::StuckSignal::Remind(r) => pending.push(r.into_note()),
+                crate::stuck::StuckSignal::Stop {
+                    tool,
+                    arguments,
+                    repeats,
+                } => {
+                    emit(
+                        opts,
+                        format!(
+                            "  stuck: {tool} repeated {repeats} times with the same failing result \
+                             — ending run"
+                        ),
+                    );
+                    status = EpisodeStatus::Stuck {
+                        tool,
+                        arguments,
+                        repeats,
+                    };
+                    turns.push(TranscriptTurn {
+                        notes: std::mem::take(&mut turn_notes),
+                        index,
+                        assistant_text,
+                        calls: recorded,
+                        duration_ms: ms_since(turn_start),
+                    });
+                    break 'outer;
+                }
+            }
         }
 
         turns.push(TranscriptTurn {
+            notes: std::mem::take(&mut turn_notes),
             index,
             assistant_text,
             calls: recorded,
@@ -622,15 +704,24 @@ pub async fn run_loop(
             ms_since(start)
         ),
     );
+    if let EpisodeStatus::Finished { summary, .. } = &status {
+        emit(opts, format!("  summary: {}", preview(summary, 200)));
+    }
 
     let ended_at = OffsetDateTime::now_utc();
     EpisodeTranscript {
+        audit_health: sandbox.audit_health(),
+        consents: Vec::new(),
+        mcp_audit: Default::default(),
+        finish_offered,
+        compactions,
+        summary_usage,
+        http_scope: None,
         scenario_id: scenario.id.clone(),
         model_id: model.id().to_string(),
         status,
         turns,
         audit_trail,
-        audit_health: sandbox.audit_health(),
         timing: Timing {
             started_at: rfc3339(started_at),
             ended_at: rfc3339(ended_at),
@@ -641,16 +732,44 @@ pub async fn run_loop(
     }
 }
 
+/// What the model is told the first time it ends a turn with prose while `finish` is offered
+/// (contracts/finish.md).
+pub const FINISH_REMINDER: &str = "[bee] This run ends only when you call finish. If the task is \
+    done, call finish with outcome \"completed\" and a summary; otherwise continue working.";
+
+/// The record of a call that came after a terminal one in the same turn: it was never run.
+fn not_run(call: &crate::provider::ToolCall) -> RecordedCall {
+    RecordedCall {
+        call: call.clone(),
+        result: crate::tools::ToolResult::error("not run: the run had already finished"),
+        audit: Vec::new(),
+        proxy_events: Vec::new(),
+        denied_attempt_audit: Vec::new(),
+        denied_attempt_proxy_events: Vec::new(),
+        escalations: Vec::new(),
+        retried: false,
+        timed_out: false,
+        not_run: true,
+        refused_by_hook: None,
+    }
+}
+
 /// Build an `infra_error` transcript (setup failed; the loop never ran).
 fn infra_error(scenario: &Scenario, model: &dyn Model, detail: String) -> EpisodeTranscript {
     let now = rfc3339(OffsetDateTime::now_utc());
     EpisodeTranscript {
+        audit_health: Default::default(),
+        consents: Vec::new(),
+        mcp_audit: Default::default(),
+        finish_offered: false,
+        compactions: Vec::new(),
+        summary_usage: None,
+        http_scope: None,
         scenario_id: scenario.id.clone(),
         model_id: model.id().to_string(),
         status: EpisodeStatus::InfraError { detail },
         turns: Vec::new(),
         audit_trail: Vec::new(),
-        audit_health: Default::default(),
         timing: Timing {
             started_at: now.clone(),
             ended_at: now,
@@ -757,6 +876,23 @@ fn write_with_parents(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<(
     std::fs::write(path, bytes)
 }
 
+/// Operator choices for one episode that the scenario file does not carry: command-line flags, and
+/// settings from the operator's own configuration.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EpisodeOptions {
+    /// `--http-scope-advisory`: run `[policy.http]` interception even though the kernel will not
+    /// block (host mode, a build without `enforce`, or an observe-mode policy) — research R17.
+    pub http_scope_advisory: bool,
+    /// User and project `[context]`, and the provider file's window and reply limit (025). The
+    /// scenario's own `[context]` is merged over them.
+    pub context: crate::context::ContextInputs,
+    /// User and project `[stuck]` (025 US2). The scenario's own `[stuck]` is merged over it.
+    pub stuck: crate::stuck::StuckConfig,
+    /// What the episode runs under. `None`: the kernel whenever the build can enforce, else the host.
+    /// `bee run --host` asks for `Host` on any build.
+    pub enforcement: Option<crate::session::Enforcement>,
+}
+
 /// Run a full episode: build the sandbox (a real bee scope under `--features enforce`), materialize
 /// the workdir, run the loop, tear down. `provider_key_env` names the provider key var so it (plus
 /// the default key vars) is stripped from every tool child (FR-018).
@@ -766,30 +902,44 @@ pub async fn run_episode(
     provider_key_env: Option<&str>,
     progress: Option<ProgressSink>,
 ) -> EpisodeTranscript {
-    // Fail closed (Constitution I): a scenario that asks for MCP but a binary built without the
-    // `mcp` feature cannot provide it — refuse with a clear diagnostic rather than silently ignore.
-    #[cfg(not(feature = "mcp"))]
-    if scenario.mcp.enabled {
-        return infra_error(
-            scenario,
-            model,
-            "scenario enables [mcp] but bee was built without --features mcp".to_string(),
-        );
-    }
+    run_episode_with(
+        model,
+        scenario,
+        provider_key_env,
+        progress,
+        EpisodeOptions::default(),
+    )
+    .await
+}
 
-    let flag = scenario.workdir.flag.as_ref().map(|f| f.value.as_str());
-    let mut registry = tools::registry_for(&scenario.tools, flag);
+/// [`run_episode`] with operator options.
+#[cfg_attr(not(feature = "intercept"), allow(unused_variables))]
+pub async fn run_episode_with(
+    model: &dyn Model,
+    scenario: &Scenario,
+    provider_key_env: Option<&str>,
+    progress: Option<ProgressSink>,
+    eopts: EpisodeOptions,
+) -> EpisodeTranscript {
     // Strip the provider key vars plus any configured MCP `token_env` names from every tool child
     // (FR-018/FR-041), so an MCP Bearer token never leaks into a sandboxed stdio server's env.
     let mut strip_env = sandbox::key_vars(provider_key_env);
     strip_env.extend(scenario.mcp.token_env_names());
-    #[cfg_attr(not(feature = "mcp"), allow(unused_mut))]
+    // One progress sink, shared by the loop and the operator, which reports each consent decision on
+    // it (024 FR-004).
+    let progress = progress.map(std::sync::Arc::new);
+    let operator = crate::operator::Operator::autonomous(match &progress {
+        Some(p) => std::sync::Arc::new(crate::operator::ProgressOutput(p.clone())),
+        None => std::sync::Arc::new(crate::operator::NullOutput),
+    });
     let mut opts = LoopOptions {
-        progress,
+        progress: progress.map(|p| Box::new(move |line: &str| p(line)) as ProgressSink),
         metrics: Recorder::new(
             "episode",
             format!("episode:{}:{}", scenario.id, std::process::id()),
         ),
+        context: eopts.context,
+        stuck: eopts.stuck,
         ..LoopOptions::default()
     };
 
@@ -797,133 +947,42 @@ pub async fn run_episode(
         return infra_error(scenario, model, format!("workdir setup failed: {e}"));
     }
 
-    // Discover skills from the scenario's explicit roots (006-skills). Malformed skills warn via the
-    // progress sink but never abort the episode (Constitution I). The Arc is held until after the
-    // loop so the `skill` tool's registry outlives it.
-    let skills = std::sync::Arc::new(crate::skills::SkillRegistry::discover(&scenario.skills));
-    for w in skills.warnings() {
-        emit(
-            &opts,
-            format!("skill warning: {}: {}", w.path.display(), w.reason),
-        );
-    }
-
-    // Resolve skill capability grants BEFORE the scope compiles (006-skills, step 3). Non-interactive:
-    // the ceiling policy file is the operator's reviewable pre-authorization, so within-ceiling
-    // requests widen the compiled policy and anything beyond is refused unpromptably. Register any
-    // granted tools (Layer 1); the widened policy (Layer 2) flows into the scope below.
-    let skill_refs: Vec<&crate::skills::Skill> = skills.iter().collect();
-    let grants = resolve_episode_grants(scenario, &skill_refs).await;
-    for name in &grants.granted {
-        emit(
-            &opts,
-            format!("skill grant: '{name}' capabilities granted (within ceiling)"),
-        );
-    }
-    for (name, reason) in &grants.refused {
-        emit(&opts, format!("skill grant: '{name}' refused — {reason}"));
-    }
-    for tool in &grants.tools {
-        tools::register_named(&mut registry, tool, flag);
-    }
-    // Give the security tools this episode's ledger and scanner grants (016-native-tools). After
-    // skill grants, so a scanner a skill widened the policy to include is visible; before the policy
-    // is moved into the scope, which is the last point it can be read.
-    tools::configure_security_tools(
-        &mut registry,
-        &scenario.security,
-        Some(&grants.policy),
-        &format!("{}-{}", scenario.id, std::process::id()),
-    );
-    // Keep the resolved policy as the escalation floor before it is moved into the scope (007).
-    let escalation_base = grants.policy.clone();
-
-    #[cfg(feature = "enforce")]
-    let mut sandbox = match build_enforced_sandbox(scenario, grants.policy, strip_env) {
+    // The session, built the one way every entry point builds it (024 FR-006): skill grants, the
+    // `[policy.http]` advisory, the sandbox, the Interceptor, the tool surface, MCP servers and
+    // escalation.
+    let spec = spec_from_scenario(scenario, strip_env, &eopts, operator);
+    let mut session = match crate::session::build(spec, &|line| emit(&opts, line)).await {
         Ok(s) => s,
-        Err(detail) => return infra_error(scenario, model, detail),
+        Err(e) => return infra_error(scenario, model, e.to_string()),
     };
-    #[cfg(not(feature = "enforce"))]
-    let mut sandbox = Sandbox::host(strip_env);
+    opts.escalation = session.escalation.take();
+    opts.tool_refresh = session.tool_refresh.clone();
 
-    // Register the model-facing `skill` tool alongside the built-ins.
-    if skills.model_facing().next().is_some() {
-        registry.insert(Box::new(crate::tools::skill::SkillTool::new(
-            skills.clone(),
-        )));
-    }
-
-    // Dynamic capability grants (007-dynamic-grants). Reactive escalation on a kernel denial is
-    // gated on a declared ceiling (the operator's pre-authorization); proactive skill-`requires`
-    // escalation is always available. Consent is `AllowWithinCeiling` — the ceiling file IS the
-    // authorization for a non-interactive episode. Both hooks are inert without their trigger, so an
-    // episode with no ceiling and no capability-requesting skill behaves exactly as before.
-    {
-        let mut ceiling = match &scenario.ceiling_policy_path {
-            Some(p) => bee_core::Policy::from_path(p).unwrap_or_else(|_| escalation_base.clone()),
-            None => escalation_base.clone(),
-        };
-        // Keep the resolved base ⊆ ceiling: skill dirs were folded into the base as readable, so the
-        // ceiling must permit them too.
-        for s in skills.iter() {
-            if let Some(dir) = s.dir.to_str() {
-                ceiling
-                    .filesystem
-                    .entry(dir.to_string())
-                    .or_insert(bee_core::Access::Read);
-            }
-        }
-        let hooks: Vec<Box<dyn crate::hooks::LoopHook>> = vec![
-            Box::new(crate::grants::escalate::DenialEscalationHook {
-                enabled: scenario.ceiling_policy_path.is_some(),
-            }),
-            Box::new(crate::grants::escalate::SkillEscalationHook::new(
-                skills.clone(),
-            )),
-        ];
-        opts.escalation = Some(crate::grants::escalate::LoopEscalation {
-            base: escalation_base,
-            ceiling,
-            hooks,
-            consent: std::sync::Arc::new(crate::skills::AllowWithinCeiling),
-            timeout: std::time::Duration::from_secs(60),
-            default_ttl: crate::grants::Ttl::Forever,
-        });
-    }
-
-    // Connect MCP servers (if any) once the sandbox exists, register their tools alongside the
-    // built-ins, and install the per-turn refresh hook (FR-043). The bridge (Arc so the hook can
-    // hold a clone) owns the stdio children; dropping it at the end kills them (FR-034/42).
-    #[cfg(feature = "mcp")]
-    let bridge = {
-        let b = std::sync::Arc::new(
-            crate::mcp::McpBridge::connect(scenario.mcp.clone(), &sandbox).await,
-        );
-        b.register_into(&mut registry);
-        let hook = b.clone();
-        opts.refresh_tools = Some(Box::new(move |reg: &mut ToolRegistry| {
-            if hook.take_dirty() {
-                reg.remove_mcp_tools();
-                hook.register_into(reg);
-            }
-        }));
-        b
+    // The model is given the session's system prompt: the scenario's, plus the notes for the tools
+    // the session holds — the same prompt the REPL builds (024 FR-007).
+    let scenario = Scenario {
+        system_prompt: session.system_prompt.clone(),
+        ..scenario.clone()
     };
+    let mut transcript = run_loop(
+        model,
+        &scenario,
+        &mut session.registry,
+        &mut session.sandbox,
+        &opts,
+    )
+    .await;
+    transcript.http_scope = session.http_header();
+    transcript.consents = session.operator.take_log();
+    transcript.mcp_audit = session.sandbox.finish_mcp_audit().await;
+    transcript.audit_health = session.sandbox.audit_health();
 
-    let mut transcript = run_loop(model, scenario, &mut registry, &mut sandbox, &opts).await;
-
-    // Drop the refresh hook (its bridge clone) then the bridge, killing the MCP children (they live in
-    // the scope cgroup) before the scope itself is torn down.
-    #[cfg(feature = "mcp")]
-    {
-        opts.refresh_tools = None;
-        drop(bridge);
-    }
-    // Failed cleanup is an infrastructure failure even if the model completed its task. The engine
-    // retains its enforcement links until process exit if its final cleanup attempt also fails.
-    if let Err(e) = sandbox.teardown() {
+    // MCP servers, then the Interceptor, then the scopes (FR-012). A scope that will not empty means
+    // something survived the episode and is about to lose its enforcement when the engine drops.
+    opts.tool_refresh = None;
+    if let Err(e) = session.shutdown().await {
+        transcript.status = EpisodeStatus::InfraError { detail: e.clone() };
         emit(&opts, format!("scope cleanup failed: {e}"));
-        transcript.status = EpisodeStatus::InfraError { detail: e };
     }
 
     // CTF episodes carry a score derived from the audit trail (US3).
@@ -933,136 +992,60 @@ pub async fn run_episode(
     transcript
 }
 
-/// A minimal empty policy, used only as the never-read `GrantOutcome::policy` on the host no-op path
-/// (no parseable base policy ⇒ no grants).
-fn empty_policy() -> bee_core::Policy {
-    bee_core::Policy {
-        name: "none".to_string(),
-        description: None,
-        mode: bee_core::Mode::default(),
-        filesystem: std::collections::BTreeMap::new(),
-        exec: Default::default(),
-        network: Default::default(),
-        defaults: Default::default(),
-        exfiltration: Default::default(),
-    }
+/// Whether a headless run of `scenario` is offered `finish` (025 US3, contracts/finish.md): a
+/// standard-mode run, unless the scenario opts out. A CTF run ends with its own terminal tools.
+pub fn offers_finish(scenario: &Scenario) -> bool {
+    scenario.mode == ScoringMode::Standard && scenario.finish
 }
 
-/// Resolve skill capability grants for an episode (006-skills, step 3). Non-interactive: the ceiling
-/// policy file *is* the operator's reviewable pre-authorization, so within-ceiling requests widen the
-/// compiled policy and beyond-ceiling ones are refused unpromptably. Also folds each discovered
-/// skill's directory into the policy as readable, so the model can read bundled resources
-/// (`references/…`) through the scope. A `policy_path` that can't be parsed (e.g. host-mode
-/// `/dev/null`) yields a no-op outcome — instructions-only, no tool grants.
-async fn resolve_episode_grants(
+/// The session a scenario asks for. A `policy_path` that does not parse (the `/dev/null` placeholder
+/// of a host run) is no policy: nothing to widen, nothing to grant. An unreadable ceiling is the
+/// policy itself — widening is still on, and widens nothing.
+pub(crate) fn spec_from_scenario(
     scenario: &Scenario,
-    skills: &[&crate::skills::Skill],
-) -> crate::skills::GrantOutcome {
-    use bee_core::{Access, Policy};
-
-    let base = match Policy::from_path(&scenario.policy_path) {
-        Ok(p) => p,
-        Err(_) => {
-            return crate::skills::GrantOutcome {
-                policy: empty_policy(),
-                tools: Vec::new(),
-                granted: Vec::new(),
-                refused: Vec::new(),
-            }
-        }
-    };
-    let ceiling = match &scenario.ceiling_policy_path {
-        Some(p) => Policy::from_path(p).unwrap_or_else(|_| base.clone()),
-        None => base.clone(),
-    };
-    let mut outcome =
-        crate::skills::resolve_grants(skills, &base, &ceiling, &crate::skills::AllowWithinCeiling)
-            .await;
-    // Layer 2 readable-scope: declaring a skills root authorizes reading it, so each skill dir
-    // becomes readable in-scope for the model to pull bundled resources via read_file.
-    for s in skills {
-        if let Some(dir) = s.dir.to_str() {
-            outcome
-                .policy
-                .filesystem
-                .entry(dir.to_string())
-                .or_insert(Access::Read);
-        }
-    }
-    widen_for_scanner_reports(&mut outcome.policy, scenario);
-    outcome
-}
-
-/// Granting a scanner authorizes the report exchange the scan is made of (017).
-///
-/// The two-child pipeline has the scanner write SARIF to `.bee/scan/` and `bee sarif-worker` read it
-/// back — both of them tool children, both under the scope. But `:project_root/.bee` is a
-/// **default protection** (`PROTECTED_DEFAULTS`, FR-008): bee's own state is denied to tool children
-/// so the model cannot reach the ledger or the transcripts. The scan report lives inside that
-/// subtree, so under enforcement child 1's write and child 2's read were both refused and the scan
-/// failed with `cannot read …: Permission denied` — invisible under `--host`, where nothing enforces
-/// the deny at all.
-///
-/// So a resolved scanner grant widens the policy by exactly one subtree, in the same place and the
-/// same way a skill grant does. More-specific-wins means `.bee/scan` is carved out while the rest of
-/// `.bee` — `findings/` above all, where the ledger and its human verdicts live — stays denied.
-fn widen_for_scanner_reports(policy: &mut bee_core::Policy, scenario: &Scenario) {
-    #[cfg(feature = "scanners")]
-    {
-        use bee_core::Access;
-        let grants = crate::scanners::grants_from_policy(Some(policy), &scenario.security);
-        if grants.is_empty() {
-            return;
-        }
-        policy
-            .filesystem
-            .entry(format!(":project_root/{}", crate::tools::scanner::SCAN_DIR))
-            .or_insert(Access::Write);
-    }
-    #[cfg(not(feature = "scanners"))]
-    {
-        let _ = (policy, scenario);
-    }
-}
-
-/// Bring up a real bee scope from the resolved policy and wrap it as an [`Sandbox::Enforced`]. The
-/// policy is already widened by any approved skill grants and skill-dir reads (006-skills).
-#[cfg(feature = "enforce")]
-fn build_enforced_sandbox(
-    scenario: &Scenario,
-    policy: bee_core::Policy,
     strip_env: Vec<String>,
-) -> Result<Sandbox, String> {
-    use bee_userspace::{EnforcementPlan, Engine, ScopeMode, SystemResolver};
-
-    let resolver = SystemResolver::current();
-    let compiled = policy
-        .compile(&resolver)
-        .map_err(|e| format!("policy compile: {e}"))?;
-    let plan = EnforcementPlan::prepare(&compiled, ScopeMode::Enforce)
-        .map_err(|e| format!("enforcement plan: {e}"))?;
-    let mut engine = Engine::init().map_err(|e| format!("engine init: {e}"))?;
-
-    let scope_id = format!(
-        "bee-episode-{}-{}",
-        sanitize(&scenario.id),
-        std::process::id()
-    );
-    let scope = engine
-        .create_scope(&scope_id, bee_userspace::cgroup::DEFAULT_PARENT, &plan)
-        .map_err(|e| format!("create scope: {e}"))?;
-    let reader = engine
-        .take_audit_reader(&scope_id)
-        .map_err(|e| format!("audit reader: {e}"))?;
-    // `engine` moves into the sandbox so its eBPF programs stay attached for the whole episode.
-    Ok(Sandbox::enforced(engine, scope, reader, strip_env))
-}
-
-#[cfg(feature = "enforce")]
-fn sanitize(s: &str) -> String {
-    s.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect()
+    eopts: &EpisodeOptions,
+    operator: crate::operator::Operator,
+) -> crate::session::SessionSpec {
+    use bee_core::Policy;
+    let policy = Policy::from_path(&scenario.policy_path).ok();
+    let ceiling = scenario.ceiling_policy_path.as_ref().map(|p| {
+        Policy::from_path(p).unwrap_or_else(|_| {
+            policy
+                .clone()
+                .unwrap_or_else(crate::session::parts::empty_policy)
+        })
+    });
+    crate::session::SessionSpec {
+        entry: crate::session::EntryPoint::Headless,
+        label: scenario.id.clone(),
+        policy,
+        ceiling,
+        enforcement: eopts.enforcement.unwrap_or(if cfg!(feature = "enforce") {
+            crate::session::Enforcement::Kernel
+        } else {
+            crate::session::Enforcement::Host
+        }),
+        tools: {
+            let mut tools = scenario.tools.clone();
+            if offers_finish(scenario) && !tools.iter().any(|t| t == "finish") {
+                tools.push("finish".into());
+            }
+            tools
+        },
+        ctf_flag: scenario.workdir.flag.as_ref().map(|f| f.value.clone()),
+        skill_roots: scenario.skills.clone(),
+        mcp: scenario.mcp.clone(),
+        security: scenario.security.clone(),
+        workdir: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+        system_prompt: scenario.system_prompt.clone(),
+        strip_env,
+        http_scope_advisory: eopts.http_scope_advisory,
+        lease_turns: scenario.lease_turns,
+        // Autonomous: the ceiling file is the operator's reviewable pre-authorization.
+        operator,
+        prebuilt_sandbox: None,
+    }
 }
 
 /// R3 cgroup-join spike (004-mcp-client, T016). **Constitution III gate**: proves a stdio MCP server
@@ -1104,6 +1087,10 @@ mod mcp_cgroup_spike {
         )
         .unwrap();
         let scn = Scenario {
+            lease_turns: None,
+            context: Default::default(),
+            stuck: Default::default(),
+            finish: false,
             id: "mcp-spike".into(),
             policy_path: policy,
             system_prompt: "spike".into(),
@@ -1129,8 +1116,10 @@ mod mcp_cgroup_spike {
         let (scenario, tmp) = spike_scenario();
         let policy =
             bee_core::Policy::from_path(&scenario.policy_path).expect("parse spike policy");
-        let sandbox = build_enforced_sandbox(&scenario, policy, sandbox::key_vars(None))
-            .expect("build enforced sandbox (need root + BPF-LSM)");
+        let scope_id = format!("bee-episode-{}-{}", scenario.id, std::process::id());
+        let (sandbox, _http) =
+            crate::session::parts::kernel_sandbox(&policy, &scope_id, sandbox::key_vars(None))
+                .expect("build enforced sandbox (need root + BPF-LSM)");
 
         let scope_cgid = match &sandbox {
             Sandbox::Enforced(e) => e.scope.cgroup_id,
@@ -1169,7 +1158,7 @@ mod mcp_cgroup_spike {
 
         // The real question: does the rmcp TokioChildProcess path preserve the cgroup-join pre_exec?
         {
-            let proc = crate::mcp::transport::spawn_stdio(&sandbox, &cfg)
+            let (proc, _) = crate::mcp::transport::spawn_stdio(&sandbox, &cfg)
                 .expect("spawn_stdio via TokioChildProcess");
             let pid = proc.id().expect("rmcp child pid");
             assert_eq!(

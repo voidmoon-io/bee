@@ -25,9 +25,13 @@
 #[cfg(feature = "astgrep")]
 pub mod astgrep;
 pub mod batch;
+// One tool call, start to finish — the only copy of the call protocol (024 FR-017).
+pub mod call;
 #[cfg(feature = "concurrent")]
 pub mod concurrent;
 pub mod config;
+// Context budget and compaction for long runs (025-long-run-resilience).
+pub mod context;
 pub mod episode;
 // The finding ledger (016-native-tools US2). Gated: it is the substrate the security tools write
 // into, and a build that selects none of them has nothing to record.
@@ -39,9 +43,16 @@ pub mod findings;
 pub mod gitlog;
 pub mod grants;
 pub mod hooks;
+// HTTP(S) interception (019-http-intercept). Gated: the proxy worker, its TLS stack and the exchange
+// store exist only in a build that asked for them (SC-009).
+#[cfg(feature = "intercept")]
+pub mod intercept;
 pub mod mcp;
 pub mod metrics;
+pub mod operator;
 pub mod provider;
+// Proxy-layer events (019). Ungated: transcripts carry them in every build.
+pub mod proxy_event;
 pub mod render_api;
 pub mod render_spec;
 pub mod repl;
@@ -59,13 +70,14 @@ pub mod search;
 // Operator configuration for the security tooling (016-native-tools). Ungated: plain data, so a
 // configuration file keeps parsing on a build that compiled none of the tools.
 pub mod security;
-// Shared conversation engine (008-grid-tui, plan M2). Gated behind `tui` for now — the inline REPL
-// rewire (task T006) makes it unconditional. Emits `SessionEvent`s both front-ends consume.
-#[cfg(feature = "tui")]
+// The Session builder: one assembly of a session for every entry point (024 FR-006).
 pub mod session;
 pub mod skills;
+pub mod stuck;
 pub mod tools;
 pub mod transcript;
+// The top of a model turn: lease expiry, release, MCP refresh (024 FR-028–FR-030).
+pub mod turn;
 // Full-screen TUI front-end (008-grid-tui, M3–M4). Only compiled with `--features tui`.
 #[cfg(feature = "tui")]
 pub mod tui;
@@ -78,7 +90,9 @@ pub use batch::{run_batch, BatchConfig, BatchError, BatchResult};
 #[cfg(feature = "concurrent")]
 pub use concurrent::run_concurrent;
 pub use config::{ProviderConfig, ProviderType};
-pub use episode::{run_episode, run_loop, LoopOptions, ProgressSink};
+pub use episode::{
+    run_episode, run_episode_with, run_loop, EpisodeOptions, LoopOptions, ProgressSink,
+};
 pub use mcp::{McpPolicy, McpServerConfig, McpTransport};
 pub use metrics::{CallRecord, Recorder};
 pub use provider::{

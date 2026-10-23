@@ -241,7 +241,7 @@ pub async fn run_child(
         result.truncated = true;
         result.original_len = Some(total);
     }
-    result
+    result.with_provenance(crate::provider::Provenance::Child)
 }
 
 #[cfg(feature = "scanners")]

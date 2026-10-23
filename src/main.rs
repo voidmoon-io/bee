@@ -43,6 +43,7 @@ enum Cmd {
     /// Run a headless harness session: one agent episode, a batch of them, or a concurrent batch.
     // Boxed because the session commands carry a far larger argument set than the diagnostics, and
     // an unboxed variant would make every `Cmd` the size of the biggest one.
+    #[command(after_long_help = app::run::EXIT_CODES)]
     Run(Box<app::run::RunArgs>),
     /// Chat interactively with a sandboxed coding agent, inline or full-screen.
     Repl(Box<app::repl::ReplArgs>),
@@ -54,6 +55,10 @@ enum Cmd {
     /// tool surface: a verdict is only worth anything because a person formed it (016 FR-020).
     #[cfg(feature = "findings")]
     Findings(app::findings::FindingsArgs),
+    /// Work with recorded HTTP traffic: export it as HAR (019-http-intercept).
+    #[cfg(feature = "intercept")]
+    #[command(subcommand_required = true)]
+    Http(app::http::HttpArgs),
     /// Print kernel support diagnostics and exit (never attaches).
     Check,
     /// Compile-check a policy, or check attenuation of a child against a parent.
@@ -109,6 +114,17 @@ enum Cmd {
     #[cfg(feature = "scanners")]
     #[command(hide = true)]
     SarifWorker(bee::sarif::SarifArgs),
+    /// Internal: the session's HTTP(S) interception proxy (019-http-intercept).
+    ///
+    /// Spawned once per session by the harness into its own kernel scope — the *proxy scope* —
+    /// with the harness-bound listening socket as fd 3 and the control channel on stdio. Hidden for
+    /// the same reason as the other workers: it is a seam, not an operator command.
+    #[cfg(feature = "intercept")]
+    #[command(hide = true)]
+    ProxyWorker {
+        #[arg(long)]
+        session: String,
+    },
 }
 
 fn main() -> ExitCode {
@@ -118,6 +134,8 @@ fn main() -> ExitCode {
         Cmd::Metrics(args) => app::metrics::main(args),
         #[cfg(feature = "findings")]
         Cmd::Findings(args) => app::findings::main(args),
+        #[cfg(feature = "intercept")]
+        Cmd::Http(args) => app::http::main(args),
         Cmd::Check => cmd_check(),
         Cmd::Validate { policy, parent } => cmd_validate(&policy, parent.as_deref()),
         Cmd::Exec {
@@ -140,6 +158,8 @@ fn main() -> ExitCode {
         Cmd::GitlogWorker(args) => cmd_gitlog_worker(&args),
         #[cfg(feature = "scanners")]
         Cmd::SarifWorker(args) => cmd_sarif_worker(&args),
+        #[cfg(feature = "intercept")]
+        Cmd::ProxyWorker { session } => bee::intercept::worker::run(&session),
     }
 }
 
@@ -238,13 +258,39 @@ fn cmd_validate(policy: &Path, parent: Option<&Path>) -> ExitCode {
         },
     };
 
-    let compiled = match effective.compile(&SystemResolver::current()) {
+    let resolver = SystemResolver::current();
+    let mut compiled = match effective.compile(&resolver) {
         Ok(compiled) => compiled,
         Err(e) => {
             eprintln!("compile error: {e}");
             return ExitCode::from(EX_POLICY);
         }
     };
+    // `[policy.http]` (019): compile the proxy scope too, and check the tool scope as a session
+    // would install it — with the proxy loopback as its only network rule. The port is chosen at
+    // session start; any value exercises the same plan.
+    let worker = match std::env::current_exe().and_then(|p| p.canonicalize()) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("cannot resolve the bee binary for the proxy scope: {e}");
+            return ExitCode::from(EX_POLICY);
+        }
+    };
+    match effective.compile_http(&resolver, &worker) {
+        Ok(Some(http)) => {
+            let proxy_scope = http.proxy_scope;
+            compiled = bee_core::compiler::with_proxy_loopback(compiled, 1);
+            if let Err(e) = EnforcementPlan::prepare(&proxy_scope, effective.mode.into()) {
+                eprintln!("enforcement plan error (proxy scope): {e}");
+                return ExitCode::from(EX_POLICY);
+            }
+        }
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!("compile error: {e}");
+            return ExitCode::from(EX_POLICY);
+        }
+    }
     if let Err(e) = EnforcementPlan::prepare(&compiled, effective.mode.into()) {
         eprintln!("enforcement plan error: {e}");
         return ExitCode::from(EX_POLICY);

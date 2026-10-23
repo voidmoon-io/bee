@@ -40,12 +40,17 @@ impl EnforcementPlan {
         if compiled.exfiltration_enabled {
             return Err(PlanError::UnsupportedExfiltration);
         }
+        // 019: a tool policy with `[policy.http]` whose proxy loopback rule was never applied would
+        // install with no network rule — which this backend reads as unrestricted egress.
+        if compiled.proxy_loopback_required {
+            return Err(PlanError::ProxyLoopbackMissing);
+        }
 
         let mut flags = 0;
         if !net_rules.is_empty() {
             flags |= FLAG_NET_ENFORCED;
         }
-        if compiled.deny_unmatched_writes
+        if compiled.fs_write_default_deny
             || fs_rules.rules[..fs_rules.count as usize]
                 .iter()
                 .any(|rule| AccessMode(rule.mode).contains(AccessMode::WRITE))
@@ -105,6 +110,13 @@ pub enum PlanError {
     UnidentifiedPin { target: String },
     #[error("eBPF backend cannot enforce enabled exfiltration detection")]
     UnsupportedExfiltration,
+    /// A tool policy with `[policy.http]` targets reached the backend without its proxy loopback
+    /// rule (019). Installing it would leave the scope with no network rule at all.
+    #[error(
+        "policy has [policy.http] targets but no proxy loopback rule; tool children would have \
+         unrestricted egress (this policy runs only in a session that starts the interception proxy)"
+    )]
+    ProxyLoopbackMissing,
     #[error(
         "{capability} rule '{target}' is too long for the eBPF backend ({actual} > {max} bytes)"
     )]
@@ -281,6 +293,88 @@ mod tests {
             subtree: true,
             mode,
         }
+    }
+
+    /// 019 research R2, mirrored against the host reference matcher: the proxy scope's worker
+    /// binary stays readable under every prefix deny, its siblings do not, and writes are refused.
+    #[test]
+    fn the_proxy_scope_reads_its_worker_binary_and_nothing_near_it() {
+        use bee_common::matcher::fs_open_blocked;
+        use std::path::{Path, PathBuf};
+
+        struct R;
+        impl bee_core::Resolver for R {
+            fn project_root(&self) -> &str {
+                "/home/u/proj"
+            }
+            fn home(&self) -> &str {
+                "/home/u"
+            }
+            fn resolve_exec(&self, n: &str) -> Result<PathBuf, bee_core::CompileError> {
+                Ok(PathBuf::from(n))
+            }
+            fn resolve_exec_identity(
+                &self,
+                _: &Path,
+            ) -> Result<bee_core::ExecIdentity, bee_core::CompileError> {
+                unreachable!()
+            }
+            fn resolve_host(&self, _: &str) -> Result<Vec<IpAddr>, bee_core::CompileError> {
+                Ok(vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, 7))])
+            }
+        }
+        let policy = bee_core::Policy::from_toml(
+            "[policy]\nname = \"p\"\n[policy.http]\ntargets = [\"app.test:443\"]\n",
+        )
+        .unwrap();
+        for exe in [
+            "/home/u/proj/target/debug/bee",
+            "/home/ubuntu/bee",
+            "/usr/bin/bee",
+        ] {
+            let c = policy
+                .compile_http(&R, Path::new(exe))
+                .unwrap()
+                .unwrap()
+                .proxy_scope;
+            let plan = EnforcementPlan::prepare(&c, ScopeMode::Enforce).unwrap();
+            assert_ne!(plan.meta.flags & FLAG_FS_WRITE_DEFAULT_DENY, 0);
+            assert_ne!(plan.meta.flags & FLAG_NET_ENFORCED, 0);
+            let read = |p: &str| !fs_open_blocked(p.as_bytes(), &plan.fs_rules, false, true);
+            let write = |p: &str| !fs_open_blocked(p.as_bytes(), &plan.fs_rules, true, true);
+            assert!(read(exe), "{exe} unreadable");
+            assert!(!write(exe), "{exe} writable");
+            // Under a denied prefix the exact rule must not widen to its neighbours. (`/usr/bin` is
+            // not denied at all, so a sibling there is readable, as any system file is.)
+            if exe.starts_with("/home") {
+                assert!(!read(&format!("{exe}-sibling")), "{exe}: sibling readable");
+            }
+            assert!(!read("/home/u/proj/src/main.rs"));
+            assert!(!read("/home/u/proj/.bee/http/index.sqlite"));
+            assert!(!read("/home/u/.ssh/id_ed25519"));
+            assert!(!read("/root/.aws/credentials"));
+            assert!(!read("/home/other/notes"));
+            assert!(read("/etc/resolv.conf"));
+            assert!(read("/etc/ssl/certs/ca-certificates.crt"));
+            assert!(read("/lib/x86_64-linux-gnu/libc.so.6"));
+            assert!(!write("/tmp/x"));
+        }
+    }
+
+    #[test]
+    fn a_tool_policy_missing_its_proxy_loopback_is_refused() {
+        let compiled = CompiledPolicy {
+            proxy_loopback_required: true,
+            ..CompiledPolicy::default()
+        };
+        assert_eq!(
+            EnforcementPlan::prepare(&compiled, ScopeMode::Enforce),
+            Err(PlanError::ProxyLoopbackMissing)
+        );
+        let fixed = bee_core::compiler::with_proxy_loopback(compiled, 4000);
+        let plan = EnforcementPlan::prepare(&fixed, ScopeMode::Enforce).unwrap();
+        assert_eq!(plan.network_rule_count(), 1);
+        assert_ne!(plan.meta.flags & FLAG_NET_ENFORCED, 0);
     }
 
     #[test]

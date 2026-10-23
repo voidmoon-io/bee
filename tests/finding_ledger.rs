@@ -26,6 +26,7 @@ fn finding(path: &str, class: &str, title: &str) -> Finding {
 
 fn sighting(run: &str, line: Option<u32>) -> Sighting {
     Sighting {
+        evidence_refs: Vec::new(),
         run_id: run.to_string(),
         at: time::OffsetDateTime::UNIX_EPOCH,
         line,
@@ -324,4 +325,122 @@ fn an_unrecognised_event_is_skipped_and_counted_not_fatal() {
     let view = fold(&led).expect("folding must not fail on an unknown event");
     assert_eq!(view.findings.len(), 1);
     assert_eq!(view.skipped, 2, "unreadable events are counted, not hidden");
+}
+
+// ── 019-http-intercept US8 (T084): findings cite exchanges as evidence ─────────────────────────────
+
+#[cfg(feature = "intercept")]
+mod http_evidence {
+    use bee::findings::{fold, Ledger};
+    use bee::intercept::control::{
+        now_rfc3339, ExchangeRecord, Origin, OriginKind, Outcome, SendPath, Timing, TlsInfo,
+    };
+    use bee::intercept::store::{ExchangeBytes, Store};
+    use bee::tools::Tool;
+    use bee_core::policy::HttpLimits;
+    use serde_json::json;
+
+    fn rec() -> ExchangeRecord {
+        ExchangeRecord {
+            req_id: None,
+            call_id: Some("c".into()),
+            turn: Some(1),
+            origin: Origin {
+                kind: OriginKind::Tool,
+                path: SendPath::Raw,
+                parent: None,
+                fuzz_run: None,
+                rule_ids: vec![],
+            },
+            scheme: "http".into(),
+            host: "app.test".into(),
+            port: 80,
+            method: Some("GET".into()),
+            target: Some("/".into()),
+            status: Some(200),
+            tls: TlsInfo::None,
+            timing: Timing {
+                started: now_rfc3339(),
+                ..Default::default()
+            },
+            req_bytes: 0,
+            resp_bytes: 300,
+            req_truncated: false,
+            resp_truncated: false,
+            has_original: false,
+            outcome: Outcome::Completed,
+            tags: vec![],
+        }
+    }
+
+    fn body(b: u8) -> ExchangeBytes {
+        ExchangeBytes {
+            resp_head: b"HTTP/1.1 200 OK\r\n\r\n".to_vec(),
+            resp_body: vec![b; 300],
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn evidence_refs_are_validated_stored_and_resolved_on_review() {
+        let project = tempfile::tempdir().unwrap();
+        let limits = HttpLimits {
+            store_cap_bytes: 1000,
+            ..HttpLimits::default()
+        };
+        let mut store = Store::open(project.path(), "s", &limits).unwrap();
+        let first = store.insert_exchange(&rec(), &body(b'a')).unwrap();
+
+        let ledger = Ledger::at(project.path().join(".bee/findings"));
+        let tool = bee::tools::finding::RecordFinding::new(ledger.clone(), "run");
+        let sandbox = bee::sandbox::Sandbox::host(Vec::new());
+        let args = |refs: serde_json::Value| json!({ "path": "app.test/", "class": "xss", "title": "reflected q", "evidence": "see the exchange", "evidence_refs": refs });
+
+        // An unknown id is refused, and nothing is written.
+        let r = tool.call(args(json!(["http:E0000-99"])), &sandbox).await;
+        assert!(
+            r.is_error && r.content.contains("E0000-99"),
+            "{}",
+            r.content
+        );
+        let r = tool.call(args(json!(["E-not-http"])), &sandbox).await;
+        assert!(r.is_error, "{}", r.content);
+        assert!(fold(&ledger).map(|v| v.findings.is_empty()).unwrap_or(true));
+
+        // A real one is stored with the sighting.
+        let r = tool
+            .call(args(json!([format!("http:{first}")])), &sandbox)
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        let view = fold(&ledger).unwrap();
+        assert_eq!(
+            view.findings[0].sightings[0].evidence_refs,
+            vec![format!("http:{first}")]
+        );
+
+        let review = || {
+            let out = std::process::Command::new(env!("CARGO_BIN_EXE_bee"))
+                .args(["findings", "--dir"])
+                .arg(project.path().join(".bee/findings"))
+                .arg("list")
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        assert!(
+            review().contains(&format!("evidence http:{first} — present")),
+            "{}",
+            review()
+        );
+
+        // Push the store over its cap: the first body is evicted, and review says so.
+        for b in b'b'..=b'f' {
+            store.insert_exchange(&rec(), &body(b)).unwrap();
+        }
+        assert!(
+            review().contains(&format!("evidence http:{first} — missing")),
+            "{}",
+            review()
+        );
+    }
 }

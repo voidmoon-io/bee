@@ -62,6 +62,10 @@ struct RecordArgs {
     /// A CVSS vector to score. Deliberately a *vector*, not a score.
     #[serde(default)]
     severity_vector: Option<String>,
+    /// Recorded HTTP exchanges this finding cites, `http:<exchange-id>` (019 US8). Each must exist
+    /// in this project's exchange store when the finding is recorded.
+    #[serde(default)]
+    evidence_refs: Option<Vec<String>>,
     /// Present only so a caller that supplies it gets an explicit refusal (FR-005) rather than
     /// having it silently ignored — which would leave them believing bee accepted their number.
     #[serde(default)]
@@ -92,6 +96,10 @@ impl RecordFinding {
             );
         }
 
+        let refs = match validate_refs(&self.ledger, args.evidence_refs.unwrap_or_default()) {
+            Ok(r) => r,
+            Err(e) => return ToolResult::invalid_args("record_finding", e),
+        };
         let mut finding = Finding::new(
             args.path,
             args.class,
@@ -102,6 +110,7 @@ impl RecordFinding {
         finding.reidentify();
 
         let sighting = Sighting {
+            evidence_refs: refs,
             run_id: self.run_id.clone(),
             at: OffsetDateTime::now_utc(),
             line: args.line,
@@ -193,6 +202,12 @@ impl Tool for RecordFinding {
                     "line": { "type": "integer", "description": "1-indexed line, when the finding has one." },
                     "end_line": { "type": "integer", "description": "1-indexed end line, when the finding spans a range." },
                     "rule_id": { "type": "string", "description": "The rule identifier that fired, when one did." },
+                    "evidence_refs": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "maxItems": 16,
+                        "description": "Recorded HTTP exchanges that demonstrate it, as \"http:<exchange id>\" (from http_send, http_history, …)."
+                    },
                     "severity_vector": {
                         "type": "string",
                         "description": "A CVSS vector (e.g. \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H\"). \
@@ -411,6 +426,42 @@ impl From<LedgerError> for ToolOutcome<FindingId> {
     fn from(e: LedgerError) -> Self {
         ToolOutcome::failed(e)
     }
+}
+
+/// Check `evidence_refs` (019 US8, FR-027): at most [`crate::findings::MAX_EVIDENCE_REFS`], each
+/// `http:<exchange-id>`, each present in this project's exchange store **now**. An id that does not
+/// resolve is refused: evidence is cited, never invented.
+#[cfg_attr(not(feature = "intercept"), allow(unused_variables))]
+fn validate_refs(ledger: &Ledger, refs: Vec<String>) -> Result<Vec<String>, String> {
+    if refs.len() > crate::findings::MAX_EVIDENCE_REFS {
+        return Err(format!(
+            "evidence_refs holds at most {} references",
+            crate::findings::MAX_EVIDENCE_REFS
+        ));
+    }
+    for r in &refs {
+        let Some(id) = r.strip_prefix("http:") else {
+            return Err(format!("evidence ref `{r}` must be `http:<exchange id>`"));
+        };
+        #[cfg(feature = "intercept")]
+        {
+            if crate::intercept::store::resolve_ref(&ledger.project_root(), id)
+                == crate::intercept::store::RefState::Missing
+            {
+                return Err(format!("no recorded exchange `{id}` to cite"));
+            }
+        }
+        #[cfg(not(feature = "intercept"))]
+        {
+            let _ = id;
+            return Err(
+                "HTTP evidence refs need the exchange store, which this build lacks \
+                 (rebuild with --features intercept)"
+                    .into(),
+            );
+        }
+    }
+    Ok(refs)
 }
 
 #[cfg(test)]

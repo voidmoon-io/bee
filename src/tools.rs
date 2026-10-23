@@ -15,6 +15,7 @@ pub mod bash;
 pub mod ctf;
 pub mod exec;
 pub mod files;
+pub mod finish;
 pub mod outcome;
 pub mod render;
 pub mod search;
@@ -31,9 +32,28 @@ pub mod cvss;
 pub mod finding;
 #[cfg(feature = "gitlog")]
 pub mod gitlog;
+#[cfg(feature = "intercept")]
+pub mod http;
+#[cfg(feature = "intercept")]
+pub mod http_fuzz;
+#[cfg(feature = "intercept")]
+pub mod http_get;
+#[cfg(feature = "intercept")]
+pub mod http_history;
+#[cfg(feature = "intercept")]
+pub mod http_intercept;
+#[cfg(feature = "intercept")]
+pub mod http_leads;
+#[cfg(feature = "intercept")]
+pub mod http_replay;
+#[cfg(feature = "intercept")]
+pub mod http_send;
+#[cfg(feature = "intercept")]
+pub mod http_sitemap;
 #[cfg(feature = "scanners")]
 pub mod scanner;
 
+pub use crate::provider::Provenance;
 pub use outcome::{ToolOutcome, UnavailableReason};
 
 use crate::render_spec::{EffectSpec, PanelOp, RenderSpec, RenderTarget};
@@ -51,6 +71,10 @@ pub const DEFAULT_TOOLS: &[&str] = &[
 
 /// The CTF terminal tools (US3), enabled only when a scenario lists them.
 pub const CTF_TOOLS: &[&str] = &["submit_flag", "give_up"];
+
+/// How a headless run ends (025 US3). **Not** in `DEFAULT_TOOLS`: the episode adds it to a standard
+/// run's surface itself, unless the scenario says `finish = false`.
+pub const RUN_TOOLS: &[&str] = &["finish"];
 
 /// The visualization tools (003-visual-render, US6). **Not** in `DEFAULT_TOOLS` (NFR-003): a
 /// scenario or the REPL config opts in by listing `"render"`.
@@ -81,6 +105,21 @@ pub const SEC_TOOLS: &[&str] = &[
 /// for the specific binary, or the tool refuses with `NotGranted` (FR-008).
 pub const SCANNER_TOOLS: &[&str] = &["scan"];
 
+/// The HTTP(S) interception tools (019-http-intercept). Opt-in like the security tools; they answer
+/// only in a session whose policy declares `[policy.http]`, and refuse with `interceptor_unavailable`
+/// anywhere else. Compiled out (no `intercept` feature) they register as `NotCompiledIn` stubs.
+pub const HTTP_TOOLS: &[&str] = &[
+    "http_scope",
+    "http_send",
+    "http_get",
+    "http_history",
+    "http_replay",
+    "http_sitemap",
+    "http_fuzz",
+    "http_intercept",
+    "http_leads",
+];
+
 /// Every tool name the harness knows how to build. A scenario may only list names from this set
 /// (scenario validation rejects the rest before a run).
 ///
@@ -91,10 +130,13 @@ pub const SCANNER_TOOLS: &[&str] = &["scan"];
 pub fn is_known_tool(name: &str) -> bool {
     DEFAULT_TOOLS.contains(&name)
         || CTF_TOOLS.contains(&name)
+        || RUN_TOOLS.contains(&name)
         || RENDER_TOOLS.contains(&name)
         || SKILL_TOOLS.contains(&name)
         || SEC_TOOLS.contains(&name)
         || SCANNER_TOOLS.contains(&name)
+        || HTTP_TOOLS.contains(&name)
+        || (cfg!(feature = "vm-test") && name == "http_debug")
 }
 
 /// The Cargo feature each 016 tool needs, for the `NotCompiledIn` message. Covers only the tools
@@ -107,6 +149,7 @@ pub fn sec_tool_family(name: &str) -> Option<&'static str> {
         "cvss" => Some("cvss"),
         "record_finding" | "list_findings" => Some("findings"),
         "scan" => Some("scanners"),
+        n if HTTP_TOOLS.contains(&n) => Some("intercept"),
         _ => None,
     }
 }
@@ -149,6 +192,11 @@ pub struct ToolResult {
     /// The effect the agent attached to the inline widget via `.effect()` (009 FR-022).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inline_effect: Option<EffectSpec>,
+    /// Where `content` came from, which decides whether it reaches the model inside an
+    /// `<untrusted-data>` envelope (019 P1). Defaults to `Harness`: a tool must opt its output *in* to
+    /// being treated as data, and every path that relays child or remote bytes does.
+    #[serde(default, skip_serializing_if = "Provenance::is_harness")]
+    pub provenance: Provenance,
 }
 
 impl ToolResult {
@@ -165,6 +213,7 @@ impl ToolResult {
             render_target: RenderTarget::Inline,
             panel_ops: Vec::new(),
             inline_effect: None,
+            provenance: Provenance::Harness,
         }
     }
 
@@ -181,6 +230,7 @@ impl ToolResult {
             render_target: RenderTarget::Inline,
             panel_ops: Vec::new(),
             inline_effect: None,
+            provenance: Provenance::Harness,
         }
     }
 
@@ -225,9 +275,20 @@ impl ToolResult {
         }
     }
 
+    /// A call a hook refused before it ran (024 FR-031): `is_error`, and phrased so the model can tell
+    /// it from a failure of the tool — the tool never ran.
+    pub fn refused_by_hook(reason: &str) -> Self {
+        ToolResult::error(format!("refused by hook: {reason} (the tool did not run)"))
+    }
+
     /// The FR-016 malformed-arguments result: `"<tool>: invalid arguments: <detail>"`.
     pub fn invalid_args(tool: &str, detail: impl std::fmt::Display) -> Self {
         ToolResult::error(format!("{tool}: invalid arguments: {detail}"))
+    }
+
+    /// This result, with its content marked as coming from `provenance` (019 P1).
+    pub fn with_provenance(self, provenance: Provenance) -> Self {
+        ToolResult { provenance, ..self }
     }
 }
 
@@ -240,14 +301,147 @@ pub trait Tool: Send + Sync {
     /// The JSON-Schema-bearing schema advertised to the model.
     fn schema(&self) -> ToolSchema;
 
+    /// The MCP server this tool forwards to, if it is one. A call to it owns the kernel events of
+    /// that server's own process (024 FR-027).
+    fn mcp_server(&self) -> Option<&str> {
+        None
+    }
+
     /// Execute inside `sandbox`. MUST NOT panic on bad `arguments` — return an error result.
     async fn call(&self, arguments: serde_json::Value, sandbox: &Sandbox) -> ToolResult;
+}
+
+/// The session dependencies a tool is built with (024 FR-013, research R4).
+///
+/// The registry holds one, and [`ToolRegistry::register`] — the only constructor of a built-in tool —
+/// builds every tool from it. A dependency that is absent is not an error: the tool registers and
+/// fails closed when called (an HTTP tool without an Interceptor refuses `interceptor_unavailable`, a
+/// `scan` without grants refuses `NotGranted`), exactly as it would have at start-up.
+#[derive(Clone, Default)]
+pub struct ToolDeps {
+    /// The planted CTF flag (US3). `submit_flag` is registered only when it is set.
+    pub ctf_flag: Option<String>,
+    /// Discovered skills (006). `skill` is registered only when they are set.
+    pub skills: Option<std::sync::Arc<crate::skills::SkillRegistry>>,
+    /// The finding ledger the security tools write to (016). `None` is each tool's own default: the
+    /// ledger under the working directory.
+    #[cfg(feature = "findings")]
+    pub ledger: Option<crate::findings::Ledger>,
+    /// The run id findings are recorded under. `None` is each tool's own default.
+    #[cfg(feature = "findings")]
+    pub run_id: Option<String>,
+    /// The security configuration scanner grants are derived from, kept so the grants can be
+    /// recomputed when the policy widens ([`ToolDeps::with_policy`]).
+    #[cfg(feature = "scanners")]
+    pub security: crate::security::SecurityConfig,
+    /// The scanners the active policy grants. Empty means `scan` refuses every call.
+    #[cfg(feature = "scanners")]
+    pub scanner_grants: Vec<crate::scanners::ScannerGrant>,
+    /// The session's HTTP interception proxy (019). `None` means the HTTP tools refuse.
+    #[cfg(feature = "intercept")]
+    pub interceptor: Option<crate::intercept::sidecar::Interceptor>,
+}
+
+impl ToolDeps {
+    /// Dependencies holding only a CTF flag — what a registry built from a name list needs.
+    pub fn with_flag(flag: Option<&str>) -> ToolDeps {
+        ToolDeps {
+            ctf_flag: flag.map(str::to_string),
+            ..ToolDeps::default()
+        }
+    }
+
+    /// These dependencies configured for a session's security tooling (016): its ledger, its run id
+    /// and the scanners `policy` grants. Replaces the former `configure_security_tools` pass.
+    // Each field is behind its own feature, so a slim build reads none of the arguments.
+    #[cfg_attr(
+        not(feature = "findings"),
+        allow(unused_variables, unused_mut, clippy::needless_pass_by_value)
+    )]
+    pub fn with_security(
+        mut self,
+        security: &crate::security::SecurityConfig,
+        policy: Option<&bee_core::Policy>,
+        run_id: &str,
+    ) -> ToolDeps {
+        #[cfg(feature = "findings")]
+        {
+            self.ledger = Some(crate::findings::Ledger::resolve(
+                security.findings_dir.as_deref(),
+            ));
+            self.run_id = Some(run_id.to_string());
+        }
+        #[cfg(feature = "scanners")]
+        {
+            self.security = security.clone();
+            self.scanner_grants = crate::scanners::grants_from_policy(policy, security);
+        }
+        self
+    }
+
+    /// These dependencies after the active policy became `policy`: scanner grants are recomputed, so a
+    /// scanner a grant just allowed is usable by `scan` (024 US4). Nothing else depends on the policy.
+    #[cfg_attr(not(feature = "scanners"), allow(unused_variables, unused_mut))]
+    pub fn with_policy(mut self, policy: &bee_core::Policy) -> ToolDeps {
+        #[cfg(feature = "scanners")]
+        {
+            self.scanner_grants = crate::scanners::grants_from_policy(Some(policy), &self.security);
+        }
+        self
+    }
+
+    /// These dependencies with the session's Interceptor (019).
+    #[cfg(feature = "intercept")]
+    pub fn with_interceptor(mut self, icpt: crate::intercept::sidecar::Interceptor) -> ToolDeps {
+        self.interceptor = Some(icpt);
+        self
+    }
+}
+
+/// A name [`ToolRegistry::register`] does not know.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownTool(pub String);
+
+impl std::fmt::Display for UnknownTool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "unknown tool: {}", self.0)
+    }
+}
+
+impl std::error::Error for UnknownTool {}
+
+/// Which session dependencies one tool was built with — booleans and counts, never their contents
+/// (024 FR-015). `None` means the tool does not use that dependency.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct DepsSummary {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ctf_flag: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skills: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ledger: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scanner_grants: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interceptor: Option<bool>,
+}
+
+/// One tool the model can call, as [`ToolRegistry::surface`] reports it.
+#[derive(Debug, Clone, Serialize)]
+pub struct SurfaceEntry {
+    pub name: String,
+    pub schema: ToolSchema,
+    pub deps: DepsSummary,
 }
 
 /// A name→tool map plus the schema list handed to the model each turn.
 #[derive(Default)]
 pub struct ToolRegistry {
     tools: BTreeMap<&'static str, Box<dyn Tool>>,
+    deps: std::sync::Arc<ToolDeps>,
+    /// The tools built by [`register`](Self::register), which [`set_deps`](Self::set_deps) rebuilds.
+    /// A tool placed with [`insert`](Self::insert) (an MCP proxy, a test double) is not in it.
+    built: std::collections::BTreeSet<&'static str>,
 }
 
 impl ToolRegistry {
@@ -255,20 +449,57 @@ impl ToolRegistry {
         ToolRegistry::default()
     }
 
-    /// Register a tool (last registration under a name wins).
+    /// An empty registry whose tools will be built from `deps`.
+    pub fn with_deps(deps: std::sync::Arc<ToolDeps>) -> Self {
+        ToolRegistry {
+            deps,
+            ..ToolRegistry::default()
+        }
+    }
+
+    /// The dependencies tools are built from.
+    pub fn deps(&self) -> &std::sync::Arc<ToolDeps> {
+        &self.deps
+    }
+
+    /// Replace the dependencies, and rebuild every tool [`register`](Self::register) built so each
+    /// holds the new ones (a widened policy's scanner grants, an Interceptor that started after the
+    /// tools were named). There is no second configuration pass to forget (024 research R4).
+    pub fn set_deps(&mut self, deps: std::sync::Arc<ToolDeps>) {
+        self.deps = deps;
+        let names: Vec<&'static str> = self.built.iter().copied().collect();
+        for name in names {
+            // Every name in `built` was registered successfully, so it is known.
+            let _ = self.register(name);
+        }
+    }
+
+    /// Place a tool built elsewhere — an MCP proxy, a test double (last registration under a name
+    /// wins). Built-in tools are constructed by [`register`](Self::register) instead.
     pub fn insert(&mut self, tool: Box<dyn Tool>) {
+        self.built.remove(tool.name());
         self.tools.insert(tool.name(), tool);
     }
 
-    /// Register a tool, chaining.
+    /// Place a tool, chaining.
     pub fn with(mut self, tool: Box<dyn Tool>) -> Self {
         self.insert(tool);
         self
     }
 
-    /// Remove a tool whose final lease expired.
-    pub(crate) fn remove(&mut self, name: &str) {
-        self.tools.remove(name);
+    /// Build the built-in tool `name` from this registry's dependencies and register it (last wins).
+    /// The only constructor of a non-MCP tool (024 FR-013): a tool registered at start-up, by a skill
+    /// grant, or by escalation mid-session is built the same way and holds the same dependencies
+    /// (FR-014). A 016 tool compiled out of this build registers its `NotCompiledIn` stub. `submit_flag`
+    /// and `skill` register only when their dependency is set, and are otherwise a no-op.
+    pub fn register(&mut self, name: &str) -> Result<(), UnknownTool> {
+        let Some(tool) = build(name, &self.deps)? else {
+            return Ok(());
+        };
+        let key = tool.name();
+        self.tools.insert(key, tool);
+        self.built.insert(key);
+        Ok(())
     }
 
     /// True if a tool with `name` is registered.
@@ -276,9 +507,39 @@ impl ToolRegistry {
         self.tools.contains_key(name)
     }
 
+    /// The MCP server tool `name` forwards to, if it is an MCP tool (024 FR-027).
+    pub fn mcp_server(&self, name: &str) -> Option<&str> {
+        self.tools.get(name).and_then(|t| t.mcp_server())
+    }
+
     /// The schemas for all registered tools, in stable name order.
     pub fn schemas(&self) -> Vec<ToolSchema> {
         self.tools.values().map(|t| t.schema()).collect()
+    }
+
+    /// Every tool the model can call now, with the dependencies each was built with (024 FR-015) —
+    /// the one answer to "which tools, configured how". In the order [`schemas`](Self::schemas) offers
+    /// them, so what is reported is what the model is shown.
+    pub fn surface(&self) -> Vec<SurfaceEntry> {
+        self.tools
+            .iter()
+            .map(|(name, tool)| SurfaceEntry {
+                name: name.to_string(),
+                schema: tool.schema(),
+                deps: if self.built.contains(name) {
+                    deps_summary(name, &self.deps)
+                } else {
+                    DepsSummary::default()
+                },
+            })
+            .collect()
+    }
+
+    /// Unregister the tool `name` — a tool only an expired or released lease granted (024 FR-029).
+    /// Returns whether one was registered.
+    pub fn remove(&mut self, name: &str) -> bool {
+        self.built.remove(name);
+        self.tools.remove(name).is_some()
     }
 
     /// Drop every `mcp__…` tool. Used to rebuild the MCP set after a `tools/list_changed`
@@ -302,68 +563,130 @@ impl ToolRegistry {
 
 /// Build a registry holding just the `enabled` tools (validated names; unknown names are dropped —
 /// [`crate::scenario::Scenario`] validation already rejects them before a run). `flag` is the CTF
-/// sentinel value (US3): `submit_flag` needs it at construction to check submissions, so it is only
-/// registered when `flag` is `Some`.
+/// sentinel value (US3): `submit_flag` needs it to check submissions, so it is only registered when
+/// `flag` is `Some`. A caller with more dependencies builds [`ToolRegistry::with_deps`] and registers
+/// through it.
 pub fn registry_for(enabled: &[String], flag: Option<&str>) -> ToolRegistry {
-    let mut r = ToolRegistry::new();
+    let mut r = ToolRegistry::with_deps(std::sync::Arc::new(ToolDeps::with_flag(flag)));
     for name in enabled {
-        register_named(&mut r, name, flag);
+        let _ = r.register(name);
     }
     r
 }
 
-/// Register a single built-in tool by name into an existing registry (idempotent — last wins). Used
-/// both by [`registry_for`] and to add skill-granted tools (006-skills) after grant resolution. An
-/// unknown name (or `skill`, which needs an external registry) is a silent no-op.
-pub fn register_named(r: &mut ToolRegistry, name: &str, flag: Option<&str>) {
-    match name {
-        "bash" => r.insert(Box::new(bash::Bash)),
-        "read_file" => r.insert(Box::new(files::ReadFile)),
-        "write_file" => r.insert(Box::new(files::WriteFile)),
-        "list_directory" => r.insert(Box::new(files::ListDirectory)),
-        "submit_flag" => {
-            if let Some(value) = flag {
-                r.insert(Box::new(ctf::SubmitFlag::new(value.to_string())));
-            }
-        }
-        "give_up" => r.insert(Box::new(ctf::GiveUp)),
-        "render" => r.insert(Box::new(render::RenderTool::new())),
-        "search" => r.insert(Box::new(search::Search)),
-        // `skill` needs a discovered SkillRegistry, so the caller inserts it separately (see
-        // `skill::SkillTool`). Recognized as known so it isn't an unknown name.
-        "skill" => {}
+/// Construct the built-in tool `name` from `deps`. `Ok(None)` is a known tool whose dependency is
+/// absent and which therefore registers nothing (`submit_flag` without a flag, `skill` without
+/// skills).
+// Most arms are behind a family feature, so a slim build leaves `deps` unread in several of them.
+#[cfg_attr(
+    not(all(feature = "findings", feature = "intercept")),
+    allow(unused_variables)
+)]
+fn build(name: &str, deps: &ToolDeps) -> Result<Option<Box<dyn Tool>>, UnknownTool> {
+    let tool: Box<dyn Tool> = match name {
+        "bash" => Box::new(bash::Bash),
+        "read_file" => Box::new(files::ReadFile),
+        "write_file" => Box::new(files::WriteFile),
+        "list_directory" => Box::new(files::ListDirectory),
+        "submit_flag" => match &deps.ctf_flag {
+            Some(value) => Box::new(ctf::SubmitFlag::new(value.clone())),
+            None => return Ok(None),
+        },
+        "give_up" => Box::new(ctf::GiveUp),
+        "finish" => Box::new(finish::Finish),
+        "render" => Box::new(render::RenderTool::new()),
+        "search" => Box::new(search::Search),
+        "skill" => match &deps.skills {
+            Some(skills) => Box::new(skill::SkillTool::new(skills.clone())),
+            None => return Ok(None),
+        },
 
         // ── 016-native-tools ───────────────────────────────────────────────────────────────────
-        // Each arm registers the real tool when its family is compiled in, and a refusing stub when
-        // it is not. The stub is the point: a compiled-out security tool must announce its absence,
-        // never answer as though it ran (Constitution I).
+        // Each arm builds the real tool when its family is compiled in, and the arm below the match
+        // builds a refusing stub when it is not. The stub is the point: a compiled-out security tool
+        // must announce its absence, never answer as though it ran (Constitution I).
         #[cfg(feature = "astgrep")]
-        "ast_grep" => r.insert(Box::new(astgrep::AstGrepTool)),
+        "ast_grep" => Box::new(astgrep::AstGrepTool),
         #[cfg(feature = "gitlog")]
-        "git_log" => r.insert(Box::new(gitlog::GitLogTool)),
-        #[cfg(feature = "cvss")]
-        "cvss" => r.insert(Box::<cvss::CvssTool>::default()),
-        // The ledger tools default to `.bee/findings` under the working directory and a
-        // pid-derived run id. A caller that knows the episode id re-inserts them configured —
-        // registration is last-wins — so the default is a working tool, not a placeholder.
+        "git_log" => Box::new(gitlog::GitLogTool),
+        // The scoring tool writes `Scored` events, so it needs the same ledger the recorder uses —
+        // otherwise a score would land in a different file from the finding it scores.
+        #[cfg(all(feature = "cvss", feature = "findings"))]
+        "cvss" => match &deps.ledger {
+            Some(ledger) => Box::new(cvss::CvssTool::new(ledger.clone())),
+            None => Box::<cvss::CvssTool>::default(),
+        },
+        #[cfg(all(feature = "cvss", not(feature = "findings")))]
+        "cvss" => Box::<cvss::CvssTool>::default(),
+        // Without a session ledger the ledger tools use `.bee/findings` under the working directory
+        // and a pid-derived run id: a working tool, not a placeholder.
         #[cfg(feature = "findings")]
-        "record_finding" => r.insert(Box::<finding::RecordFinding>::default()),
-        #[cfg(feature = "findings")]
-        "list_findings" => r.insert(Box::<finding::ListFindings>::default()),
-        // `scan` defaults to holding NO grants, which means it refuses with `NotGranted` until a
-        // caller inserts it with the episode's resolved grants. That is the right default for a
-        // tool that runs a third-party binary: forgetting to wire it up fails closed.
-        #[cfg(feature = "scanners")]
-        "scan" => r.insert(Box::<scanner::ScanTool>::default()),
-
-        other => {
-            if let Some(family) = sec_tool_family(other) {
-                // Known 016 name whose feature is off in this build (the `#[cfg]` arms above did not
-                // match). Register the refusing stub rather than dropping it.
-                r.insert(Box::new(NotCompiledIn::new(other, family)));
+        "record_finding" => match (&deps.ledger, &deps.run_id) {
+            (Some(ledger), Some(run_id)) => {
+                Box::new(finding::RecordFinding::new(ledger.clone(), run_id.clone()))
             }
+            _ => Box::<finding::RecordFinding>::default(),
+        },
+        #[cfg(feature = "findings")]
+        "list_findings" => match &deps.ledger {
+            Some(ledger) => Box::new(finding::ListFindings::new(ledger.clone())),
+            None => Box::<finding::ListFindings>::default(),
+        },
+        // `scan` holds exactly the grants the active policy gives. With none it refuses with
+        // `NotGranted`: forgetting to supply them fails closed — the failure mode is "bee would not
+        // run the scanner", never "bee ran a scanner nobody authorised".
+        #[cfg(feature = "scanners")]
+        "scan" => match (&deps.ledger, &deps.run_id) {
+            (Some(ledger), Some(run_id)) => Box::new(scanner::ScanTool::new(
+                deps.scanner_grants.clone(),
+                ledger.clone(),
+                run_id.clone(),
+            )),
+            _ => Box::<scanner::ScanTool>::default(),
+        },
+        // 019: built with the session's Interceptor; without one — a session with no
+        // `[policy.http]` — they refuse `interceptor_unavailable`.
+        #[cfg(feature = "vm-test")]
+        "http_debug" => match http::tool("http_debug", deps.interceptor.clone()) {
+            Some(t) => t,
+            None => return Err(UnknownTool(name.to_string())),
+        },
+        #[cfg(feature = "intercept")]
+        n if HTTP_TOOLS.contains(&n) => match http::tool(n, deps.interceptor.clone()) {
+            Some(t) => t,
+            None => return Err(UnknownTool(name.to_string())),
+        },
+
+        other => match sec_tool_family(other) {
+            // Known 016 name whose feature is off in this build (the `#[cfg]` arms above did not
+            // match). Register the refusing stub rather than dropping it.
+            Some(family) => Box::new(NotCompiledIn::new(other, family)),
+            None => return Err(UnknownTool(other.to_string())),
+        },
+    };
+    Ok(Some(tool))
+}
+
+/// The dependencies the built-in tool `name` uses, and whether `deps` supplies them.
+fn deps_summary(name: &str, deps: &ToolDeps) -> DepsSummary {
+    let mut s = DepsSummary::default();
+    match name {
+        "submit_flag" => s.ctf_flag = Some(deps.ctf_flag.is_some()),
+        "skill" => s.skills = Some(deps.skills.as_ref().map_or(0, |k| k.iter().count())),
+        #[cfg(feature = "findings")]
+        "record_finding" | "list_findings" | "cvss" => s.ledger = Some(deps.ledger.is_some()),
+        #[cfg(feature = "scanners")]
+        "scan" => {
+            s.ledger = Some(deps.ledger.is_some());
+            s.scanner_grants = Some(deps.scanner_grants.len());
         }
+        #[cfg(feature = "intercept")]
+        n if HTTP_TOOLS.contains(&n) || n == "http_debug" => {
+            s.interceptor = Some(deps.interceptor.is_some());
+        }
+        _ => {}
     }
+    s
 }
 
 /// The stub registered for a 016 tool whose Cargo feature is compiled out.
@@ -412,57 +735,5 @@ impl Tool for NotCompiledIn {
         };
         outcome::audit_refusal(&self.name, &reason);
         ToolOutcome::<()>::unavailable(reason).into_tool_result(|_| String::new())
-    }
-}
-
-/// Re-register the security tools with the session's ledger and scanner grants
-/// (016-native-tools US2/US3).
-///
-/// [`registry_for`] can build these from a name alone, but only with defaults: the ledger under the
-/// working directory, a pid-derived run id, and — for `scan` — **no grants at all**. This replaces
-/// them with instances that know the session's configuration. Registration is last-wins, so calling
-/// this after the registry is built is the whole mechanism.
-///
-/// The `scan` default is the one to understand: an unconfigured scan tool holds an empty grant list
-/// and refuses every call with `NotGranted`. Forgetting to call this therefore fails closed
-/// (Constitution I) — the failure mode is "bee would not run the scanner", never "bee ran a scanner
-/// nobody authorised".
-///
-/// Both front-ends call this at the same point in their sequence: after grant resolution, so a
-/// scanner a skill widened the policy to include is visible, and before the policy is moved into the
-/// scope, which is the last moment it can be read.
-// `policy` is read only to resolve scanner grants, so a build without `scanners` does not use it.
-#[cfg_attr(not(feature = "scanners"), allow(unused_variables))]
-pub fn configure_security_tools(
-    registry: &mut ToolRegistry,
-    security: &crate::security::SecurityConfig,
-    policy: Option<&bee_core::Policy>,
-    run_id: &str,
-) {
-    #[cfg(feature = "findings")]
-    {
-        use crate::findings::Ledger;
-        let ledger = Ledger::resolve(security.findings_dir.as_deref());
-
-        if registry.contains("record_finding") {
-            registry.insert(Box::new(finding::RecordFinding::new(
-                ledger.clone(),
-                run_id,
-            )));
-        }
-        if registry.contains("list_findings") {
-            registry.insert(Box::new(finding::ListFindings::new(ledger.clone())));
-        }
-        #[cfg(feature = "cvss")]
-        if registry.contains("cvss") {
-            // The scoring tool writes `Scored` events, so it needs the same ledger the recorder
-            // uses — otherwise a score would land in a different file from the finding it scores.
-            registry.insert(Box::new(cvss::CvssTool::new(ledger.clone())));
-        }
-        #[cfg(feature = "scanners")]
-        if registry.contains("scan") {
-            let grants = crate::scanners::grants_from_policy(policy, security);
-            registry.insert(Box::new(scanner::ScanTool::new(grants, ledger, run_id)));
-        }
     }
 }

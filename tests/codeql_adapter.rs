@@ -118,6 +118,7 @@ fn policy_granting(path: &Path) -> bee_core::Policy {
         network: Default::default(),
         defaults: Default::default(),
         exfiltration: Default::default(),
+        http: None,
     }
 }
 

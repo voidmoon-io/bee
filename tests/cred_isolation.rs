@@ -12,6 +12,10 @@ use bee::{run_loop, LoopOptions};
 
 fn scenario() -> Scenario {
     Scenario {
+        lease_turns: None,
+        context: Default::default(),
+        stuck: Default::default(),
+        finish: false,
         id: "cred".into(),
         policy_path: "/dev/null".into(),
         system_prompt: "sys".into(),

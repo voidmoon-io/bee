@@ -84,6 +84,9 @@ pub fn view(app: &mut App, frame: &mut Frame<'_>) {
     if app.help_open {
         render_help(frame, area);
     }
+    if let Some(modal) = &app.consent {
+        render_consent(frame, area, modal);
+    }
 
     // Effects transform cells that are already drawn (FR-001), so this is the last thing the frame
     // does: every widget above has painted, and ratatui flushes as soon as we return.
@@ -821,6 +824,39 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
     );
 }
 
+/// A consent question (024 T059): the request, one capability per line, and the two answers. Drawn
+/// last so nothing covers it; the lines were made safe by `ConsentRequest::render_lines`.
+fn render_consent(frame: &mut Frame<'_>, area: Rect, modal: &crate::tui::app::ConsentModal) {
+    let mut lines: Vec<Line<'_>> = modal
+        .lines
+        .iter()
+        .map(|l| Line::from(Span::styled(format!(" {l}"), Style::default())))
+        .collect();
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled(" y", role_style_bold(ThemeRole::Accent)),
+        Span::styled(" grant (within the ceiling)   ", Style::default()),
+        Span::styled("n Esc", role_style_bold(ThemeRole::Accent)),
+        Span::styled(" refuse", Style::default()),
+    ]));
+    let w = lines.iter().map(|l| l.width()).max().unwrap_or(40) as u16 + 3;
+    let popup = center(area, w.max(44), (lines.len() as u16) + 2);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(role_style(ThemeRole::Accent))
+                .title(Span::styled(
+                    " consent ",
+                    role_style_bold(ThemeRole::Accent),
+                )),
+        ),
+        popup,
+    );
+}
+
 /// A `w×h` rectangle centered in `area` (clamped to it).
 fn center(area: Rect, w: u16, h: u16) -> Rect {
     let w = w.min(area.width);
@@ -866,6 +902,29 @@ mod tests {
             "the UI never settled — an effect is running longer than two seconds"
         );
         symbols(term.backend().buffer())
+    }
+
+    // 024 T059: a consent question is drawn over everything, every capability on its own line.
+    #[test]
+    fn a_consent_question_shows_the_request_and_both_answers() {
+        let mut app = App::new(100, 30);
+        app.help_open = true;
+        app.ask_consent(vec![
+            "'writer' requests extra capabilities:".into(),
+            "  tools: bash".into(),
+            "  filesystem: /tmp/out = write".into(),
+        ]);
+        let screen = render_settled(&mut app, 100, 30);
+        for needle in [
+            " consent ",
+            "'writer' requests extra capabilities:",
+            "tools: bash",
+            "filesystem: /tmp/out = write",
+            "y grant (within the ceiling)",
+            "n Esc refuse",
+        ] {
+            assert!(screen.contains(needle), "{needle:?} missing:\n{screen}");
+        }
     }
 
     fn symbols(buf: &Buffer) -> String {

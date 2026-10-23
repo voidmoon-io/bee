@@ -1,0 +1,10 @@
+---
+source: tests/grid.rs
+expression: drawn
+---
+╭ http history ────────────────────────────────────────────────────────────────────────────────────╮
+│id          method       host        path              status       bytes           ms origin     │
+│Eabc-1      GET          app.test    /search?q=1          200         512           12 tool       │
+│Eabc-2      POST         app.test    /api/\x1b[31         500         512           12 tool       │
+│Eabc-3      GET          evil\u{202e /admin               403         512           12 tool       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯

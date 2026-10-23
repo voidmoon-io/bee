@@ -1,0 +1,42 @@
+{
+  "scenario_id": "adhoc",
+  "model_id": "mock/scripted",
+  "status": {
+    "status": "completed"
+  },
+  "turns": [
+    {
+      "index": 0,
+      "calls": [
+        {
+          "call": {
+            "id": "call-0",
+            "name": "list_directory",
+            "arguments": {
+              "path": "."
+            }
+          },
+          "result": {
+            "content": "a.txt\n",
+            "exit_code": 0,
+            "is_error": false,
+            "provenance": {
+              "kind": "child"
+            }
+          }
+        }
+      ],
+      "duration_ms": 5
+    },
+    {
+      "index": 1,
+      "assistant_text": "There is one file.",
+      "duration_ms": 0
+    }
+  ],
+  "timing": {
+    "started_at": "2026-10-12T17:25:40.892192401Z",
+    "ended_at": "2026-10-12T17:25:40.897636115Z",
+    "total_ms": 5
+  }
+}

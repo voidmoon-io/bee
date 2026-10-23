@@ -298,10 +298,16 @@ impl AyaScopeMaps<'_> {
             .map_err(|e| format!("{name} insert: {e}"))
     }
 
-    /// Remove, treating an already-absent key as done.
+    /// Remove, treating an already-absent key as done. aya reports a delete of an absent key as the
+    /// raw `bpf_map_delete_elem` ENOENT, not `KeyNotFound` (that is only `get`'s).
     fn remove<K: aya::Pod, V: aya::Pod>(&mut self, name: &str, key: &K) -> Result<(), String> {
         match self.map_mut::<K, V>(name)?.remove(key) {
             Ok(()) | Err(aya::maps::MapError::KeyNotFound) => Ok(()),
+            Err(aya::maps::MapError::SyscallError(e))
+                if e.io_error.raw_os_error() == Some(libc::ENOENT) =>
+            {
+                Ok(())
+            }
             Err(e) => Err(format!("{name} remove: {e}")),
         }
     }

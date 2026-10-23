@@ -37,6 +37,7 @@ crates/
 | `crates/core` | Policy types, TOML parsing, compiler/glob-lowering, attenuation validator, audit types | ✅ implemented + tested |
 | `crates/userspace` | Support detection, cgroup lifecycle, hardened launcher (incl. process hardening, FR-011), engine gating | ✅ host logic tested; ⏳ eBPF attach behind `--features enforce` |
 | `crates/ebpf` | LSM programs (`file_open`, `bprm_check_security`, `socket_connect`), built as `bee-lsm` | ⏳ requires nightly bpf toolchain + BPF-LSM kernel |
+| `src/intercept` (feature `intercept`) | HTTP(S) interception: the confined `bee proxy-worker`, the exchange store, and the `http_*` tools (019) | ✅ host-tested; ⏳ kernel half on the VM matrix |
 
 The four `crates/` packages stay separate because their runtime, kernel, `no_std`, and BPF-target
 constraints earn it. The harness library does not: it has exactly one consumer.
@@ -108,6 +109,50 @@ holds a `Shift+Enter` newline), `PgUp`/`PgDn` page it, `gg`/`G` jump to the ends
 walk input history, `Tab` focus, `p` panel overlay on narrow terminals, `y` yank, `?` help, `q` quit.
 Mouse reporting is on so the wheel works, which means drag-to-select is the terminal's `Shift`-click
 gesture there.
+
+## Long runs: context budget, stuck detection, finish (025)
+
+**Context budget.** Every model request is measured before it is sent, and one over the budget (the
+model's window less room for the reply) is never sent: the run ends as `context exhausted` instead of
+in a provider error. Each tool result the model sees is capped; the transcript keeps the full output.
+With `compaction = true`, a long session stays inside the budget: past `soft`, bulky old results are
+replaced by one-line stubs that keep what was denied; past `hard`, the oldest turns are folded into a
+summary the model writes, framed as untrusted data (or removed, with a marker, if that call fails).
+The first message and the newest turns are never touched, and the transcript always keeps every turn.
+**Compaction is off by default** until a paired run against a real model shows it costs no
+completions.
+
+```toml
+# ~/.config/bee/config.toml, .bee/config.toml, or a scenario file (top-level, beside [scenario])
+[context]
+window_tokens    = 200000   # default: the model table, else [provider] context_window, else 32000
+compaction       = false
+soft             = 0.60     # share of the budget where elision starts
+hard             = 0.85     # share where summarization starts
+target_gap       = 0.10     # compaction aims for soft − target_gap
+recent_share     = 0.30     # share kept verbatim at the end (never fewer than two turns)
+bulky_tokens     = 300      # a result above this may be elided
+summary_share    = 0.10     # the summary's maximum size
+result_cap_bytes = 24000    # the model sees at most min(result_cap_bytes,
+result_cap_share = 0.10     #   result_cap_share of the budget) of one result
+
+[stuck]
+remind_after        = 5     # identical calls before a reminder
+denied_remind_after = 2     # identical calls denied by policy before a policy reminder
+stop_after          = 8     # identical failing calls before the run (or REPL exchange) ends
+stop                = true  # false: remind, never stop
+```
+
+The window comes from, in order: the scenario's `[context] window_tokens`, the user's and project's,
+`[provider] context_window`, bee's table of known models, then 32,000 (with a one-time notice). The
+layers merge key by key, and a bad combination (for example `soft` above `hard`) refuses to start.
+
+**Finish.** A headless standard-mode run is offered a `finish(outcome, summary)` tool and ends when
+the model calls it; prose alone gets one reminder, then ends the run as `ended without finish`. Set
+`finish = false` under `[scenario]` to keep the older ending, where the first text-only turn completes
+the run. CTF runs and the REPL never see `finish`. `bee run` exits **0** only for
+`finish` with outcome `completed` (or a normal ending where finish was not offered) and **3** for a run
+that ended without completing its task — see `bee run --help`.
 
 ## Security analysis tooling (opt-in)
 
@@ -182,6 +227,45 @@ when it did not run is worse than one that was never installed.
 
 > **MSRV note.** The application package declares Rust **1.88** (`ast-grep-core`'s floor). The
 > embeddable crates — `bee-core`, `bee-common`, `bee-userspace` — keep **1.85**.
+
+## HTTP(S) interception (opt-in, `intercept`)
+
+For testing web applications in scope: an interception proxy the agent drives through tools, whose
+target scope the kernel holds rather than a filter over a history view.
+
+```bash
+cargo build --features intercept            # host tier
+cargo build --features intercept,enforce    # kernel-enforced
+```
+
+```toml
+[policy.http]
+targets = ["app.test:443", "10.20.0.5:8080"]   # may be tested
+egress  = ["index.crates.io:443"]              # reachable as a tunnel, never testable
+inspect = ["app.test"]                         # decrypt TLS for these hosts only
+```
+
+With `[policy.http]` present, tool children reach **only** the session proxy, and the proxy, in its
+own kernel scope, reaches only the resolved targets and egress hosts. The proxy adds the checks an
+address cannot express: host name, CONNECT host = SNI, the `Host` header, the role, and pacing. It
+labels which layer enforces every rule. A session whose kernel would not block (host mode, a build
+without `enforce`, an observe-mode policy) refuses to start unless you pass `--http-scope-advisory`.
+
+| Tool | What it does |
+|---|---|
+| `http_scope` | What may be tested, what is only reachable, and which layer enforces each rule. Read-only. |
+| `http_send` | One request, structured or **byte-exact raw**; returns an exchange id and a bounded preview. |
+| `http_get` | One bounded view of an exchange: headers, a decoded byte range, a grep, a JSON pointer, the raw head. |
+| `http_history` | Typed filters over recorded traffic, as compact rows. |
+| `http_replay` | Re-send with edits and get a **measured** diff (a noise probe suppresses volatile values). |
+| `http_sitemap` | A tree of paths, methods, statuses and parameter names seen. |
+| `http_fuzz` | Marker templates × payload sets within the policy's limits, answered with clusters and outliers. |
+| `http_intercept` | Session-only modify/drop/hold rules over other tools' traffic. |
+| `http_leads` | Passive leads noticed in traffic. Leads are not findings. |
+
+Widening the target scope is the operator's call: a refused host becomes a consent prompt naming
+exactly that `host:port`, bounded by the ceiling. `bee http export --har` writes HAR 1.2 with proxy
+credentials stripped. The walkthrough is `specs/019-http-intercept/quickstart.md`.
 
 ## Kernel requirements (for enforcement)
 

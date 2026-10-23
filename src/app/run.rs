@@ -10,13 +10,26 @@ use std::process::ExitCode;
 
 use clap::Args;
 
-use bee::transcript::EpisodeStatus;
-use bee::{run_batch, run_episode, BatchConfig, EpisodeTranscript, Scenario};
+use bee::{run_batch, run_episode_with, BatchConfig, EpisodeOptions, EpisodeTranscript, Scenario};
 
 use crate::app::config::{self, EffectiveConfig, Flags};
-use crate::app::session::{self, EX_DATAERR, EX_IOERR, EX_SOFTWARE, EX_UNAVAILABLE, EX_USAGE};
+use crate::app::session::{self, EX_DATAERR, EX_IOERR, EX_SOFTWARE, EX_USAGE};
 
 const CMD: &str = "bee run";
+
+/// `bee run --help`'s exit-code table (025 contracts/finish.md).
+pub const EXIT_CODES: &str = "\
+Exit status:
+  0   the run completed: `finish` with outcome \"completed\", or, where finish is not offered
+      (a CTF, or a scenario with `finish = false`), the run ended normally
+  3   the run ended without completing its task: `finish` with outcome \"blocked\" or
+      \"abandoned\", a second text-only turn without `finish`, stuck repeating a failing call,
+      the context budget exhausted, or the time or turn limit reached while finish was offered
+  64  usage error (bad flags, scenario or configuration)
+  65  a batch had episodes that could not run (a batch exits 0 or 65, whatever each episode's status)
+  69  the provider failed
+  70  bee could not set the run up
+  74  I/O error writing the transcript";
 
 #[derive(Args, Debug)]
 pub struct RunArgs {
@@ -97,6 +110,11 @@ pub struct RunArgs {
     /// Required to start an unenforced session — bee will not fall back to one silently.
     #[arg(long, conflicts_with = "policy")]
     pub host: bool,
+    /// Accept `[policy.http]` interception enforced by the proxy alone, when the kernel will not
+    /// block: host mode, a build without `enforce`, or a policy in `mode = "observe"`. Without it
+    /// such a session refuses to start. Deliberately not settable from any configuration file.
+    #[arg(long)]
+    pub http_scope_advisory: bool,
 }
 
 impl RunArgs {
@@ -123,7 +141,7 @@ impl RunArgs {
     /// `--task`. The scenario file wins for scenario-shaped fields when present: it is an explicit
     /// artifact the operator named, and second-guessing it from a config file would make a
     /// checked-in scenario mean different things in different working directories.
-    fn resolve_scenario(&self, cfg: &EffectiveConfig) -> Result<Scenario, String> {
+    fn resolve_scenario(&self, cfg: &EffectiveConfig, cwd: &Path) -> Result<Scenario, String> {
         if let Some(path) = &self.scenario {
             let mut scenario = Scenario::from_path(path).map_err(|e| e.to_string())?;
             // The containment root for host-side workdir materialization comes from the operator,
@@ -141,6 +159,11 @@ impl RunArgs {
         // which runs just after this and knows about `--host` — the guard here did not, so it
         // refused ad-hoc host-mode runs that the operator had explicitly asked for.
         Ok(Scenario {
+            lease_turns: None,
+            context: Default::default(),
+            stuck: Default::default(),
+            // An ad-hoc task is an autonomous standard run: it ends through `finish` (025 US3).
+            finish: true,
             id: "adhoc".to_string(),
             policy_path: cfg
                 .policy_path
@@ -153,8 +176,13 @@ impl RunArgs {
             tools: cfg.tools.clone(),
             mode: Default::default(),
             workdir: Default::default(),
-            mcp: Default::default(),
-            skills: Vec::new(),
+            // The user's and project's MCP servers and skills, as every other entry point has them
+            // (024 FR-009). They used to be dropped here.
+            mcp: match &cfg.mcp_config {
+                Some(path) => bee::McpPolicy::from_path(path).map_err(|e| e.to_string())?,
+                None => Default::default(),
+            },
+            skills: bee::SkillRegistry::default_roots(cwd),
             ceiling_policy_path: cfg.ceiling_path.clone(),
             // An ad-hoc run has no scenario file, so its security configuration comes from the
             // resolved config layers — the same operator-only `[security]` table `bee repl` reads.
@@ -202,7 +230,7 @@ async fn run(args: RunArgs) -> ExitCode {
         }
     };
 
-    let scenario = match args.resolve_scenario(&cfg) {
+    let scenario = match args.resolve_scenario(&cfg, &cwd) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("{CMD}: scenario error: {e}");
@@ -219,23 +247,9 @@ async fn run(args: RunArgs) -> ExitCode {
         cfg.policy_path.is_some(),
         args.host,
     ) {
-        Ok(session::Enforcement::Host) => {
-            // Known limitation, refused rather than faked. `run_episode` builds its own sandbox,
-            // and under the `enforce` feature that path is unconditional — there is no host branch
-            // to select. Honouring `--host` here would announce an unenforced session and then run
-            // an enforced one, or fail half-built with an infrastructure error. `bee repl` is
-            // unaffected: it constructs its own sandbox and can choose.
-            if cfg!(feature = "enforce") {
-                eprintln!(
-                    "{CMD}: --host is not available in an enforcement build.\n  \
-                     A headless episode's sandbox is built by the harness, which has no \
-                     unenforced path when compiled with `--features enforce`.\n  \
-                     Use a build without that feature for host-mode runs, or supply a policy."
-                );
-                return ExitCode::from(EX_USAGE);
-            }
-            session::announce_host_mode(CMD)
-        }
+        // The episode's session is built by the library builder, which can run either way, so
+        // `--host` means host on every build.
+        Ok(session::Enforcement::Host) => session::announce_host_mode(CMD),
         Ok(session::Enforcement::Enforced) => {
             if let Err(e) = session::require_kernel_support() {
                 eprintln!("{CMD}: {}", e.detail);
@@ -248,16 +262,34 @@ async fn run(args: RunArgs) -> ExitCode {
         }
     }
 
+    // `[policy.http]` (019): refuse before a provider is contacted when nothing would enforce it
+    // as written — the build lacks interception, or the kernel will not block and the operator
+    // has not said `--http-scope-advisory`.
+    if let Err(detail) = check_http_scope(&scenario, args.host, args.http_scope_advisory) {
+        eprintln!("{CMD}: {detail}");
+        return ExitCode::from(EX_USAGE);
+    }
+
     let session = match session::build(&cfg, CMD) {
         Ok(s) => s,
         Err(e) => return session::fail(CMD, &e),
     };
 
-    let transcript = run_episode(
+    let transcript = run_episode_with(
         session.model.as_ref(),
         &scenario,
         session.key_env.as_deref(),
         progress_sink(args.quiet),
+        EpisodeOptions {
+            http_scope_advisory: args.http_scope_advisory,
+            enforcement: args.host.then_some(bee::session::Enforcement::Host),
+            context: bee::context::ContextInputs {
+                config: cfg.context,
+                provider_window: cfg.provider.context_window,
+                max_tokens: cfg.provider.max_tokens,
+            },
+            stuck: cfg.stuck,
+        },
     )
     .await;
 
@@ -272,10 +304,33 @@ async fn run(args: RunArgs) -> ExitCode {
         None => println!("{json}"),
     }
 
-    match transcript.status {
-        EpisodeStatus::InfraError { .. } => ExitCode::from(EX_SOFTWARE),
-        EpisodeStatus::ApiError { .. } => ExitCode::from(EX_UNAVAILABLE),
-        _ => ExitCode::SUCCESS,
+    ExitCode::from(bee::episode::exit_code(
+        &transcript.status,
+        transcript.finish_offered,
+    ))
+}
+
+/// The `[policy.http]` gate for a single episode (019 T043/T044). The episode path re-checks; this
+/// copy exists so the refusal is a usage error before anything is contacted.
+fn check_http_scope(scenario: &Scenario, host: bool, advisory_ack: bool) -> Result<(), String> {
+    let policy = match bee_core::Policy::from_path(&scenario.policy_path) {
+        Ok(p) => p,
+        // An unreadable policy is reported where it always was: when the episode loads it.
+        Err(_) => return Ok(()),
+    };
+    if !policy.http.as_ref().is_some_and(|h| h.is_active()) {
+        return Ok(());
+    }
+    // The one copy of the advisory rule (024 FR-011); here only so the refusal is a usage error before
+    // a provider is contacted. The builder applies the same rule again.
+    let enforcement = if cfg!(feature = "enforce") && !host {
+        bee::session::Enforcement::Kernel
+    } else {
+        bee::session::Enforcement::Host
+    };
+    match bee::session::http_advisory(&policy, enforcement, advisory_ack) {
+        Ok(_) => Ok(()),
+        Err(e) => Err(e.to_string()),
     }
 }
 
@@ -509,4 +564,53 @@ async fn run_concurrent_mode(
          (async audit demux + shared engine)"
     );
     ExitCode::from(EX_USAGE)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::config::file::{load, Origin};
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct Cli {
+        #[command(flatten)]
+        run: RunArgs,
+    }
+
+    // 024 FR-009: `bee run --task` keeps the user's and project's MCP servers and skills, like every
+    // other entry point. It used to build its ad-hoc scenario with neither.
+    #[test]
+    fn a_task_keeps_the_configured_mcp_servers_and_skills() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |name: &str, body: &str| {
+            let p = dir.path().join(name);
+            std::fs::write(&p, body).unwrap();
+            p
+        };
+        write(
+            "p.toml",
+            "[provider]\nprovider = \"mock\"\n\n[[provider.script]]\ntext = \"hi\"\n",
+        );
+        write(
+            "mcp.toml",
+            "[mcp]\nenabled = true\n\n[[mcp.servers]]\nname = \"fs\"\ntransport = \"stdio\"\ncommand = \"srv\"\n",
+        );
+        let cfg_path = write(
+            "config.toml",
+            "[provider]\npath = \"p.toml\"\n\n[mcp]\nconfig = \"mcp.toml\"\n",
+        );
+        let layer = load(&cfg_path, Origin::User).unwrap().unwrap();
+        let args = Cli::parse_from(["bee", "--task", "list the files", "--host"]).run;
+        let cfg = config::resolve_from_layers(&[layer], &args.flags()).unwrap();
+
+        let scenario = args.resolve_scenario(&cfg, dir.path()).unwrap();
+        assert!(scenario.mcp.enabled);
+        assert_eq!(scenario.mcp.servers[0].name, "fs");
+        assert_eq!(
+            scenario.skills,
+            bee::SkillRegistry::default_roots(dir.path()),
+            "the same skill roots `bee repl` discovers from"
+        );
+    }
 }

@@ -33,6 +33,7 @@ async fn ollama_openai_compat_smoke() {
     }
 
     let cfg = ProviderConfig {
+        context_window: None,
         provider: ProviderType::OpenAiCompat,
         base_url: Some(base.to_string()),
         model: std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| "qwen2.5-coder".to_string()),
@@ -66,6 +67,7 @@ async fn anthropic_smoke() {
         }
     };
     let cfg = ProviderConfig {
+        context_window: None,
         provider: ProviderType::Anthropic,
         base_url: None,
         // A cheap current model for the smoke; overridable.

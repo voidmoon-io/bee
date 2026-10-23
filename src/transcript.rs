@@ -18,14 +18,22 @@ pub fn truncate(content: String, cap: usize) -> (String, bool, Option<usize>) {
         return (content, false, None);
     }
     let original = content.len();
-    // Back off to a char boundary so we never split a multi-byte sequence.
-    let mut end = cap;
-    while end > 0 && !content.is_char_boundary(end) {
-        end -= 1;
-    }
+    let end = char_floor(&content, cap);
     let mut out = content[..end].to_string();
     out.push_str(&format!("\n[truncated: {original} bytes, showing {end}]"));
     (out, true, Some(original))
+}
+
+/// The largest char boundary of `s` at or below `n` — a cut there never splits a multi-byte sequence.
+pub(crate) fn char_floor(s: &str, n: usize) -> usize {
+    if n >= s.len() {
+        return s.len();
+    }
+    let mut end = n;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
 }
 
 /// How an episode ended (research H10). US3 adds `Captured`/`NotCaptured`.
@@ -49,6 +57,23 @@ pub enum EpisodeStatus {
     Captured { turn: u32 },
     /// The agent gave up or exhausted its turns without capturing the flag (US3, CTF mode).
     NotCaptured,
+    /// The next request could not be brought within the model's context budget (025 FR-002,
+    /// FR-014), or the provider refused one as too long.
+    ContextExhausted { detail: String },
+    /// The same failing call was made `repeats` times in a row, and the run was ended (025 FR-027).
+    Stuck {
+        tool: String,
+        arguments: serde_json::Value,
+        repeats: u32,
+    },
+    /// The model called `finish` (025 US3). `turn` is the 0-based turn it was called on.
+    Finished {
+        outcome: crate::tools::finish::FinishOutcome,
+        summary: String,
+        turn: u32,
+    },
+    /// `finish` was offered, and the model ended with a second text-only turn instead (025 FR-035).
+    EndedWithoutFinish,
 }
 
 /// One recorded tool call within a turn: the request, the result, and the audit events the kernel
@@ -57,8 +82,50 @@ pub enum EpisodeStatus {
 pub struct RecordedCall {
     pub call: ToolCall,
     pub result: ToolResult,
+    /// Kernel audit events this call produced — the tool scope's, plus the proxy scope's tagged
+    /// `scope_id = "proxy"` (019).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub audit: Vec<AuditEvent>,
+    /// Proxy-layer events this call produced (019, research R14). Kept apart from `audit`: a
+    /// user-space refusal is never a kernel one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub proxy_events: Vec<crate::proxy_event::ProxyEvent>,
+    /// The audit of an attempt that was denied and then retried under a widened scope — the denial
+    /// that justified widening it (024 FR-021). `audit` is the retry's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub denied_attempt_audit: Vec<AuditEvent>,
+    /// The proxy events of an attempt a proxy refusal retried — the refusal that justified widening
+    /// the target scope (024 FR-021). `proxy_events` is the retry's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub denied_attempt_proxy_events: Vec<crate::proxy_event::ProxyEvent>,
+    /// Every widen cycle run during the call, in order, with what started it (024 FR-018).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub escalations: Vec<crate::call::EscalationRecord>,
+    /// A retry ran to completion, and `result` and `audit` are its.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retried: bool,
+    /// An attempt hit the time limit. When it was a retry, the attempt before it stands (FR-025).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub timed_out: bool,
+    /// The call came after `finish` in the same turn and was never run (025 FR-034).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub not_run: bool,
+    /// A hook refused the call before it ran (024 FR-031); the tool never executed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused_by_hook: Option<String>,
+}
+
+/// The interception session a transcript was recorded under (019 T044): how `[policy.http]` was
+/// enforced, and — when only by the proxy — the reason and the operator's acknowledgement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HttpSessionHeader {
+    /// `kernel` or `advisory`.
+    pub enforcement: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advisory_reason: Option<String>,
+    /// The operator passed `--http-scope-advisory`.
+    #[serde(default)]
+    pub advisory_acknowledged: bool,
 }
 
 /// A panel-targeted render recorded in / replayed from a transcript (008-grid-tui, FR-010/SC-009): a
@@ -80,6 +147,45 @@ pub struct TranscriptTurn {
     pub calls: Vec<RecordedCall>,
     /// Wall-clock duration of this turn (model round-trip + tool execution), milliseconds.
     pub duration_ms: u64,
+    /// bee's own notes added to the model's input before this turn's model call (025 FR-028): passive
+    /// leads, stuck reminders, the finish reminder.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<HarnessNote>,
+}
+
+/// What a [`HarnessNote`] is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoteKind {
+    /// A sandbox turn note, e.g. "N new passive leads" (019 US8).
+    Passive,
+    /// The same call has been repeated (025 FR-024).
+    StuckGeneral,
+    /// The same call keeps being denied by policy (025 FR-026).
+    StuckPolicy,
+    /// The run ends only through the finish tool (025 FR-035).
+    FinishRequired,
+}
+
+/// One note in bee's own words, added to the model's input as a user message (025 FR-028).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HarnessNote {
+    pub kind: NoteKind,
+    pub text: String,
+    /// The repeated call a stuck note answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call: Option<ToolCall>,
+}
+
+impl HarnessNote {
+    /// A note with no call attached.
+    pub fn new(kind: NoteKind, text: impl Into<String>) -> HarnessNote {
+        HarnessNote {
+            kind,
+            text: text.into(),
+            call: None,
+        }
+    }
 }
 
 /// Episode timing (FR-009).
@@ -100,6 +206,10 @@ pub struct AuditHealth {
 }
 
 impl AuditHealth {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+
     pub fn incomplete(&self) -> bool {
         self.queue_dropped > 0
             || self.retention_dropped > 0
@@ -115,10 +225,11 @@ pub struct EpisodeTranscript {
     pub model_id: String,
     pub status: EpisodeStatus,
     pub turns: Vec<TranscriptTurn>,
-    /// Full episode audit trail (also inlined per call above).
+    /// Every kernel event of the episode, call by call: each call's `denied_attempt_audit`, then its
+    /// `audit` (024 FR-021). Each call's own events are also inlined in its [`RecordedCall`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub audit_trail: Vec<AuditEvent>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "AuditHealth::is_default")]
     pub audit_health: AuditHealth,
     pub timing: Timing,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -126,6 +237,63 @@ pub struct EpisodeTranscript {
     /// CTF scoring (US3). `None` for non-CTF episodes; `Some` when `scenario.mode == Ctf`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub score: Option<ScoreReport>,
+    /// HTTP interception, when the session ran it (019).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_scope: Option<HttpSessionHeader>,
+    /// Every consent decision the session's operator made, in order (024 FR-004). Absent when there
+    /// were none, so a transcript without grants is unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub consents: Vec<crate::operator::ConsentRecord>,
+    /// Kernel events of each MCP server's own process, by server (024 FR-027): attributed to the
+    /// server, not to any tool call, so they are in neither `audit_trail` nor a call's `audit`.
+    /// Processes a server spawns are not attributed and stay in the calls' audit.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub mcp_audit: std::collections::BTreeMap<String, Vec<AuditEvent>>,
+    /// The run was offered `finish` (025 US3), so ending without it is an incomplete run.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub finish_offered: bool,
+    /// Every compaction of the model's conversation, in order (025 FR-017). The turns themselves are
+    /// recorded in full regardless (FR-011).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compactions: Vec<CompactionEvent>,
+    /// What the summary calls cost, apart from the agent's own (FR-012). Also counted in `usage`
+    /// (FR-013).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_usage: Option<Usage>,
+}
+
+/// Which compaction ran (025 FR-017).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionKind {
+    /// Bulky middle results replaced by stubs.
+    Elided,
+    /// Old turns folded into the running summary.
+    Summarized,
+    /// Old turns removed after the summary call failed.
+    Removed,
+}
+
+/// One compaction (data-model.md "CompactionEvent").
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompactionEvent {
+    /// The model turn it ran before.
+    pub turn: u32,
+    pub kind: CompactionKind,
+    /// Results elided, or turns folded or removed.
+    pub items: u32,
+    /// The first and last conversation turn folded or removed. Absent for elision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turns: Option<(u32, u32)>,
+    /// The request's estimated size before and after, in tokens.
+    pub before_tokens: u32,
+    pub after_tokens: u32,
+    /// The summary call's usage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
+    /// Why the summary failed, for a removal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 impl EpisodeTranscript {
@@ -209,6 +377,12 @@ impl EpisodeTranscript {
             .format(&time::format_description::well_known::Rfc3339)
             .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
         EpisodeTranscript {
+            consents: Vec::new(),
+            mcp_audit: Default::default(),
+            finish_offered: false,
+            compactions: Vec::new(),
+            summary_usage: None,
+            http_scope: None,
             scenario_id,
             model_id,
             status,
@@ -242,7 +416,8 @@ pub struct ScoreReport {
     pub coverage: f32,
     /// Distinct `(tool_name, normalized-arguments)` patterns that produced at least one denial. This
     /// counts "tried `cat /etc/shadow`" and "tried `cat /etc/passwd`" as two techniques, but the
-    /// same call twice as one.
+    /// same call twice as one. An MCP server whose own process was denied outside any call to it
+    /// adds one, `mcp:<server>`.
     pub unique_techniques: u32,
     /// Total tool calls in the episode (lower is more parsimonious for a given result).
     pub total_calls: u32,
@@ -274,6 +449,20 @@ impl ScoreReport {
                     let pattern = normalize_json(&call.call.arguments);
                     techniques.insert(format!("{}::{}", call.call.name, pattern));
                 }
+            }
+        }
+
+        // An MCP server's own denials outside any call to it are recorded under the server (024
+        // FR-027). Each still exercises the deny surface, and a server that hit one counts as one
+        // technique: no single call's arguments produced it.
+        for (server, events) in &transcript.mcp_audit {
+            let mut denied = false;
+            for e in events.iter().filter(|e| e.decision == "denied") {
+                denied_targets.insert(e.target.clone());
+                denied = true;
+            }
+            if denied {
+                techniques.insert(format!("mcp:{server}"));
             }
         }
 
@@ -355,6 +544,7 @@ pub fn tool_result_from_output(
         render_target: crate::render_spec::RenderTarget::Inline,
         panel_ops: Vec::new(),
         inline_effect: None,
+        provenance: crate::provider::Provenance::Harness,
     }
 }
 

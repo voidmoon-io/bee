@@ -311,6 +311,7 @@ mod tests {
             network: Default::default(),
             defaults: Default::default(),
             exfiltration: Default::default(),
+            http: None,
         }
     }
 

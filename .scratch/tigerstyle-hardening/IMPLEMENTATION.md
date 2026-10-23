@@ -5,10 +5,14 @@ the 13 findings in [the audit](../tigerstyle-audit/AUDIT.md). Existing transacti
 unrelated changes were preserved in the original workspace. The tested changes were committed in an
 isolated checkout for the pull request on 2026-10-23; no production deployment was made.
 
-**PR status:** draft. Current `main` (`50e0ee1`) includes substantial session/interception changes and
-the transactional reload fix from PR #39. A trial merge found conflicts. The validation below applies
-to the audited `ebf2d29` baseline plus these changes, not to a merge with current `main`. Integration
-and fresh verification are required before this PR is ready to merge.
+**Integration:** merged current `main` (`50e0ee1`) on 2026-10-23, preserving its shared session,
+call lifecycle, operator, interception, context and finish implementations. The transactional reload
+implementation from PR #39 is retained. Hardening is applied at the new shared boundaries; canceled
+cross-layer policy updates stop dispatch, retries retain completed-attempt evidence, and default
+audit health preserves old transcript round trips. The VM manifest now covers all 50 upstream cases.
+
+The baseline results below are historical. Fresh integration verification is being recorded separately
+in [INTEGRATION.md](INTEGRATION.md) before the draft is marked ready.
 
 ## Coverage
 
@@ -26,11 +30,11 @@ and fresh verification are required before this PR is ready to merge.
 | S10: chat height overflows `u16` | Document positions and totals use `usize`; only visible coordinates narrow to terminal types. | More than 65,535 rows render without overflow and the final marker remains visible; existing TUI layout/property tests. |
 | P01: scanner imports repeatedly fold the ledger | At most 200 records per batch, one locked fold/publication, streaming bounded records, shared admitted blocking worker for imports and finding tools. | Two concurrent batches publish all 200 findings; existing verdict/rediscovery and scanner integrations; measurement below. |
 | D01: feature failures escape CI | Required default/headless/MCP-security-grammar suites and enforcement/concurrency test compilation; explicit color state in affected TUI tests; isolated skill-test temporary directories. | Local feature suites, combined-feature Clippy, and `NO_COLOR=1` workspace tests. |
-| D02: VM runner can falsely pass | Shared 38-case manifest; strict parser requires zero guest status, complete unique cases and one matching summary. | Three parser test methods with malformed/partial/duplicate/failure subcases; live matrix reports all 38 cases passed. |
+| D02: VM runner can falsely pass | Shared 50-case manifest; strict parser requires zero guest status, complete unique cases and one matching summary. | Three parser test methods with malformed/partial/duplicate/failure subcases; live matrix reports all 38 cases passed. |
 
 The code and public behavior contracts are described in [docs/hardening.md](../../docs/hardening.md).
 
-## Verification
+## Original baseline verification
 
 Commands used for the final checks:
 

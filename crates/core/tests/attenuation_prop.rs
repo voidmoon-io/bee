@@ -20,6 +20,7 @@ fn mk(mode: Mode, fs: BTreeMap<String, Access>, exec: Vec<String>, net: Vec<Stri
         network: NetPolicy { allow: net },
         defaults: Default::default(),
         exfiltration: ExfilPolicy::default(),
+        http: None,
     }
 }
 

@@ -183,7 +183,9 @@ impl Observer for CrashAt {
     fn worker_committed(&self, record: &WorkerRecord) {
         let first = record.probes.len() == 1;
         if (self.0 == "probe-intent" && first && record.pending())
-            || (self.0 == "probe-result" && first && !record.pending())
+            || (matches!(self.0.as_str(), "probe-result" | "consent-expiry")
+                && first
+                && !record.pending())
             || (matches!(self.0.as_str(), "worker-result" | "expired-result")
                 && record.completion.is_some())
         {
@@ -248,6 +250,9 @@ async fn investigation_child() {
     let mut requested_limits = limits();
     if mode == "expired-result" {
         requested_limits.timeout_ms = 5_000;
+    }
+    if mode == "consent-expiry" {
+        requested_limits.tool_timeout_ms = 5_000;
     }
     let session = open(&root, Some(Arc::new(CrashAt(mode)))).await;
     let mut registry = registry(&root, &session);
@@ -691,5 +696,70 @@ async fn crash_before_tool_admission_resumes_without_orphaned_operation() {
             .lines()
             .count(),
         4
+    );
+}
+
+struct WaitForAuthorization(Arc<std::sync::atomic::AtomicBool>);
+#[async_trait::async_trait]
+impl bee::hooks::LoopHook for WaitForAuthorization {
+    async fn on_event(&self, event: &bee::hooks::StepEvent<'_>) -> bee::hooks::Flow {
+        if matches!(event, bee::hooks::StepEvent::BeforeToolCall(_)) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        }
+        bee::hooks::Flow::Continue
+    }
+}
+#[tokio::test]
+async fn recovery_authorization_expiring_the_tool_deadline_enters_cleanup() {
+    let root = fixture();
+    kill_at(root.path(), "consent-expiry");
+    let session = open(root.path(), None).await;
+    let mut registry = registry(root.path(), &session);
+    let base = bee_core::Policy::from_toml("[policy]\nname='consent-expiry'\n").unwrap();
+    let asked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let hooks = bee::grants::escalate::LoopEscalation {
+        ceiling: base.clone(),
+        base,
+        hooks: vec![Box::new(WaitForAuthorization(asked.clone()))],
+        operator: bee::operator::Operator::autonomous(Arc::new(bee::operator::NullOutput)),
+        default_ttl: bee::grants::Ttl::Forever,
+    };
+    let result = session
+        .run(
+            "request",
+            None,
+            "system",
+            limits(),
+            &model(root.path()),
+            &mut registry,
+            &mut Sandbox::host(vec![]),
+            &Output,
+            Some(&hooks),
+        )
+        .await;
+    assert!(asked.load(std::sync::atomic::Ordering::SeqCst));
+    // Host recovery cannot prove the old executor stopped, but expiry must commit cancellation.
+    assert!(
+        matches!(result, Err(DriverError::Unresolved(_))),
+        "{result:?}"
+    );
+    assert!(snapshot(root.path())
+        .operations()
+        .values()
+        .any(|operation| operation.spec.name == "repro_run"
+            && matches!(operation.phase, Phase::Cancelling { .. })));
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("effects")).unwrap(),
+        "positive\n"
+    );
+    assert_eq!(
+        session
+            .budget("request")
+            .await
+            .unwrap()
+            .unwrap()
+            .unresolved(),
+        1
     );
 }

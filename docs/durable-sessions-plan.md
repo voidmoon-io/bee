@@ -692,3 +692,15 @@ pump as a fresh exchange. Findings backed by HTTP exchanges retain their citatio
 and are not described as prose-only. The shared driver refuses call-scoped HTTP
 and MCP services and `finish`; library presentation entry points also refuse
 explicit context/stuck settings instead of silently ignoring them.
+
+The final spec pass also bounded fresh and recovery authorization by the persisted
+tool deadline and rechecked it before committing reconciliation. Consent that
+outlasts the tool now enters cancellation/cleanup instead of an invalid phase.
+All four real-kernel recovery cases passed after the review fixes; the VM was
+returned to its initially stopped state.
+
+The full regression gate also caught a ToolDeps porting omission: registering
+source, hunt, or reproduction tools with an evidence store must expose
+`receipt_get`. That dependency now lives in the shared tool constructor, including
+registrations made during dependency refresh. The normal-session hunt regression
+passes alongside the crash/recovery tests.

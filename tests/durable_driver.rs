@@ -1334,3 +1334,52 @@ async fn shared_driver_refuses_call_scoped_services_before_admitting_work() {
     assert!(!root.path().join("effects").exists());
     assert!(session.budget("request").await.unwrap().is_none());
 }
+
+#[tokio::test]
+async fn library_entrypoints_refuse_unsupported_settings_before_admitting_work() {
+    let root = tempfile::tempdir().unwrap();
+    let session = session(root.path(), None).await;
+    let mut registry = registry(root.path(), &session);
+    let mut sandbox = Sandbox::host(vec![]);
+    let mut scenario = scenario();
+    scenario.stuck.stop = Some(false);
+    let options = LoopOptions {
+        durable: Some(RunBinding {
+            session: session.clone(),
+            request_id: "request".into(),
+            resume: false,
+            tool_call_limit: 10,
+        }),
+        ..Default::default()
+    };
+    let report = bee::run_loop(&model(), &scenario, &mut registry, &mut sandbox, &options).await;
+    assert!(matches!(
+        report.status,
+        bee::EpisodeStatus::InfraError { .. }
+    ));
+    assert!(session.budget("request").await.unwrap().is_none());
+    let config = ReplConfig {
+        durable: Some(session.clone()),
+        stuck: bee::stuck::ResolvedStuck {
+            stop: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let result = bee::repl::run_exchange(
+        "work",
+        &model(),
+        &mut Conversation::new("system", ""),
+        &mut registry,
+        &mut sandbox,
+        &config,
+        &Output::default(),
+        &Default::default(),
+        None,
+    )
+    .await;
+    assert!(
+        matches!(result.outcome, ExchangeOutcome::Terminated(ref detail) if detail.contains("context/stuck"))
+    );
+    assert!(!root.path().join("effects").exists());
+}

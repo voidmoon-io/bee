@@ -574,6 +574,15 @@ impl ToolRegistry {
         let key = tool.name();
         self.tools.insert(key, tool);
         self.built.insert(key);
+        #[cfg(feature = "findings")]
+        if self.deps.evidence.is_some()
+            && matches!(
+                key,
+                "source_pin" | "source_read" | "hunt_checkpoint" | "hunt_resume" | "repro_run"
+            )
+        {
+            self.register("receipt_get")?;
+        }
         Ok(())
     }
 

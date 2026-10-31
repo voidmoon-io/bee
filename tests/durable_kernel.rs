@@ -111,6 +111,17 @@ async fn run_with(
     root: &Path,
     hooks: Option<&bee::grants::escalate::LoopEscalation>,
 ) -> bee::session::driver::Report {
+    let base = bee_core::Policy::from_toml("[policy]\nname='durable-kernel'\n").unwrap();
+    let baseline = bee::grants::escalate::LoopEscalation {
+        ceiling: base.clone(),
+        base,
+        hooks: vec![],
+        operator: bee::operator::Operator::autonomous(std::sync::Arc::new(
+            bee::operator::NullOutput,
+        )),
+        default_ttl: bee::grants::Ttl::Forever,
+    };
+    let hooks = Some(hooks.unwrap_or(&baseline));
     let session = Session::open(
         root.join("session"),
         SessionId("kernel".into()),

@@ -433,6 +433,7 @@ impl Driver {
                     } else {
                         registry.durable_spec(&call, &self.compatibility, deadline)?
                     };
+                    let deadline = spec.deadline_ms;
                     let id = self.operation(spec, false, sandbox).await?;
                     let phase = self.state.committed().operation(id).unwrap().phase.clone();
 
@@ -446,7 +447,7 @@ impl Driver {
                             };
                             let future =
                                 crate::call::before_call(&mut escalation, &call, sandbox, registry);
-                            match self.wait(future, self.active().deadline_ms, output).await? {
+                            match self.wait(future, deadline, output).await? {
                                 crate::call::Before::Refused(reason) => {
                                     refusal = Some(ToolResult::refused_by_hook(&reason))
                                 }

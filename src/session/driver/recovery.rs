@@ -65,10 +65,16 @@ impl Driver {
                 };
                 let future = crate::call::before_call(&mut escalation, &call, sandbox, registry);
                 if let crate::call::Before::Refused(reason) | crate::call::Before::Stopped(reason) =
-                    self.wait(future, self.active().deadline_ms, output).await?
+                    self.wait(future, operation.spec.deadline_ms, output)
+                        .await?
                 {
                     return Err(DriverError::Refused(reason));
                 }
+            }
+            let current_executor = executor::Executor::capture(sandbox)?;
+            let now_ms = self.time();
+            if now_ms >= operation.spec.deadline_ms {
+                return Err(DriverError::Expired);
             }
             let activation = self.state.activation().0.to_string();
             if let Step::Tools {
@@ -77,10 +83,9 @@ impl Driver {
                 ..
             } = &mut self.active_mut().step
             {
-                *executor = executor::Executor::capture(sandbox)?;
+                *executor = current_executor;
                 *executor_activation = Some(activation);
             }
-            let now_ms = self.time();
             self.apply(Event::ResumeReconciliation {
                 token: RecoveryToken {
                     activation: self.state.activation(),

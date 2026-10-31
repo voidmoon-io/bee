@@ -66,9 +66,10 @@ bash test/vm/durable.sh
 
 This separately builds `durable_kernel` with `durable-sessions,enforce`, kills Bee
 while a detached descendant remains in its enforced cgroup, then reopens the session.
-A permitted replacement can run only after the exact old scope is empty. The test
-also checks that the unknown old attempt remains charged. It passed on kernel
-`6.8.0-147-generic` on 2026-10-30. It does not establish continuous enforcement while
+The four cases check cleanup before replacement, fresh authorization after
+reconciliation, cleanup of the replacement executor after a second crash, and
+expired-tool cleanup before submission expiry. Unknown attempts remain charged.
+All four passed on kernel `6.8.0-147-generic` on 2026-10-30. It does not establish continuous enforcement while
 Bee is dead: Engine owns BPF links for its process lifetime. The script requires an
 already-running VM, removes its guest executable, and leaves VM lifecycle unchanged.
 

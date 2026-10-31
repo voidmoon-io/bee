@@ -70,11 +70,15 @@ impl Driver {
                 .drive(model, registry, sandbox, output, hooks, &mut active_policy)
                 .await;
             let report = match result {
-                Ok(status) => self.finish(status).await?,
+                Ok(status) => self.finish(status, output).await?,
+                // A capacity limit or a refusal recurs on every resume, so it ends the submission
+                // like a cancellation instead of leaving it active and blocking the session.
                 Err(
                     error @ (DriverError::Cancelled
                     | DriverError::Expired
-                    | DriverError::BudgetExhausted),
+                    | DriverError::BudgetExhausted
+                    | DriverError::Core(core::Error::Limit)
+                    | DriverError::Refused(_)),
                 ) => {
                     self.cancel_intent().await?;
                     // A worker result may commit while cancellation is being admitted.
@@ -99,7 +103,7 @@ impl Driver {
                                 detail: error.to_string(),
                             }
                         };
-                    self.finish(status).await?
+                    self.finish(status, output).await?
                 }
                 Err(error) => return Err(error),
             };
@@ -297,9 +301,7 @@ impl Driver {
                         let attempt = self.authorize(id).await?;
                         output.busy_start();
                         let started = std::time::Instant::now();
-                        let response = self
-                            .model(model, &conversation, &schemas, &attempt, output)
-                            .await;
+                        let response = self.model(model, &conversation, &schemas, output).await;
                         output.busy_stop();
                         let turn = match response {
                             Ok(turn) => turn,
@@ -631,7 +633,6 @@ impl Driver {
         model: &dyn Model,
         conversation: &Conversation,
         schemas: &[crate::provider::ToolSchema],
-        attempt: &Attempt,
         output: &dyn ReplOutput,
     ) -> Result<Turn, DriverError> {
         let deadline = self.active().deadline_ms;
@@ -639,36 +640,44 @@ impl Driver {
             .wait(model.stream(conversation, schemas), deadline, output)
             .await??;
         let mut text = String::new();
-        let mut chunks = 0usize;
+        // Deltas coalesce into one commit per chunk or flush interval, not one per token.
+        let mut pending = String::new();
+        let mut flush_at: Option<tokio::time::Instant> = None;
         loop {
-            let event = self
-                .wait(stream.next(), deadline, output)
-                .await?
-                .ok_or_else(|| {
-                    DriverError::Refused("provider stream ended without a complete response".into())
-                })??;
+            let next = stream.next();
+            let event = match flush_at {
+                Some(at) => {
+                    match self
+                        .wait(tokio::time::timeout_at(at, next), deadline, output)
+                        .await?
+                    {
+                        Ok(event) => event,
+                        Err(_) => {
+                            self.commit_text(std::mem::take(&mut pending), output)
+                                .await?;
+                            flush_at = None;
+                            continue;
+                        }
+                    }
+                }
+                None => self.wait(next, deadline, output).await?,
+            };
+            let event = event.ok_or_else(|| {
+                DriverError::Refused("provider stream ended without a complete response".into())
+            })??;
             match event {
                 StreamEvent::TextDelta(delta) => {
-                    if text.len().saturating_add(delta.len()) > 1024 * 1024 {
+                    if text.len().saturating_add(delta.len()) > MAX_RESPONSE_BYTES {
                         return Err(core::Error::Limit.into());
                     }
                     text.push_str(&delta);
-                    for part in text_chunks(&delta) {
-                        chunks += 1;
-                        if chunks > 4096 {
-                            return Err(core::Error::Limit.into());
-                        }
-                        if let Step::Model { chunks, .. } = &mut self.active_mut().step {
-                            chunks.push(part.into());
-                        }
-                        let key = format!("{}:{}", attempt.operation.0, attempt.number);
-                        self.journal_mut()
-                            .streams
-                            .entry(key)
-                            .or_default()
-                            .push(part.into());
-                        self.save().await?;
-                        output.assistant_delta(part);
+                    pending.push_str(&delta);
+                    if pending.len() >= STREAM_CHUNK_BYTES {
+                        self.commit_text(std::mem::take(&mut pending), output)
+                            .await?;
+                        flush_at = None;
+                    } else if flush_at.is_none() && !pending.is_empty() {
+                        flush_at = Some(tokio::time::Instant::now() + STREAM_FLUSH);
                     }
                 }
                 StreamEvent::ToolCall(_) => {} // Only the complete committed response can dispatch.
@@ -680,40 +689,48 @@ impl Driver {
                     }
                     if text.is_empty() {
                         if let Some(full) = &turn.text {
-                            if full.len() > 1024 * 1024 {
+                            if full.len() > MAX_RESPONSE_BYTES {
                                 return Err(core::Error::Limit.into());
                             }
-                            for part in text_chunks(full) {
-                                chunks += 1;
-                                if chunks > 4096 {
-                                    return Err(core::Error::Limit.into());
-                                }
-                                if let Step::Model { chunks, .. } = &mut self.active_mut().step {
-                                    chunks.push(part.into());
-                                }
-                                let key = format!("{}:{}", attempt.operation.0, attempt.number);
-                                self.journal_mut()
-                                    .streams
-                                    .entry(key)
-                                    .or_default()
-                                    .push(part.into());
-                                self.save().await?;
-                                output.assistant_delta(part);
-                            }
+                            pending.push_str(full);
                         }
                     }
+                    self.commit_text(pending, output).await?;
                     output.assistant_end();
                     return Ok(turn);
                 }
             }
         }
     }
+    /// Commit streamed text before presenting it, so a reopen can show exactly what was seen.
+    async fn commit_text(
+        &mut self,
+        text: String,
+        output: &dyn ReplOutput,
+    ) -> Result<(), DriverError> {
+        if text.is_empty() {
+            return Ok(());
+        }
+        let parts = text_chunks(&text);
+        if let Step::Model { chunks, .. } = &mut self.active_mut().step {
+            chunks.extend(parts.iter().map(|part| part.to_string()));
+        }
+        self.save().await?;
+        for part in parts {
+            output.assistant_delta(part);
+        }
+        Ok(())
+    }
 }
+
+const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+const STREAM_CHUNK_BYTES: usize = 4096;
+const STREAM_FLUSH: Duration = Duration::from_millis(250);
 
 fn text_chunks(mut text: &str) -> Vec<&str> {
     let mut chunks = Vec::new();
     while !text.is_empty() {
-        let mut end = text.len().min(4096);
+        let mut end = text.len().min(STREAM_CHUNK_BYTES);
         while !text.is_char_boundary(end) {
             end -= 1;
         }

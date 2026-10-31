@@ -796,7 +796,13 @@ fn invalid_input_and_incompatible_snapshots_are_refused_without_progress() {
         result: result(),
     });
     let mut snapshot = serde_json::to_value(sim.disk.clone()).unwrap();
-    snapshot["entries"][0]["result"]["output"] = json!("forged mismatch");
+    // The result is stored once, in the entry; a phase that still carries a different one is refused.
+    assert!(snapshot["operations"]["1"]["phase"]["Completed"]
+        .get("result")
+        .is_none());
+    let mut forged = snapshot["entries"][0]["result"].clone();
+    forged["output"] = json!("forged mismatch");
+    snapshot["operations"]["1"]["phase"]["Completed"]["result"] = forged;
     assert!(matches!(
         State::open(serde_json::from_value(snapshot).unwrap(), ActivationId(5)),
         Err(Error::InvalidSnapshot)

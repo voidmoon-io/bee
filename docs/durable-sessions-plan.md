@@ -185,7 +185,9 @@ after proving their executor stopped.
 Inputs remain bounded at 64 KiB; serialized result JSON and exact receipt bytes
 are each bounded at 2 MiB to accommodate existing 100 KiB tool output and render
 metadata. Full snapshots retain both result and receipt through delivery and still
-have the 256 MiB store limit. Serialization/limit failure after execution leaves an
+have the 256 MiB store limit. A completed result is serialized once, in its entry;
+loading restores it into the operation phase, and snapshots that still carry it in
+the phase load unchanged. Serialization/limit failure after execution leaves an
 ambiguous attempt; the host must not treat it as a retryable tool failure.
 
 Run `bash test/durable-evidence.sh`. It covers both TUI feature configurations,
@@ -229,10 +231,16 @@ completed reports, original limits/deadlines, charged provider calls, known usag
 audit events, and elapsed call times. Its checkpoint is bounded at 16 MiB within
 the store's existing limits. No pruning or transcript-retention policy is enabled.
 Store failures stop progress and require reopen; an interrupted in-memory driver
-cannot continue from an uncertain journal.
+cannot continue from an uncertain journal. A capacity limit or a refusal (hook,
+response bound) would recur on every resume, so it ends the submission through the
+cancellation path with status `Terminated` instead of leaving it active. A durable
+`bee run` that ends by budget or deadline exits 3: durable mode cannot offer
+`finish`, so exhaustion is never reported as success.
 
 Provider text is committed before display in UTF-8 chunks of at most 4096 bytes,
-with at most 4096 chunks and 1 MiB per response. A complete response is separately
+and 1 MiB per response. Deltas coalesce: a commit happens when 4096 bytes are pending
+or 250 ms after the first uncommitted delta, so a token-at-a-time provider costs a
+few commits per second rather than one per token. A complete response is separately
 committed before tool dispatch. Partial responses remain visibly interrupted on
 reconnect and never become complete assistant messages or tool instructions.
 Tool intent precedes execution, and committed results use the stage 3 publication
@@ -244,7 +252,9 @@ Headless Ctrl-C and explicit TUI quit use the same cancellation path. Intent is
 committed before the executing future is dropped and native child cleanup runs.
 A disconnected presentation leaves unfinished work recoverable. The controls queue
 holds 16 entries; enqueue success alone is not a durable acknowledgement. Steering
-is bounded at 16 KiB and is consumed at the next safe conversation boundary.
+is bounded at 16 KiB and is consumed at the next safe conversation boundary. An
+ending that leaves admitted steering unread (a terminal tool, cancellation, or a
+deadline) reports each such input as unused instead of dropping it silently.
 
 Reopen recomputes compatibility from current effective configuration, tool schemas,
 model/system identity, working directory, execution posture, and enforcement
@@ -324,8 +334,11 @@ authorization. A wake is consumed with the next dispatch, or invalidated by
 cancellation. Timer callbacks must match the current activation and saved wake,
 including its generation, attempt, and deadline. Early, duplicate, and stale
 callbacks do not authorize work. Retry eligibility also requires actual wall time
-to reach the persisted wake deadline; a conservative clock ahead of wall time
-cannot release a retry early. Submission expiry still uses the conservative clock.
+to reach the persisted wake deadline, so a conservative clock ahead of wall time
+cannot release a retry early, or that the current process has itself waited the
+full persisted delay on its monotonic clock, so a wall clock set back cannot
+withhold a retry until the submission expires. After reopen the local wait starts
+again, which only lengthens backoff. Submission expiry still uses the conservative clock.
 
 Submission and tool deadlines still bound every wait and dispatch. Within one
 activation, elapsed monotonic time advances a persisted wall-clock floor so a

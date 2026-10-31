@@ -386,7 +386,6 @@ impl Driver {
                 next_operation: 1,
                 next_wake_generation: 1,
                 observed_ms: now_ms(),
-                streams: BTreeMap::new(),
                 active: None,
                 finished: BTreeMap::new(),
             });
@@ -734,8 +733,30 @@ impl Driver {
             _ => Err(DriverError::Expired),
         }
     }
-    async fn finish(&mut self, status: EpisodeStatus) -> Result<Report, DriverError> {
+    async fn finish(
+        &mut self,
+        status: EpisodeStatus,
+        output: &dyn ReplOutput,
+    ) -> Result<Report, DriverError> {
         let ended_ms = self.time();
+        // Admitted steering is acknowledged, so an ending that leaves it unread (a terminal tool,
+        // cancellation, a deadline) says so rather than dropping it silently.
+        let request = self.active().request_id.clone();
+        for entry in self
+            .inbox
+            .iter()
+            .filter(|s| s.sequence > self.active().consumed_inputs)
+        {
+            if let Ok(Input::Steering { parent, .. }) = serde_json::from_value(entry.input.clone())
+            {
+                if parent == request {
+                    output.error(&format!(
+                        "input {} was admitted but the submission ended before using it; submit it again",
+                        entry.request_id
+                    ));
+                }
+            }
+        }
         if self.active().cancelling {
             if let Step::Tools {
                 model_operation,

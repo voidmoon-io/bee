@@ -349,6 +349,15 @@ async fn scenario_opt_out_keeps_old_endings() {
     assert_eq!(exit_code(&EpisodeStatus::Timeout, false), 0);
 }
 
+/// A durable run cannot offer `finish`, so exhausting its budget or deadline is not success.
+#[test]
+fn durable_exhaustion_is_incomplete() {
+    use bee::episode::durable_exit_code;
+    assert_eq!(durable_exit_code(&EpisodeStatus::Timeout), EXIT_INCOMPLETE);
+    assert_eq!(durable_exit_code(&EpisodeStatus::NoToolCalls), 0);
+    assert_eq!(durable_exit_code(&EpisodeStatus::Completed), 0);
+}
+
 /// contracts/finish.md "Exit status".
 #[test]
 fn exit_codes() {

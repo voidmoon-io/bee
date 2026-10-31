@@ -60,7 +60,7 @@ pub struct OperationSpec {
     pub deadline_ms: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Completion {
     #[serde(default)]
     pub duration_ms: u64,
@@ -114,6 +114,8 @@ pub enum Phase {
     },
     Completed {
         attempt: Attempt,
+        /// Stored once, in the operation's entry; loading restores it from there.
+        #[serde(default, skip_serializing)]
         result: Completion,
     },
     Stopped {
@@ -139,6 +141,7 @@ pub struct Entry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "StoredSnapshot")]
 pub struct Snapshot {
     pub(super) schema_version: u32,
     pub(super) session: SessionId,
@@ -148,6 +151,47 @@ pub struct Snapshot {
     pub(super) operations: BTreeMap<OperationId, Operation>,
     pub(super) entries: Vec<Entry>,
     pub(super) driver: Option<Value>,
+}
+
+/// A snapshot as stored: a completed operation's result is written only in its entry, not twice.
+/// Snapshots that still carry the result in the phase load unchanged; validation compares both.
+#[derive(Deserialize)]
+struct StoredSnapshot {
+    schema_version: u32,
+    session: SessionId,
+    activation: Option<ActivationId>,
+    revision: u64,
+    observed_ms: u64,
+    operations: BTreeMap<OperationId, Operation>,
+    entries: Vec<Entry>,
+    driver: Option<Value>,
+}
+
+impl From<StoredSnapshot> for Snapshot {
+    fn from(stored: StoredSnapshot) -> Self {
+        let mut operations = stored.operations;
+        for entry in &stored.entries {
+            if let Some(Operation {
+                phase: Phase::Completed { attempt, result },
+                ..
+            }) = operations.get_mut(&entry.attempt.operation)
+            {
+                if attempt == &entry.attempt && *result == Completion::default() {
+                    *result = entry.result.clone();
+                }
+            }
+        }
+        Self {
+            schema_version: stored.schema_version,
+            session: stored.session,
+            activation: stored.activation,
+            revision: stored.revision,
+            observed_ms: stored.observed_ms,
+            operations,
+            entries: stored.entries,
+            driver: stored.driver,
+        }
+    }
 }
 
 impl Snapshot {

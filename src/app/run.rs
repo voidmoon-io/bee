@@ -71,17 +71,17 @@ pub struct RunArgs {
     /// Capability ceiling a requested policy is attenuated against.
     #[arg(long)]
     pub ceiling_policy: Option<PathBuf>,
-    /// System prompt for --task runs.
-    #[arg(long)]
+    /// System prompt for --task or --resume runs; a --scenario file carries its own.
+    #[arg(long, conflicts_with = "scenario")]
     pub system: Option<String>,
-    /// Comma-separated tools for --task runs.
-    #[arg(long)]
+    /// Comma-separated tools for --task or --resume runs.
+    #[arg(long, conflicts_with = "scenario")]
     pub tools: Option<String>,
-    /// Max tool-call rounds for --task runs.
-    #[arg(long)]
+    /// Max tool-call rounds for --task or --resume runs.
+    #[arg(long, conflicts_with = "scenario")]
     pub turn_limit: Option<u32>,
-    /// Wall-clock cap (seconds) for --task runs.
-    #[arg(long)]
+    /// Wall-clock cap (seconds) for --task or --resume runs.
+    #[arg(long, conflicts_with = "scenario")]
     pub timeout_secs: Option<u64>,
 
     /// Directory the scenario's `[scenario.workdir]` files and dirs must be created under.
@@ -313,6 +313,10 @@ async fn run(args: RunArgs) -> ExitCode {
         }
     };
     #[cfg(feature = "durable-sessions")]
+    let durable_run = durable.is_some();
+    #[cfg(not(feature = "durable-sessions"))]
+    let durable_run = false;
+    #[cfg(feature = "durable-sessions")]
     let transcript = if let Some(durable) = durable {
         let controls = durable.clone();
         let running = bee::episode::run_durable_episode(
@@ -378,10 +382,11 @@ async fn run(args: RunArgs) -> ExitCode {
         None => println!("{json}"),
     }
 
-    ExitCode::from(bee::episode::exit_code(
-        &transcript.status,
-        transcript.finish_offered,
-    ))
+    ExitCode::from(if durable_run {
+        bee::episode::durable_exit_code(&transcript.status)
+    } else {
+        bee::episode::exit_code(&transcript.status, transcript.finish_offered)
+    })
 }
 
 /// The `[policy.http]` gate for a single episode (019 T043/T044). The episode path re-checks; this
@@ -650,6 +655,25 @@ mod tests {
     struct Cli {
         #[command(flatten)]
         run: RunArgs,
+    }
+
+    // A scenario file carries its own system prompt, tools and limits; the ad-hoc flags are a usage
+    // error beside it rather than silently ignored.
+    #[test]
+    fn task_shaped_flags_conflict_with_a_scenario() {
+        for flag in [
+            ["--system", "s"],
+            ["--tools", "bash"],
+            ["--turn-limit", "1"],
+            ["--timeout-secs", "1"],
+        ] {
+            let mut argv = vec!["bee", "--scenario", "x.toml"];
+            argv.extend(flag);
+            assert!(Cli::try_parse_from(&argv).is_err(), "{flag:?}");
+            let mut argv = vec!["bee", "--task", "t"];
+            argv.extend(flag);
+            assert!(Cli::try_parse_from(&argv).is_ok(), "{flag:?}");
+        }
     }
 
     // 024 FR-009: `bee run --task` keeps the user's and project's MCP servers and skills, like every

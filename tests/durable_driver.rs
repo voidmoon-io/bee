@@ -296,6 +296,163 @@ impl Model for DoneOnlyModel {
     }
 }
 
+/// Streams its reply one byte per delta, as a token-at-a-time provider does.
+struct TokenModel(usize);
+#[async_trait::async_trait]
+impl Model for TokenModel {
+    fn id(&self) -> &str {
+        "tokens"
+    }
+    async fn complete(
+        &self,
+        _: &Conversation,
+        _: &[ToolSchema],
+    ) -> Result<Turn, bee::provider::ModelError> {
+        Ok(Turn::text("x".repeat(self.0)))
+    }
+    async fn stream(
+        &self,
+        _: &Conversation,
+        _: &[ToolSchema],
+    ) -> Result<bee::provider::EventStream, bee::provider::ModelError> {
+        let deltas = (0..self.0).map(|_| Ok(bee::provider::StreamEvent::TextDelta("x".into())));
+        let done = Ok(bee::provider::StreamEvent::Done(Turn::text(
+            "x".repeat(self.0),
+        )));
+        Ok(Box::pin(futures_util::stream::iter(
+            deltas.chain(std::iter::once(done)),
+        )))
+    }
+}
+
+/// A terminal tool that steers its own session while running, as a user typing mid-call would.
+struct SteeredEnding(Arc<Session>);
+#[async_trait::async_trait]
+impl Tool for SteeredEnding {
+    fn name(&self) -> &'static str {
+        "ending"
+    }
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "ending".into(),
+            description: "fixture".into(),
+            parameters: json!({"type":"object"}),
+        }
+    }
+    async fn call(&self, _: serde_json::Value, _: &Sandbox) -> ToolResult {
+        self.0.steer("late steering".into()).unwrap();
+        // Let the driver admit the steering while this call is still running.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        ToolResult::terminal_ok("ended")
+    }
+}
+
+#[tokio::test]
+async fn steering_left_unread_by_a_terminal_tool_is_reported() {
+    let root = tempfile::tempdir().unwrap();
+    let session = session(root.path(), None).await;
+    let mut registry = ToolRegistry::new().with(Box::new(SteeredEnding(session.clone())));
+    registry.enable_evidence(session.evidence());
+    let model = MockModel::from_fn(|_| {
+        Turn::calls(vec![ToolCall {
+            id: "end".into(),
+            name: "ending".into(),
+            arguments: json!({}),
+        }])
+    })
+    .with_id("fixture-model");
+    let output = Output::default();
+    let (report, conversation) = session
+        .run(
+            "terminal",
+            Some("task"),
+            "system",
+            limits(),
+            &model,
+            &mut registry,
+            &mut Sandbox::host(vec![]),
+            &output,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(report.status, bee::EpisodeStatus::Completed);
+    assert!(!conversation
+        .messages
+        .iter()
+        .any(|m| matches!(m, Message::User { text } if text == "late steering")));
+    let text = output.text.lock().unwrap();
+    assert!(text.contains("ended before using it"), "{text}");
+}
+
+#[tokio::test]
+async fn token_deltas_coalesce_into_bounded_commits() {
+    let root = tempfile::tempdir().unwrap();
+    let session = session(root.path(), None).await;
+    let mut registry = registry(root.path(), &session);
+    let output = Output {
+        root: Some(root.path().into()),
+        ..Default::default()
+    };
+    let (report, _) = session
+        .run(
+            "tokens",
+            Some("task"),
+            "system",
+            limits(),
+            &TokenModel(10_000),
+            &mut registry,
+            &mut Sandbox::host(vec![]),
+            &output,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(report.status, bee::EpisodeStatus::NoToolCalls);
+    assert_eq!(output.text.lock().unwrap().len(), 10_000);
+    // 10,000 deltas are three 4 KiB chunks, not 10,000 checkpoints.
+    assert!(snapshot(root.path()).revision() < 32);
+    // A completed result is stored once, in its entry, and restored into the phase on load.
+    let db = rusqlite::Connection::open(root.path().join("session/session.sqlite3")).unwrap();
+    let bytes: Vec<u8> = db
+        .query_row("SELECT snapshot FROM session WHERE singleton=1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let raw: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let completed: Vec<_> = raw["operations"]
+        .as_object()
+        .unwrap()
+        .values()
+        .filter_map(|op| op["phase"].get("Completed"))
+        .collect();
+    assert!(!completed.is_empty());
+    assert!(completed.iter().all(|phase| phase.get("result").is_none()));
+    drop(db);
+    drop(registry);
+    drop(session);
+    let reopened = crate::session(root.path(), None).await;
+    let mut registry = crate::registry(root.path(), &reopened);
+    let (replayed, _) = reopened
+        .run(
+            "tokens",
+            None,
+            "system",
+            limits(),
+            &TokenModel(10_000),
+            &mut registry,
+            &mut Sandbox::host(vec![]),
+            &Output::default(),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&replayed.turns).unwrap(),
+        serde_json::to_value(&report.turns).unwrap()
+    );
+}
+
 #[tokio::test]
 async fn complete_only_provider_text_uses_the_same_durable_stream_bounds() {
     for size in [5000, 1024 * 1024 + 1] {
@@ -320,11 +477,29 @@ async fn complete_only_provider_text_uses_the_same_durable_stream_bounds() {
             )
             .await;
         if size > 1024 * 1024 {
-            assert!(matches!(
-                result,
-                Err(DriverError::Core(bee::session::durable::Error::Limit))
-            ));
+            let (report, _) = result.unwrap();
+            assert!(
+                matches!(&report.status, bee::EpisodeStatus::Terminated { detail } if detail.contains("limit")),
+                "{:?}",
+                report.status
+            );
             assert!(output.text.lock().unwrap().is_empty());
+            // The terminated submission no longer blocks the session.
+            let (next, _) = session
+                .run(
+                    "after-limit",
+                    Some("task"),
+                    "system",
+                    limits(),
+                    &DoneOnlyModel(10),
+                    &mut registry,
+                    &mut Sandbox::host(vec![]),
+                    &output,
+                    None,
+                )
+                .await
+                .unwrap();
+            assert_eq!(next.status, bee::EpisodeStatus::NoToolCalls);
         } else {
             assert_eq!(result.unwrap().0.status, bee::EpisodeStatus::NoToolCalls);
             assert_eq!(output.text.lock().unwrap().len(), size);
@@ -584,6 +759,11 @@ async fn sigkill_unknown_effect_stays_unresolved_and_partial_stream_never_dispat
         let mut child = child(root.path(), mode);
         child.0.kill().unwrap();
         child.0.wait().unwrap();
+        if mode == "stream" {
+            // The child pauses after presenting text, so that text was committed before the kill.
+            let step = snapshot(root.path()).driver().unwrap()["active"]["step"].clone();
+            assert!(step.to_string().contains("partial"), "{step}");
+        }
         let running = session(root.path(), None).await;
         let mut registry = registry(root.path(), &running);
         let resumed = running
@@ -607,10 +787,6 @@ async fn sigkill_unknown_effect_stays_unresolved_and_partial_stream_never_dispat
             );
         } else {
             assert!(resumed.is_ok(), "{resumed:?}");
-            let snapshot = snapshot(root.path());
-            assert!(snapshot.driver().unwrap()["streams"]
-                .to_string()
-                .contains("partial"));
             assert_eq!(
                 std::fs::read(root.path().join("effects")).unwrap(),
                 b"effect\n"

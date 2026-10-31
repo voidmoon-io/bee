@@ -10,6 +10,6 @@
   "dependencies": {
     "pixelmatch": "^7.1.0",
     "pngjs": "^7.0.0",
-    "puppeteer": "^24.10.0"
+    "puppeteer": "^25.16.0"
   }
 }

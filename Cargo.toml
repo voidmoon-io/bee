@@ -36,7 +36,7 @@ aya-build = "0.2"
 
 # LLM provider abstraction (application package only). Async; tokio-required.
 rig-core = "0.40"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "io-util"] }
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "process", "time", "io-util"] }
 async-trait = "0.1"
 
 # Serialization / policy.
@@ -230,11 +230,8 @@ clap = { workspace = true }
 # worker must exist in every build.
 ripgrep-api = "0.2"
 bstr = "1"
-# Pinned to 17: rustyline 18 added a `unicode-width =0.2.2` dependency that conflicted with ratatui
-# 0.29's `unicode-width =0.2.0` pin. ratatui-core 0.1 relaxed that to `>=0.2.0`, so the conflict is
-# gone and 18 would now resolve — but unpinning is deliberately out of scope for 009 (research R1).
-# rustyline 17 has the same DefaultEditor/ExternalPrinter API this crate uses (003-visual-render).
-rustyline = "17"
+# Keep the inline editor on the current release; ratatui 0.30 accepts its unicode-width version.
+rustyline = "19"
 
 # Visual rendering (003-visual-render, application package only — MUST NOT propagate to bee-core/bee-common,
 # NFR-002/SC-019). `rhai` sync => Engine is Send+Sync so RenderTool can own it; only_i64 trims size;
@@ -296,9 +293,9 @@ tui-markdown = { version = "0.3.9", default-features = false, features = ["highl
 # carries the grammars; `default-features = false` turns OFF its `builtin-parser` default, which
 # would pull all 27 tree-sitter grammars, every one of them compiled C. bee re-exposes them one at a
 # time as `astgrep-<lang>` features so a build pays only for what it scans (research R9).
-# NB: ast-grep 0.45 declares MSRV 1.88 — see the `rust-version` note on `[package]` above.
-ast-grep-core = { version = "0.45", optional = true }
-ast-grep-language = { version = "0.45", default-features = false, optional = true }
+# ast-grep 0.45.3 pulls tree-sitter 0.27 (Rust 1.90); retain the application's Rust 1.88 floor.
+ast-grep-core = { version = "=0.45.2", optional = true }
+ast-grep-language = { version = "=0.45.2", default-features = false, optional = true }
 
 # Pure-Rust git for history queries (US5). `default-features = false` because gix's defaults pull far
 # more than reading local history needs; `blame` gives line-origin attribution and `revision` gives
@@ -309,7 +306,7 @@ ast-grep-language = { version = "0.45", default-features = false, optional = tru
 # `sha1` is not optional in practice: with `default-features = false` gix selects no hash backend and
 # `gix-hash` refuses to compile at all ("Please set either the `sha1` or the `sha256` feature flag").
 # Object IDs are SHA-1 for every repository bee will read.
-gix = { version = "=0.86.0", default-features = false, features = ["blame", "revision", "sha1"], optional = true }
+gix = { version = "=0.90.0", default-features = false, features = ["blame", "revision", "sha1"], optional = true }
 
 # CVSS parsing and *scoring* (US4, FR-005). The model emits the vector — characterising attack
 # vector, complexity, privileges, impact — which is judgement it is good at. The arithmetic is a

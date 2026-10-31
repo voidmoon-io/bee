@@ -1238,3 +1238,31 @@ fn prepruning_snapshots_load_with_their_counters_derived() {
     stored["schema_version"] = json!(SCHEMA_VERSION);
     assert!(serde_json::from_value::<Snapshot>(stored).is_err());
 }
+
+#[test]
+fn a_host_deadline_stops_work_as_a_deadline_not_a_cancel() {
+    let mut sim = Simulator::new();
+    sim.submit(1, RecoveryPolicy::NeverReplay);
+    assert_eq!(
+        sim.apply(Event::Expire { id: OperationId(1) }),
+        vec![Effect::Stopped {
+            id: OperationId(1),
+            reason: StopReason::Deadline
+        }]
+    );
+    sim.submit(2, RecoveryPolicy::RetrySafe { max_attempts: 3 });
+    sim.start(2);
+    let effects = sim.apply(Event::Expire { id: OperationId(2) });
+    let [Effect::Stop(token)] = effects.as_slice() else {
+        panic!()
+    };
+    assert_eq!(
+        sim.apply(Event::Cleaned {
+            token: token.clone(),
+        }),
+        vec![Effect::Stopped {
+            id: OperationId(2),
+            reason: StopReason::Deadline
+        }]
+    );
+}

@@ -325,6 +325,10 @@ pub enum Event {
     Cancel {
         id: OperationId,
     },
+    /// The host's deadline for this operation's work passed: stop it as `Deadline`, not `Cancelled`.
+    Expire {
+        id: OperationId,
+    },
     /// Forget finished operations and their entries. Each must be `Completed` or `Stopped`;
     /// unknown outcomes and live or undelivered work are never pruned. Receipt files are untouched.
     Prune {

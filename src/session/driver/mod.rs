@@ -595,7 +595,13 @@ impl Driver {
         self.save().await?;
         if let Some(id) = self.active().step.operation() {
             if self.state.committed().operation(id).is_some() {
-                self.apply(Event::Cancel { id }).await?;
+                // A stop the deadline forced is recorded as one, not as an operator cancel.
+                let event = if self.active().timed_out {
+                    Event::Expire { id }
+                } else {
+                    Event::Cancel { id }
+                };
+                self.apply(event).await?;
             }
         }
         Ok(())

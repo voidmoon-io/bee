@@ -393,9 +393,13 @@ pub fn on_event(state: &mut State, event: Event) -> Result<Vec<Effect>, Error> {
                 }
             }
         }
-        Event::Cancel { id } => {
+        Event::Cancel { id } | Event::Expire { id } => {
+            let reason = match event {
+                Event::Expire { .. } => StopReason::Deadline,
+                _ => StopReason::Cancelled,
+            };
             let operation = next.operations.get_mut(&id).ok_or(Error::NotFound)?;
-            stop(operation, StopReason::Cancelled);
+            stop(operation, reason);
             release.extend(notification(state, id, &operation.phase));
         }
         Event::Prune { operations } => {

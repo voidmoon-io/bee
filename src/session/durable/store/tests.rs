@@ -760,3 +760,88 @@ fn worker_journal_is_append_only_attempt_bound_and_detects_corruption() {
     ));
     assert!(store.is_suspended());
 }
+
+#[test]
+fn archived_messages_append_with_their_commit_and_only_in_order() {
+    let dir = private_dir();
+    let mut store = Store::open(dir.path(), session()).unwrap();
+    let (mut state, _) = activate(&mut store);
+    let rows = |from: u64, n: u64| -> Vec<Append> {
+        (from..from + n)
+            .map(|position| Append {
+                position,
+                message: format!("{{\"m\":{position}}}").into_bytes(),
+            })
+            .collect()
+    };
+    let first = proposed(&mut state, Event::Checkpoint(json!({"n": 1})));
+    // A gap, a reordering, or rows past the end roll the snapshot back with them.
+    let before = store.load().unwrap();
+    for bad in [
+        rows(1, 2),
+        vec![rows(0, 2)[1].clone(), rows(0, 2)[0].clone()],
+    ] {
+        assert!(store.commit_appending(&first, &[], &bad).is_err());
+        assert_eq!(store.load().unwrap(), before);
+        assert!(store.conversation().unwrap().is_empty());
+    }
+    let id = store.commit_appending(&first, &[], &rows(0, 3)).unwrap();
+    // An acknowledged retry names exactly the rows it stored.
+    assert_eq!(
+        store.commit_appending(&first, &[], &rows(0, 3)).unwrap(),
+        id
+    );
+    assert!(matches!(
+        store.commit_appending(&first, &[], &rows(0, 4)),
+        Err(StoreError::Conflict)
+    ));
+    on_event(&mut state, Event::Committed(id)).unwrap();
+    let second = proposed(&mut state, Event::Checkpoint(json!({"n": 2})));
+    assert!(matches!(
+        store.commit_appending(&second, &[], &rows(0, 1)),
+        Err(StoreError::Conflict)
+    ));
+    let id = store.commit_appending(&second, &[], &rows(3, 2)).unwrap();
+    on_event(&mut state, Event::Committed(id)).unwrap();
+    drop(store);
+    let mut store = Store::open(dir.path(), session()).unwrap();
+    let stored = store.conversation().unwrap();
+    assert_eq!(
+        stored,
+        rows(0, 5)
+            .into_iter()
+            .map(|a| a.message)
+            .collect::<Vec<_>>()
+    );
+    drop(store);
+    let db = Connection::open(dir.path().join("session.sqlite3")).unwrap();
+    db.execute(
+        "UPDATE conversation SET message=x'7b7d' WHERE position=2",
+        [],
+    )
+    .unwrap();
+    drop(db);
+    let mut store = Store::open(dir.path(), session()).unwrap();
+    assert!(matches!(store.conversation(), Err(StoreError::Corrupt)));
+}
+
+#[test]
+fn a_version_5_store_gains_the_conversation_table_on_open() {
+    let dir = private_dir();
+    let mut store = Store::open(dir.path(), session()).unwrap();
+    store.admit("kept", &json!("saved")).unwrap();
+    drop(store);
+    let db = Connection::open(dir.path().join("session.sqlite3")).unwrap();
+    db.execute_batch("DROP TABLE conversation; PRAGMA user_version=5;")
+        .unwrap();
+    drop(db);
+    let mut store = Store::open(dir.path(), session()).unwrap();
+    assert!(store.conversation().unwrap().is_empty());
+    assert_eq!(store.submissions(0, 100).unwrap().len(), 1);
+    drop(store);
+    let db = Connection::open(dir.path().join("session.sqlite3")).unwrap();
+    let version: i64 = db
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, STORE_VERSION);
+}

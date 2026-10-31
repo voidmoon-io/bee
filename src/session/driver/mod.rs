@@ -1,6 +1,7 @@
 //! Opt-in shared durable conversation driver. SQLite and the core have one serialized owner.
 //! UI callbacks are observations of committed state; admission IDs survive process restarts.
 mod budget;
+mod conversation;
 mod execution;
 mod executor;
 pub mod journal;
@@ -120,13 +121,18 @@ impl Session {
         observer: Option<Arc<dyn Observer>>,
     ) -> Result<Arc<Self>, DriverError> {
         let evidence = EvidenceStore::for_session(path.join("evidence"), &id)?;
-        let (storage, snapshot, activation, inbox) =
+        let (storage, snapshot, activation, inbox, archived) =
             storage::Storage::open(path, id, observer).await?;
         let mut journal: Option<Journal> = snapshot
             .driver()
             .cloned()
             .map(serde_json::from_value)
             .transpose()?;
+        match &mut journal {
+            Some(journal) => journal.conversation.restore(archived)?,
+            None if !archived.is_empty() => return Err(core::Error::InvalidSnapshot.into()),
+            None => {}
+        }
         if let Some(journal) = &journal {
             journal.validate(&snapshot, &inbox)?;
         } else if !snapshot.operations().is_empty() {
@@ -408,13 +414,31 @@ impl Driver {
         event: Event,
         retire: Vec<String>,
     ) -> Result<Vec<Effect>, DriverError> {
+        // An over-long tail moves to the conversation table with this commit, or not at all.
+        let archival = match &mut self.journal {
+            Some(journal) => journal.conversation.archive()?,
+            None => None,
+        };
+        let result = self.commit_event(event, retire, archival.as_ref()).await;
+        if let (Err(_), Some(archival)) = (&result, &archival) {
+            self.journal_mut().conversation.unarchive(archival);
+        }
+        result
+    }
+    async fn commit_event(
+        &mut self,
+        event: Event,
+        retire: Vec<String>,
+        archival: Option<&conversation::Archival>,
+    ) -> Result<Vec<Effect>, DriverError> {
         let effects = if let Some(journal) = &self.journal {
             core::on_event_with_checkpoint(&mut self.state, event, serde_json::to_value(journal)?)?
         } else {
             on_event(&mut self.state, event)?
         };
         if let [Effect::Persist(commit)] = effects.as_slice() {
-            match self.storage.commit(*commit.clone(), retire).await {
+            let appends = archival.map(|a| a.appends.clone()).unwrap_or_default();
+            match self.storage.commit(*commit.clone(), retire, appends).await {
                 Ok(id) => Ok(on_event(&mut self.state, Event::Committed(id))?),
                 Err(error) => {
                     on_event(&mut self.state, Event::CommitFailed(commit.id.clone()))?;
@@ -422,12 +446,14 @@ impl Driver {
                 }
             }
         } else {
+            debug_assert!(archival.is_none(), "an archival needs a commit");
             Ok(effects)
         }
     }
     async fn save(&mut self) -> Result<(), DriverError> {
-        let value = serde_json::to_value(self.journal())?;
-        self.apply(Event::Checkpoint(value)).await?;
+        // The checkpoint commit carries the serialized journal; this payload is replaced.
+        self.apply(Event::Checkpoint(serde_json::Value::Null))
+            .await?;
         Ok(())
     }
     async fn admit(&mut self, id: String, input: Input) -> Result<Submission, DriverError> {
@@ -476,10 +502,7 @@ impl Driver {
                 version: 2,
                 compatibility: self.compatibility.clone(),
                 runtime: runtime.clone(),
-                conversation: Conversation {
-                    system: system.into(),
-                    messages: vec![],
-                },
+                conversation: conversation::StoredConversation::new(system.into()),
                 next_operation: 1,
                 next_wake_generation: 1,
                 observed_ms: now_ms(),
@@ -517,6 +540,15 @@ impl Driver {
             let text =
                 text.ok_or_else(|| DriverError::Refused("resume request not found".into()))?;
             self.prune().await?;
+            let bytes = self.journal().conversation.total_bytes()?;
+            if bytes >= self.retention.conversation_bytes {
+                return Err(DriverError::Refused(format!(
+                    "this session's conversation is full ({} of {} MiB); it takes no new \
+                     submissions, so continue in a new session",
+                    bytes / (1024 * 1024),
+                    self.retention.conversation_bytes / (1024 * 1024)
+                )));
+            }
             let started_ms = self.time();
             self.admit(
                 request.into(),

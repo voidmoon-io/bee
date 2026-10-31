@@ -262,9 +262,26 @@ completed reports, original limits/deadlines, charged provider calls, known usag
 audit events, and elapsed call times. Its checkpoint is bounded at 16 MiB within
 the store's existing limits.
 
+The checkpoint carries only the conversation's tail. Once the tail holds 64
+messages or 256 KiB, the next commit moves it to the store's append-only
+`conversation` table (store version 6; a version-5 store gains the table when it
+is opened) in the same transaction, so a commit never rewrites the whole history
+and a crash keeps either both the archive and its checkpoint or neither. Rows must
+continue the table exactly; each carries its digest, and reopen refuses a session
+whose row count differs from the checkpoint's `archived` count. Journals written
+before version 6 have no `archived` and load with the whole conversation as tail.
+The conversation is never compacted: every request still sends all of it, and
+context compaction (025) is not wired into durable sessions, because its summaries
+call the model and its state would need its own durable recording. Instead, a
+session whose conversation reaches 64 MiB (`Retention::conversation_bytes`) takes
+no new submission and says so; resuming or replaying admitted ones still works.
+A provider whose context window is smaller fails the request first, ending that
+submission as `Terminated`.
+
 Before admitting a new submission, the driver prunes once live operations,
-finished reports, or live admissions reach 768, or the journal reaches 12 MiB
-(`Retention`). It keeps the newest 256 finished reports. An older report is pruned
+finished reports, or live admissions reach 768, or the journal reaches 4 MiB
+(`Retention`). It keeps the newest 256 finished reports, as many as fit in half
+that budget: a report carries its submission's transcript, so bulky ones go sooner. An older report is pruned
 only if every operation it charged is `Completed` or `Stopped`; a submission with
 any unresolved, live, or undelivered operation keeps its report and operations.
 One commit then removes the reports from the journal, applies core `Prune` to the
@@ -274,8 +291,7 @@ journals of pruned operations. Receipt files are never deleted. The core refuses
 to prune anything not `Completed` or `Stopped`, keeps entry sequences counting
 (`sequence`), and refuses resubmission of any absent ID below `horizon`. Snapshot
 schema 6 adds these counters; schema-5 snapshots load with them derived. A pruned
-request is refused (`Retired`) instead of replayed; its saved report is gone. The
-conversation itself is not pruned, so it still bounds a session's total length.
+request is refused (`Retired`) instead of replayed; its saved report is gone.
 Store failures stop progress and require reopen; an interrupted in-memory driver
 cannot continue from an uncertain journal. A capacity limit or a refusal (hook,
 response bound) would recur on every resume, so it ends the submission through the

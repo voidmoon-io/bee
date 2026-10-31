@@ -9,10 +9,14 @@ use std::collections::BTreeSet;
 pub struct Retention {
     /// Prune once operations, finished reports, or live admissions reach this many.
     pub trigger: usize,
-    /// The newest finished reports kept for replay after pruning.
+    /// The newest finished reports kept for replay after pruning, as many as fit in half of
+    /// `journal_bytes`.
     pub keep: usize,
     /// Prune once the serialized journal reaches this many bytes.
     pub journal_bytes: usize,
+    /// Take no new submission once the whole conversation reaches this many bytes. Pruning never
+    /// shortens the conversation, so this is where a session ends.
+    pub conversation_bytes: u64,
 }
 
 impl Default for Retention {
@@ -20,7 +24,9 @@ impl Default for Retention {
         Self {
             trigger: 768,
             keep: 256,
-            journal_bytes: 12 * 1024 * 1024,
+            // Every commit rewrites the journal; finished reports are most of it.
+            journal_bytes: 4 * 1024 * 1024,
+            conversation_bytes: super::conversation::MAX_CONVERSATION_BYTES,
         }
     }
 }
@@ -53,7 +59,19 @@ impl Driver {
             order.push((admitted(id)?, id.clone()));
         }
         order.sort();
-        let old = order.len().saturating_sub(retention.keep);
+        // Keep the newest reports, but only as many as fit in half the journal budget: a report
+        // holds its submission's whole transcript, so a few bulky ones can fill the journal alone.
+        let mut kept_bytes = 0_usize;
+        let mut kept = 0;
+        for (_, id) in order.iter().rev() {
+            kept_bytes =
+                kept_bytes.saturating_add(serde_json::to_vec(&journal.finished[id])?.len());
+            if kept >= retention.keep || kept_bytes > retention.journal_bytes / 2 {
+                break;
+            }
+            kept += 1;
+        }
+        let old = order.len() - kept;
         let mut retire = Vec::new();
         let mut kept_ops = BTreeSet::new();
         for (index, (_, id)) in order.iter().enumerate() {
@@ -101,7 +119,7 @@ impl Driver {
             self.journal_mut().finished.remove(id);
         }
         let event = if operations.is_empty() {
-            Event::Checkpoint(serde_json::to_value(self.journal())?)
+            Event::Checkpoint(serde_json::Value::Null)
         } else {
             Event::Prune { operations }
         };

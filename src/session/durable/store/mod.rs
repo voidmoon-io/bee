@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use std::path::Path;
 
 const APPLICATION_ID: i64 = 0x42454553;
-const STORE_VERSION: i64 = 5;
+const STORE_VERSION: i64 = 6;
 const MAX_SNAPSHOT_BYTES: usize = 256 * 1024 * 1024;
 const MAX_SUBMISSIONS: i64 = 1024;
 /// Pruned admissions keep their request ID and digest so a repeat is refused, never rerun.
@@ -34,6 +34,20 @@ CREATE TABLE submissions (
     input BLOB NOT NULL, digest TEXT NOT NULL
 ) STRICT;
 CREATE TABLE workers (operation INTEGER PRIMARY KEY CHECK(operation>0), payload BLOB NOT NULL, digest TEXT NOT NULL) STRICT;";
+/// Version 6: archived conversation messages, appended in the commit that archives them.
+const SCHEMA_V6: &str = "CREATE TABLE conversation (
+    position INTEGER PRIMARY KEY CHECK(position>=0), message BLOB NOT NULL, digest TEXT NOT NULL
+) STRICT;";
+/// One archived message is at most what a whole driver journal could hold before version 6.
+const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_MESSAGES: i64 = 1 << 20;
+
+/// An archived conversation message at its position.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Append {
+    pub position: u64,
+    pub message: Vec<u8>,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -112,7 +126,9 @@ impl Store {
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         let app: i64 = conn.query_row("PRAGMA application_id", [], |r| r.get(0))?;
         let fresh = app == 0 && version == 0;
-        if (!fresh && (app != APPLICATION_ID || version != STORE_VERSION))
+        // Version 5 lacks only the conversation table; it is added when this open claims the store.
+        let migrate = app == APPLICATION_ID && version == 5;
+        if (!fresh && !migrate && (app != APPLICATION_ID || version != STORE_VERSION))
             || (fresh
                 && conn.query_row("SELECT count(*) FROM sqlite_schema", [], |r| {
                     r.get::<_, i64>(0)
@@ -132,6 +148,7 @@ impl Store {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if fresh {
                 tx.execute_batch(SCHEMA_V1)?;
+                tx.execute_batch(SCHEMA_V6)?;
                 tx.execute(
                     "INSERT INTO session VALUES(1, ?1, 0, ?2, ?3)",
                     params![
@@ -153,6 +170,10 @@ impl Store {
                 }
                 // Validate before claiming this activation; unsupported/corrupt snapshots never advance.
                 read_snapshot(&tx, &session)?;
+                if migrate {
+                    tx.execute_batch(SCHEMA_V6)?;
+                    tx.pragma_update(None, "user_version", STORE_VERSION)?;
+                }
                 tx.execute(
                     "UPDATE session SET owner=?1 WHERE singleton=1",
                     [activation.0.to_string()],
@@ -209,7 +230,7 @@ impl Store {
     /// Stores the exact candidate atomically. On error the host must send CommitFailed
     /// to the core; it must never release the candidate's pending effects.
     pub fn commit(&mut self, commit: &Commit) -> Result<CommitId, StoreError> {
-        let result = self.commit_inner(commit, &[]);
+        let result = self.commit_inner(commit, &[], &[]);
         self.finish(result)
     }
 
@@ -221,11 +242,55 @@ impl Store {
         commit: &Commit,
         retire: &[String],
     ) -> Result<CommitId, StoreError> {
-        let result = self.commit_inner(commit, retire);
+        let result = self.commit_inner(commit, retire, &[]);
         self.finish(result)
     }
 
-    fn commit_inner(&mut self, commit: &Commit, retire: &[String]) -> Result<CommitId, StoreError> {
+    /// Commit and append archived conversation messages, atomically. `appends` must continue the
+    /// stored conversation exactly; an acknowledged retry must name the rows it already stored.
+    pub fn commit_appending(
+        &mut self,
+        commit: &Commit,
+        retire: &[String],
+        appends: &[Append],
+    ) -> Result<CommitId, StoreError> {
+        let result = self.commit_inner(commit, retire, appends);
+        self.finish(result)
+    }
+
+    /// Every archived message, in order. Bounded by the append limits.
+    pub fn conversation(&mut self) -> Result<Vec<Vec<u8>>, StoreError> {
+        let result = (|| {
+            self.check()?;
+            let mut statement = self
+                .conn
+                .prepare("SELECT position, message, digest FROM conversation ORDER BY position")?;
+            let mut rows = statement.query([])?;
+            let mut messages = Vec::new();
+            while let Some(row) = rows.next()? {
+                let position: i64 = row.get(0)?;
+                let message: Vec<u8> = row.get(1)?;
+                let digest: String = row.get(2)?;
+                if usize::try_from(position).ok() != Some(messages.len())
+                    || messages.len() as i64 >= MAX_MESSAGES
+                    || message.len() > MAX_MESSAGE_BYTES
+                    || format!("{:x}", Sha256::digest(&message)) != digest
+                {
+                    return Err(StoreError::Corrupt);
+                }
+                messages.push(message);
+            }
+            Ok(messages)
+        })();
+        self.finish(result)
+    }
+
+    fn commit_inner(
+        &mut self,
+        commit: &Commit,
+        retire: &[String],
+        appends: &[Append],
+    ) -> Result<CommitId, StoreError> {
         self.check()?;
         if commit.id.session != self.session || commit.snapshot.session != self.session {
             return Err(StoreError::WrongSession);
@@ -245,6 +310,13 @@ impl Store {
         if bytes.len() > MAX_SNAPSHOT_BYTES {
             return Err(StoreError::Limit);
         }
+        if appends.iter().any(|a| a.message.len() > MAX_MESSAGE_BYTES)
+            || appends
+                .windows(2)
+                .any(|w| w[0].position.checked_add(1) != Some(w[1].position))
+        {
+            return Err(StoreError::InvalidInput);
+        }
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -260,6 +332,18 @@ impl Store {
             if previous != bytes {
                 return Err(StoreError::Conflict);
             }
+            for append in appends {
+                let stored: Option<Vec<u8>> = tx
+                    .query_row(
+                        "SELECT message FROM conversation WHERE position=?1",
+                        [i64::try_from(append.position).map_err(|_| StoreError::Limit)?],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                if stored.as_ref() != Some(&append.message) {
+                    return Err(StoreError::Conflict);
+                }
+            }
         } else {
             if u64::try_from(current).ok() != Some(commit.expected_revision) {
                 return Err(StoreError::Stale);
@@ -268,6 +352,33 @@ impl Store {
                 "UPDATE session SET revision=?1, snapshot=?2 WHERE singleton=1",
                 params![revision, bytes],
             )?;
+            if let Some(first) = appends.first() {
+                let next: i64 = tx.query_row(
+                    "SELECT coalesce(max(position)+1, 0) FROM conversation",
+                    [],
+                    |r| r.get(0),
+                )?;
+                let last = i64::try_from(first.position)
+                    .ok()
+                    .and_then(|p| p.checked_add(appends.len() as i64))
+                    .ok_or(StoreError::Limit)?;
+                if i64::try_from(first.position).ok() != Some(next) {
+                    return Err(StoreError::Conflict);
+                }
+                if last > MAX_MESSAGES {
+                    return Err(StoreError::Limit);
+                }
+                for append in appends {
+                    tx.execute(
+                        "INSERT INTO conversation VALUES(?1, ?2, ?3)",
+                        params![
+                            append.position as i64,
+                            append.message,
+                            format!("{:x}", Sha256::digest(&append.message))
+                        ],
+                    )?;
+                }
+            }
             for request_id in retire {
                 let retired = tx.execute(
                     "UPDATE submissions SET input=x'' WHERE request_id=?1 AND length(input)>0",

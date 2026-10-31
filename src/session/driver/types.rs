@@ -1,5 +1,5 @@
 use super::executor::Executor;
-use crate::provider::{Conversation, Usage};
+use crate::provider::Usage;
 use crate::session::durable::OperationId;
 use crate::transcript::{EpisodeStatus, TranscriptTurn};
 use serde::{Deserialize, Serialize};
@@ -85,7 +85,8 @@ pub(super) struct Journal {
     pub version: u32,
     pub compatibility: String,
     pub runtime: String,
-    pub conversation: Conversation,
+    /// Only its bounded tail is serialized; older messages live in the store's conversation table.
+    pub conversation: super::conversation::StoredConversation,
     pub next_operation: u64,
     pub next_wake_generation: u64,
     pub observed_ms: u64,
@@ -288,10 +289,7 @@ mod tests {
             version: 2,
             compatibility: String::new(),
             runtime: String::new(),
-            conversation: Conversation {
-                system: String::new(),
-                messages: vec![],
-            },
+            conversation: super::super::conversation::StoredConversation::new(String::new()),
             next_operation: 1,
             next_wake_generation: 1,
             observed_ms: 0,

@@ -171,10 +171,16 @@ async fn persistence_failure_reports_the_executed_effect_without_a_receipt() {
             &Sandbox::host(Vec::new()),
         )
         .await;
-    assert!(result.is_error);
+    // The call succeeded: reporting it as failed would invite a retry of the effect.
+    assert!(!result.is_error, "{}", result.content);
     assert!(result.receipt_id.is_none());
-    assert!(result.content.contains("effect happened"));
-    assert!(result.content.contains("do not automatically retry"));
+    assert!(
+        result.content.ends_with("effect happened"),
+        "{}",
+        result.content
+    );
+    assert!(result.content.contains("cannot be cited"));
+    assert!(result.content.contains("do not retry"));
 }
 
 #[test]

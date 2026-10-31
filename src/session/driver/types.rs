@@ -89,7 +89,6 @@ pub(super) struct Journal {
     pub next_operation: u64,
     pub next_wake_generation: u64,
     pub observed_ms: u64,
-    pub streams: BTreeMap<String, Vec<String>>,
     pub active: Option<Active>,
     pub finished: BTreeMap<String, Report>,
 }

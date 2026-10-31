@@ -653,15 +653,19 @@ impl ToolRegistry {
             let call = call.clone();
             let observed = result.clone();
             let saved = tokio::task::spawn_blocking(move || store.record(&call, &observed)).await;
-            let mut result = result;
-            match saved {
+            let reason = match saved {
                 Ok(Ok(id)) => return result.with_receipt(id),
-                error => {
-                    // The effect may already have happened. Never imply it is safe to replay.
-                    result.is_error = true;
-                    result.content = format!("Evidence persistence failed after tool execution; do not automatically retry the effect: {error:?}\n{}", result.content);
-                }
-            }
+                Ok(Err(error)) => error.to_string(),
+                Err(error) => error.to_string(),
+            };
+            // The call ran and its outcome stands: marking it failed would invite a retry of an
+            // effect that already happened. It only lacks a receipt to be cited by.
+            let mut result = result;
+            result.content = format!(
+                "[bee] no evidence receipt was recorded for this result ({reason}); it cannot be \
+                 cited as evidence. The call itself ran: do not retry it on this account.\n{}",
+                result.content
+            );
             return result;
         }
         result

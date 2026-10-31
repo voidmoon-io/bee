@@ -163,6 +163,12 @@ pub fn exit_code(status: &EpisodeStatus, finish_offered: bool) -> u8 {
     }
 }
 
+/// The exit code for a durable run. Durable sessions cannot offer `finish` yet, so a run that
+/// reached its call budget or deadline had not finished its task: it is incomplete, never success.
+pub fn durable_exit_code(status: &EpisodeStatus) -> u8 {
+    exit_code(status, true)
+}
+
 fn ms_since(t: Instant) -> u64 {
     t.elapsed().as_millis() as u64
 }

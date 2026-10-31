@@ -285,6 +285,8 @@ fn transcript() -> EpisodeTranscript {
         finish_offered: false,
         compactions: Vec::new(),
         summary_usage: None,
+        #[cfg(feature = "durable-sessions")]
+        durable_budget: None,
     }
 }
 

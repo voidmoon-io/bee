@@ -27,6 +27,18 @@ struct Screen {
 
 const SCREENS: &[Screen] = &[
     Screen {
+        name: "welcome_narrow",
+        cols: 80,
+        rows: 24,
+        build: welcome,
+    },
+    Screen {
+        name: "welcome_wide",
+        cols: 120,
+        rows: 32,
+        build: welcome,
+    },
+    Screen {
         name: "session_wide",
         cols: 120,
         rows: 32,
@@ -57,6 +69,16 @@ const SCREENS: &[Screen] = &[
         build: takeover,
     },
 ];
+
+fn welcome() -> App {
+    let mut app = App::new(80, 24).with_model("claude-opus-4-8");
+    app.chat.push(ChatMessage::mascot());
+    app.chat.push(ChatMessage::text(
+        Role::System,
+        "interactive session — claude-opus-4-8 — type a message, ? for help, q to quit",
+    ));
+    app
+}
 
 /// A mid-session two-pane frame: conversation with tool traffic, an inline chart, live panels, a
 /// half-typed reply, and a streaming turn so the header's working indicator shows.

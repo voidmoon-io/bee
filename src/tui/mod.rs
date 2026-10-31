@@ -34,7 +34,6 @@ use futures_util::StreamExt;
 use crate::metrics::Recorder;
 use crate::operator::{ConsentAsk, ConsentReceiver, Decision};
 use crate::provider::{Conversation, Model};
-use crate::render_spec::RenderSpec;
 use crate::repl::{effective_system_prompt, run_exchange, ReplConfig, SteeringQueue};
 use crate::sandbox::Sandbox;
 use crate::tools::ToolRegistry;
@@ -88,15 +87,9 @@ pub async fn run(
     app.chrome_cues
         .extend([effects::Chrome::Header, effects::Chrome::Footer]);
 
-    // Greeting, mirroring the inline REPL's info banner — plus the resting-pose mascot when enabled,
-    // which also exercises the sprite→Buffer rasterizer (T008) on the full-screen path.
+    // The host mascot has its own visible-only idle animation in the chat flow.
     if config.mascot {
-        app.chat.push(ChatMessage::widget(RenderSpec::Sprite {
-            spec: crate::viz::bee::sprite(),
-        }));
-        // It evolves out of block glyphs rather than popping in (US5 §2). Gated on the existing
-        // `BEE_MASCOT` opt-in, because a session that asked for no mascot gets no mascot animation.
-        app.chrome_cues.push(effects::Chrome::Mascot);
+        app.chat.push(ChatMessage::mascot());
     }
     app.chat.push(ChatMessage::text(
         Role::System,
@@ -205,7 +198,7 @@ pub async fn run(
 ///
 /// The three states, in the order the spec fixes:
 ///
-/// 1. **Motion** — effects are running: ~60fps, because that is what an animation costs.
+/// 1. **Motion** — effects run at ~60fps; a visible mascot wakes only when its pose changes.
 /// 2. **Countdown** — no effects but an overlay is up: 1Hz, enough to tick the dismiss countdown and
 ///    fire the TTL. A 120s overlay must cost ~120 wakeups, not ~7200.
 /// 3. **Idle** — `None`: fully event-driven, zero periodic redraws (SC-003).
@@ -213,7 +206,7 @@ pub async fn run(
 /// The panel-TTL wake from 008 sits below all three: it is not a render state, just the coarse poll
 /// that expires timed panels, and it exists only while a panel actually carries a TTL.
 fn tick_interval(app: &App) -> Option<Duration> {
-    if app.effects.is_running() {
+    let ordinary = if app.effects.is_running() {
         Some(Duration::from_millis(16))
     } else if app.overlay_active() {
         Some(Duration::from_secs(1))
@@ -221,7 +214,8 @@ fn tick_interval(app: &App) -> Option<Duration> {
         Some(Duration::from_millis(250))
     } else {
         None
-    }
+    };
+    ordinary.into_iter().chain(app.mascot_tick()).min()
 }
 
 /// Act on the side-effect intents the (pure) reducer surfaced: copy a yanked message via OSC 52, and
@@ -261,6 +255,7 @@ async fn run_turn(
     recorder: Option<&Recorder>,
     consent: &mut Option<ConsentReceiver>,
 ) -> io::Result<()> {
+    update(app, Message::ExchangeStarted);
     // A cancelled turn leaves the conversation as it found it, so no half-finished tool call reaches
     // the next request.
     let before = conversation.messages.len();
@@ -321,13 +316,14 @@ async fn run_turn(
 
             tokio::select! {
                 // Guarded so a completed future is never polled again.
-                _ = &mut exchange, if !turn_done => {
+                result = &mut exchange, if !turn_done => {
                     turn_done = true;
                     // The exchange emits its trailing events (footer/TurnDone) before returning; fold
                     // them in, redraw once more via the loop head, then finish.
                     while let Ok(ev) = rx.try_recv() {
                         update(app, Message::session(ev));
                     }
+                    update(app, Message::ExchangeFinished(result.outcome));
                 }
                 Some(ev) = rx.recv() => update(app, Message::session(ev)),
                 Some(ask) = next_ask(consent) => {
@@ -390,7 +386,7 @@ async fn run_turn(
     conversation.messages.truncate(before);
     update(
         app,
-        Message::session(crate::tui::events::SessionEvent::TurnDone),
+        Message::ExchangeFinished(crate::repl::ExchangeOutcome::Terminated("cancelled".into())),
     );
     app.system_line("turn cancelled — it was not added to the conversation");
     Ok(())
@@ -587,6 +583,41 @@ mod scheduler_tests {
     }
 
     #[test]
+    fn completed_reactions_stop_ticking() {
+        let mut app = App::new(80, 24);
+        app.mascot_visible = true;
+        for mood in [
+            crate::viz::bee::Mood::Finished,
+            crate::viz::bee::Mood::Concerned,
+        ] {
+            app.mascot_mood = mood;
+            app.mascot_elapsed = Duration::ZERO;
+            assert!(tick_interval(&app).is_some());
+            app.mascot_elapsed = Duration::from_secs(2);
+            assert_eq!(tick_interval(&app), None);
+        }
+    }
+
+    #[test]
+    fn mascot_waits_for_pose_changes_without_delaying_panel_expiry() {
+        let mut app = App::new(80, 24);
+        app.mascot_visible = true;
+        assert_eq!(tick_interval(&app), Some(Duration::from_millis(120)));
+        app.mascot_elapsed = Duration::from_millis(600);
+        assert_eq!(tick_interval(&app), Some(Duration::from_millis(4200)));
+        app.visual.animations = false;
+        assert_eq!(tick_interval(&app), None);
+        app.visual.animations = true;
+        app.panels.apply(crate::render_spec::PanelOp::Upsert {
+            id: "flash".into(),
+            spec: RenderSpec::Separator,
+            ttl_ms: Some(1000),
+            effect: None,
+        });
+        assert_eq!(tick_interval(&app), Some(Duration::from_millis(250)));
+    }
+
+    #[test]
     fn an_idle_session_never_wakes_up_on_its_own() {
         // SC-003: no effects, no overlay, no expiring panel — nothing to redraw for.
         let mut app = App::new(120, 24);
@@ -598,7 +629,12 @@ mod scheduler_tests {
     #[test]
     fn running_effects_put_the_loop_in_its_60fps_state() {
         let mut app = App::new(120, 24);
-        let ctx = ResolveCtx::agent(app.visual, Rect::new(0, 0, 20, 5));
+        let ctx = ResolveCtx {
+            visual: app.visual,
+            area: Rect::new(0, 0, 20, 5),
+            origin: Origin::Agent,
+            color: true,
+        };
         assert!(effects::apply(
             &mut app.effects,
             Some("m"),

@@ -30,6 +30,8 @@ pub enum Body {
     /// `Text` because guessing is unsafe: a tool result containing `**` is data, not emphasis (010).
     Markdown(String),
     Widget(Box<RenderSpec>, Option<EffectSpec>),
+    /// The host mascot, animated only while visible.
+    Mascot,
 }
 
 /// One entry in the transcript view.
@@ -52,6 +54,15 @@ pub struct ChatMessage {
 }
 
 impl ChatMessage {
+    pub fn mascot() -> Self {
+        Self {
+            role: Role::System,
+            body: Body::Mascot,
+            done: true,
+            cache: None,
+        }
+    }
+
     /// A prose message. Assistant prose is born open (it streams); everything else is complete the
     /// moment it exists.
     pub fn text(role: Role, s: impl Into<String>) -> Self {
@@ -143,7 +154,7 @@ impl ChatMessage {
             }
             // A widget has no prose to append to, and a markdown block arrives whole — appending to
             // one mid-render would re-parse a document that was never partial.
-            Body::Widget(..) | Body::Markdown(_) => false,
+            Body::Widget(..) | Body::Markdown(_) | Body::Mascot => false,
         }
     }
 

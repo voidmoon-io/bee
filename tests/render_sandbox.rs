@@ -198,7 +198,7 @@ async fn bee_functions_are_callable() {
     assert!(!s.is_error, "bee_sprite: {}", s.content);
     match s.render_spec {
         Some(RenderSpec::Sprite { spec }) => {
-            assert_eq!((spec.width, spec.height), (16, 16));
+            assert_eq!((spec.width, spec.height), (24, 24));
             assert!(!spec.is_fully_transparent(), "the bee has pixels");
         }
         other => panic!("expected Sprite, got {other:?}"),
@@ -206,7 +206,7 @@ async fn bee_functions_are_callable() {
     let a = run("render(bee_animation());").await;
     assert!(!a.is_error, "bee_animation: {}", a.content);
     match a.render_spec {
-        Some(RenderSpec::Animation { spec }) => assert_eq!(spec.frames.len(), 3),
+        Some(RenderSpec::Animation { spec }) => assert_eq!(spec.frames.len(), 6),
         other => panic!("expected Animation, got {other:?}"),
     }
 }

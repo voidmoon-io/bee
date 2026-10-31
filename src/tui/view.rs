@@ -32,6 +32,7 @@ pub fn view(app: &mut App, frame: &mut Frame<'_>) {
     let area = frame.area();
 
     if app.layout_mode == LayoutMode::TooSmall {
+        app.mascot_visible = false;
         too_small(frame, area);
         return;
     }
@@ -207,22 +208,38 @@ fn render_header(app: &App, frame: &mut Frame<'_>, area: Rect) {
             "⬢⬢⬢"
         };
         right.push(Span::styled(
-            format!("{cells} working "),
+            format!(
+                "{cells} {} ",
+                if app.mascot_mood == crate::viz::bee::Mood::Idle {
+                    "working"
+                } else {
+                    app.mascot_mood.label()
+                }
+            ),
             role_style(ThemeRole::Info),
         ));
     }
-    // Left context, right status, gap in between — one line, no border, position is the hierarchy.
-    let used: usize = left
-        .iter()
-        .chain(right.iter())
-        .map(|s| s.content.chars().count())
-        .sum();
-    let mut spans = left;
-    spans.push(Span::raw(
-        " ".repeat((area.width as usize).saturating_sub(used)),
-    ));
-    spans.extend(right);
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    if app.turn == TurnState::Idle && app.mascot_mood != crate::viz::bee::Mood::Idle {
+        let role = if app.mascot_mood == crate::viz::bee::Mood::Concerned {
+            ThemeRole::Error
+        } else {
+            ThemeRole::Info
+        };
+        right.push(Span::styled(
+            format!("{} ", app.mascot_mood.label()),
+            role_style(role),
+        ));
+    }
+    // Reserve the status first so a long model name cannot hide it on narrow terminals.
+    if !right.is_empty() {
+        right.insert(0, Span::raw(" "));
+    }
+    let right = Line::from(right);
+    let status_width = right.width().min(usize::from(area.width)) as u16;
+    let [context, status] =
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(status_width)]).areas(area);
+    frame.render_widget(Paragraph::new(Line::from(left)), context);
+    frame.render_widget(Paragraph::new(right), status);
 }
 
 fn render_footer(app: &App, frame: &mut Frame<'_>, area: Rect) {
@@ -337,6 +354,7 @@ enum Item<'a> {
     Cached(&'a Line<'static>),
     /// An inline widget, the number of rows it occupies, and its optional effect.
     Widget(&'a RenderSpec, u16, Option<&'a EffectSpec>),
+    Mascot,
 }
 
 impl Item<'_> {
@@ -344,6 +362,10 @@ impl Item<'_> {
         match self {
             Item::Line(_) | Item::Cached(_) => 1,
             Item::Widget(_, h, _) => *h,
+            Item::Mascot => crate::viz::bee::idle_frame(std::time::Duration::ZERO)
+                .0
+                .height
+                .div_ceil(2),
         }
     }
 }
@@ -378,6 +400,15 @@ fn render_chat(app: &mut App, frame: &mut Frame<'_>, area: Rect) {
     for msg in app.chat.iter_mut() {
         msg.rendered_markdown(width);
     }
+    let animate_mascot = app.mascot_motion_allowed();
+    let mascot_elapsed =
+        app.mascot_elapsed
+            .saturating_add(if app.mascot_visible && animate_mascot {
+                app.dt
+            } else {
+                std::time::Duration::ZERO
+            });
+    let mut mascot_visible = false;
     let items = chat_items(app, width);
     let total: usize = items.iter().map(|i| usize::from(i.height())).sum();
     let height = usize::from(area.height);
@@ -418,6 +449,23 @@ fn render_chat(app: &mut App, frame: &mut Frame<'_>, area: Rect) {
                         );
                     }
                 }
+                Item::Mascot => {
+                    mascot_visible = avail > 0 && animate_mascot;
+                    let pose =
+                        crate::viz::bee::frame(app.mascot_mood, mascot_elapsed, animate_mascot)
+                            .0
+                            .clone();
+                    blit_widget(
+                        frame,
+                        &RenderSpec::Sprite { spec: pose },
+                        item.height(),
+                        width,
+                        area,
+                        draw_y,
+                        skip.min(u16::MAX as usize) as u16,
+                        avail,
+                    );
+                }
                 Item::Widget(spec, wh, effect) => {
                     let widget_rect = Rect::new(area.x, draw_y, width.min(area.width), avail);
                     blit_widget(
@@ -437,6 +485,11 @@ fn render_chat(app: &mut App, frame: &mut Frame<'_>, area: Rect) {
             }
         }
         y = end;
+    }
+
+    app.mascot_visible = mascot_visible;
+    if mascot_visible {
+        app.mascot_elapsed = mascot_elapsed;
     }
 
     // One-shot effect drain: take() each widget's EffectSpec so it fires exactly once,
@@ -569,6 +622,7 @@ fn chat_items(app: &App, width: u16) -> Vec<Item<'_>> {
                     out.push(Item::Line(line));
                 }
             }
+            Body::Mascot => out.push(Item::Mascot),
             Body::Widget(spec, effect) => {
                 let h = crate::viz::buffer_render::spec_height(spec, width)
                     .clamp(1, MAX_INLINE_WIDGET_ROWS);
@@ -874,6 +928,109 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
     use ratatui::Terminal;
+
+    #[test]
+    fn long_model_names_do_not_hide_mascot_status_on_narrow_terminals() {
+        let mut app = App::new(40, 24).with_model("provider/".repeat(12));
+        app.mascot_mood = crate::viz::bee::Mood::Concerned;
+        let screen = render(&mut app, 40, 24);
+        let header = screen.lines().next().unwrap();
+        assert!(header.contains("bee"));
+        assert!(header.contains("needs attention"));
+    }
+
+    #[test]
+    fn mascot_status_remains_visible_after_the_sprite_scrolls_away() {
+        use crate::tui::app::update;
+        use crate::tui::events::SessionEvent;
+        use crate::tui::message::Message;
+        let mut app = App::new(80, 24);
+        app.chat.push(ChatMessage::mascot());
+        app.chat
+            .push(ChatMessage::text(Role::System, "history\n".repeat(60)));
+        update(&mut app, Message::ExchangeStarted);
+        update(
+            &mut app,
+            Message::session(SessionEvent::ToolCall {
+                name: "search".into(),
+                arguments: serde_json::json!({}),
+            }),
+        );
+        assert!(render(&mut app, 80, 24)
+            .lines()
+            .next()
+            .unwrap()
+            .contains("running tool"));
+        assert_eq!(app.mascot_tick(), None);
+        update(
+            &mut app,
+            Message::session(SessionEvent::Error("provider offline".into())),
+        );
+        update(
+            &mut app,
+            Message::ExchangeFinished(crate::repl::ExchangeOutcome::ApiError("offline".into())),
+        );
+        let screen = render(&mut app, 80, 24);
+        assert!(screen.lines().next().unwrap().contains("needs attention"));
+        assert!(
+            screen.contains("error: provider offline"),
+            "the real error remains readable"
+        );
+    }
+
+    #[test]
+    fn mascot_moves_only_while_visible_and_respects_motion_off() {
+        use std::time::Duration;
+        let mut app = App::new(80, 24);
+        app.chat.push(ChatMessage::mascot());
+        let resting = render(&mut app, 80, 24);
+        assert_eq!(app.mascot_tick(), Some(Duration::from_millis(120)));
+        app.dt = Duration::from_millis(120);
+        assert_ne!(
+            render(&mut app, 80, 24),
+            resting,
+            "wings change on a real redraw"
+        );
+
+        app.help_open = true;
+        let paused = app.mascot_elapsed;
+        render(&mut app, 80, 24);
+        assert_eq!(app.mascot_elapsed, paused);
+        assert_eq!(app.mascot_tick(), None);
+        app.help_open = false;
+        app.ask_consent(vec!["allow read?".into()]);
+        render(&mut app, 80, 24);
+        assert_eq!(app.mascot_elapsed, paused);
+        assert_eq!(app.mascot_tick(), None);
+        app.close_consent();
+
+        app.chat.push(ChatMessage::text(
+            Role::System,
+            "more conversation\n".repeat(60),
+        ));
+        render(&mut app, 80, 24);
+        assert_eq!(
+            app.mascot_tick(),
+            None,
+            "offscreen bees do not wake the loop"
+        );
+        app.dt = Duration::from_secs(60);
+        render(&mut app, 80, 24);
+        assert_eq!(app.mascot_elapsed, paused);
+        app.scroll = usize::MAX;
+        render(&mut app, 80, 24);
+        assert_eq!(
+            app.mascot_elapsed, paused,
+            "returning to view does not fast-forward"
+        );
+        assert!(app.mascot_tick().is_some());
+
+        app.chat.truncate(1);
+        app.scroll = 0;
+        app.visual.animations = false;
+        assert_eq!(render(&mut app, 80, 24), resting);
+        assert_eq!(app.mascot_tick(), None);
+    }
 
     // Render the view onto a fixed-size headless backend and return its symbols as text. Symbols are
     // color-independent, so these snapshots are deterministic without touching NO_COLOR (research D12).
@@ -1319,23 +1476,26 @@ mod tests {
 
     #[test]
     fn level_none_strips_agent_effects_while_chrome_keeps_moving() {
-        // FR-006d / FR-024 / T031: the level governs the agent. Motion is a separate axis, so
-        // bee's own chrome is untouched by it.
         let visual = with_level(crate::config::VisualLevel::None);
         let area = Rect::new(0, 0, 20, 5);
         let spec = crate::tui::effects::panel_enter_spec();
+        let ctx = crate::tui::effects::ResolveCtx {
+            visual,
+            area,
+            origin: crate::tui::effects::Origin::Agent,
+            color: true,
+        };
         assert!(
-            crate::tui::effects::resolve(
-                &spec,
-                &crate::tui::effects::ResolveCtx::agent(visual, area)
-            )
-            .is_none(),
+            crate::tui::effects::resolve(&spec, &ctx).is_none(),
             "an agent effect is stripped entirely"
         );
         assert!(
             crate::tui::effects::resolve(
                 &spec,
-                &crate::tui::effects::ResolveCtx::chrome(visual, area)
+                &crate::tui::effects::ResolveCtx {
+                    origin: crate::tui::effects::Origin::Chrome,
+                    ..ctx
+                }
             )
             .is_some(),
             "chrome is bee's own UI, not the agent's"

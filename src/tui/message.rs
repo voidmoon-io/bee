@@ -29,6 +29,9 @@ pub enum Message {
     /// The conversation core spoke. Boxed: a `SessionEvent` carries a whole `ToolResult`/`RenderSpec`,
     /// which would otherwise inflate every `Message` (a bare `Tick`) to its size.
     Session(Box<SessionEvent>),
+    /// Actual exchange boundaries; busy-stop only means the provider's first event arrived.
+    ExchangeStarted,
+    ExchangeFinished(crate::repl::ExchangeOutcome),
     /// Quit the session.
     Quit,
 }

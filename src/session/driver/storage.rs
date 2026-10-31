@@ -14,7 +14,11 @@ pub(super) struct Storage {
     owner: Option<std::thread::JoinHandle<()>>,
 }
 pub(super) enum Request {
-    Commit(Box<Commit>, oneshot::Sender<Result<CommitId, DriverError>>),
+    Commit(
+        Box<Commit>,
+        Vec<String>,
+        oneshot::Sender<Result<CommitId, DriverError>>,
+    ),
     Admit(
         String,
         serde_json::Value,
@@ -66,11 +70,12 @@ impl Storage {
                 }
                 while let Some(request) = rx.blocking_recv() {
                     match request {
-                        Request::Commit(commit, reply) => {
+                        Request::Commit(commit, retire, reply) => {
                             if let Some(observer) = &observer {
                                 observer.before_commit(&commit);
                             }
-                            let result = store.commit(&commit).map_err(Into::into);
+                            let result =
+                                store.commit_retiring(&commit, &retire).map_err(Into::into);
                             if result.is_ok() {
                                 if let Some(observer) = &observer {
                                     observer.committed(&commit);
@@ -108,12 +113,17 @@ impl Storage {
             inbox,
         ))
     }
-    pub async fn commit(&self, commit: Commit) -> Result<CommitId, DriverError> {
+    /// `retire` names admissions whose reports this commit prunes; both land or neither does.
+    pub async fn commit(
+        &self,
+        commit: Commit,
+        retire: Vec<String>,
+    ) -> Result<CommitId, DriverError> {
         let (tx, rx) = oneshot::channel();
         self.tx
             .as_ref()
             .expect("live storage")
-            .send(Request::Commit(Box::new(commit), tx))
+            .send(Request::Commit(Box::new(commit), retire, tx))
             .await
             .map_err(|_| DriverError::StorageClosed)?;
         rx.await.map_err(|_| DriverError::StorageClosed)?

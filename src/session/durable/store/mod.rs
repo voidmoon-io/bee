@@ -21,6 +21,9 @@ const APPLICATION_ID: i64 = 0x42454553;
 const STORE_VERSION: i64 = 5;
 const MAX_SNAPSHOT_BYTES: usize = 256 * 1024 * 1024;
 const MAX_SUBMISSIONS: i64 = 1024;
+/// Pruned admissions keep their request ID and digest so a repeat is refused, never rerun.
+/// Once this many are retained the session refuses new admissions instead of forgetting one.
+const MAX_RETIRED: i64 = 65_536;
 const SCHEMA_V1: &str = "CREATE TABLE session (
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
     session_id TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision>=0),
@@ -52,6 +55,8 @@ pub enum StoreError {
     InvalidInput,
     #[error("session storage limit reached")]
     Limit,
+    #[error("request already finished and its record was pruned; it will not run again")]
+    Retired,
     #[error("stored session data is corrupt or inconsistent")]
     Corrupt,
     #[error("store suspended after an uncertain storage failure; drop and reopen it")]
@@ -204,11 +209,23 @@ impl Store {
     /// Stores the exact candidate atomically. On error the host must send CommitFailed
     /// to the core; it must never release the candidate's pending effects.
     pub fn commit(&mut self, commit: &Commit) -> Result<CommitId, StoreError> {
-        let result = self.commit_inner(commit);
+        let result = self.commit_inner(commit, &[]);
         self.finish(result)
     }
 
-    fn commit_inner(&mut self, commit: &Commit) -> Result<CommitId, StoreError> {
+    /// Commit a pruned snapshot and retire the admissions it no longer reports, atomically.
+    /// Retired admissions keep only their identity and digest; worker journals of pruned
+    /// operations go with them. Receipt files are never touched.
+    pub fn commit_retiring(
+        &mut self,
+        commit: &Commit,
+        retire: &[String],
+    ) -> Result<CommitId, StoreError> {
+        let result = self.commit_inner(commit, retire);
+        self.finish(result)
+    }
+
+    fn commit_inner(&mut self, commit: &Commit, retire: &[String]) -> Result<CommitId, StoreError> {
         self.check()?;
         if commit.id.session != self.session || commit.snapshot.session != self.session {
             return Err(StoreError::WrongSession);
@@ -251,6 +268,30 @@ impl Store {
                 "UPDATE session SET revision=?1, snapshot=?2 WHERE singleton=1",
                 params![revision, bytes],
             )?;
+            for request_id in retire {
+                let retired = tx.execute(
+                    "UPDATE submissions SET input=x'' WHERE request_id=?1 AND length(input)>0",
+                    [request_id],
+                )?;
+                if retired != 1 {
+                    return Err(StoreError::Conflict);
+                }
+            }
+            // Worker journals of pruned operations go with them; listed ones are kept.
+            let horizon =
+                i64::try_from(commit.snapshot.horizon().0).map_err(|_| StoreError::Limit)?;
+            let mut statement = tx.prepare("SELECT operation FROM workers WHERE operation<?1")?;
+            let workers: Vec<i64> = statement
+                .query_map([horizon], |r| r.get(0))?
+                .collect::<Result<_, _>>()?;
+            drop(statement);
+            for operation in workers {
+                let id =
+                    super::OperationId(u64::try_from(operation).map_err(|_| StoreError::Corrupt)?);
+                if commit.snapshot.operation(id).is_none() {
+                    tx.execute("DELETE FROM workers WHERE operation=?1", [operation])?;
+                }
+            }
         }
         tx.commit()?;
         self.directory.verify()?;
@@ -282,6 +323,11 @@ impl Store {
             )
             .optional()?;
         let sequence = if let Some((sequence, original, stored_digest)) = existing {
+            // A retired ID is refused whatever its input: the original carried its own admission
+            // time, so even an identical resubmission cannot match the stored digest.
+            if original.is_empty() {
+                return Err(StoreError::Retired);
+            }
             if stored_digest != format!("{:x}", Sha256::digest(&original)) {
                 return Err(StoreError::Corrupt);
             }
@@ -290,8 +336,12 @@ impl Store {
             }
             sequence
         } else {
-            let count: i64 = tx.query_row("SELECT count(*) FROM submissions", [], |r| r.get(0))?;
-            if count >= MAX_SUBMISSIONS {
+            let (live, total): (i64, i64) = tx.query_row(
+                "SELECT count(*) FILTER (WHERE length(input)>0), count(*) FROM submissions",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            if live >= MAX_SUBMISSIONS || total >= MAX_SUBMISSIONS + MAX_RETIRED {
                 return Err(StoreError::Limit);
             }
             tx.execute(
@@ -318,7 +368,7 @@ impl Store {
                 return Err(StoreError::InvalidInput);
             }
             let after = i64::try_from(after).map_err(|_| StoreError::InvalidInput)?;
-            let mut statement = self.conn.prepare("SELECT sequence, request_id, input, digest FROM submissions WHERE sequence>?1 ORDER BY sequence LIMIT ?2")?;
+            let mut statement = self.conn.prepare("SELECT sequence, request_id, input, digest FROM submissions WHERE sequence>?1 AND length(input)>0 ORDER BY sequence LIMIT ?2")?;
             let mut rows = statement.query(params![after, limit])?;
             let mut result = Vec::new();
             while let Some(row) = rows.next()? {

@@ -34,6 +34,14 @@ Adapter obligations for the next slices:
   executor is stopped, not merely unreachable. A recovered result must belong to
   the exact original attempt. Stopped attempts retain their identity; cleanup
   does not establish that their external effects never happened.
+- Cancellation and expiry never erase an unknown outcome. Cancelling an
+  `Unresolved` attempt retries cleanup (`Cancelling` carries the unresolved reason)
+  and then returns it to `Unresolved` with the same reason. An interrupted
+  (`Recovering`) attempt under `NeverReplay` or `Reconcile` likewise becomes
+  `Unresolved` once cleanup proves its executor stopped; only `RetrySafe` work
+  becomes `Stopped`. Expiry leaves `Unresolved` alone. Cancelling an attempt still
+  running in the current activation ends as `Stopped`, which already records that
+  its external outcome can be unknown.
 - Deduplicate presentation by stable session ID and entry sequence. Reopen can
   redeliver committed entries; `Replay` accepts the last consumed sequence.
 
@@ -101,9 +109,12 @@ same request ID. `Store::submissions(after_sequence, limit)` pages admissions in
 ascending order, with at most 100 per page. Admission does not yet create a task,
 consume input, or acknowledge completion; those belong to the shared session driver.
 
-Initial limits are 1024 inbox entries, 64 KiB per input, 256 MiB per serialized
-checkpoint, and SQLite's signed 64-bit revision range. No automatic pruning occurs;
-capacity exhaustion is explicit. WAL autocheckpointing and a 16 MiB retained-journal
+Limits are 1024 live inbox entries, 64 KiB per input, 256 MiB per serialized
+checkpoint, and SQLite's signed 64-bit revision range. Pruning (below) retires
+admissions: a retired row keeps only its request ID and digest, is skipped by
+`submissions`, and makes `admit` return `Retired` for that ID whatever its input.
+At most 65,536 retired rows are kept; beyond that, new admissions are refused
+with `Limit` rather than forgetting a request ID. Capacity exhaustion is explicit. WAL autocheckpointing and a 16 MiB retained-journal
 target control routine growth, but are not a total on-disk quota or a live-WAL cap.
 Retain the directory with its SQLite sidecars; copying only an active main database
 is not a backup protocol.
@@ -229,7 +240,22 @@ receive generated request IDs printed after durable admission.
 The driver persists admission, conversation, active submission, operation IDs,
 completed reports, original limits/deadlines, charged provider calls, known usage,
 audit events, and elapsed call times. Its checkpoint is bounded at 16 MiB within
-the store's existing limits. No pruning or transcript-retention policy is enabled.
+the store's existing limits.
+
+Before admitting a new submission, the driver prunes once live operations,
+finished reports, or live admissions reach 768, or the journal reaches 12 MiB
+(`Retention`). It keeps the newest 256 finished reports. An older report is pruned
+only if every operation it charged is `Completed` or `Stopped`; a submission with
+any unresolved, live, or undelivered operation keeps its report and operations.
+One commit then removes the reports from the journal, applies core `Prune` to the
+operations no remaining report charges (dropping their entries), retires those
+submissions' admissions with their steering and cancel inputs, and deletes worker
+journals of pruned operations. Receipt files are never deleted. The core refuses
+to prune anything not `Completed` or `Stopped`, keeps entry sequences counting
+(`sequence`), and refuses resubmission of any absent ID below `horizon`. Snapshot
+schema 6 adds these counters; schema-5 snapshots load with them derived. A pruned
+request is refused (`Retired`) instead of replayed; its saved report is gone. The
+conversation itself is not pruned, so it still bounds a session's total length.
 Store failures stop progress and require reopen; an interrupted in-memory driver
 cannot continue from an uncertain journal. A capacity limit or a refusal (hook,
 response bound) would recur on every resume, so it ends the submission through the

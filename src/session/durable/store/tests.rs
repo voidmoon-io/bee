@@ -157,6 +157,81 @@ fn admission_is_idempotent_canonical_bounded_and_paged() {
 }
 
 #[test]
+fn pruning_retires_admissions_atomically_and_refuses_them_forever() {
+    let dir = private_dir();
+    let mut store = Store::open(dir.path(), session()).unwrap();
+    let (mut state, _) = activate(&mut store);
+    let old = store.admit("old", &json!("first")).unwrap();
+    let kept = store.admit("kept", &json!("second")).unwrap();
+    for id in [1, 2] {
+        apply(
+            &mut store,
+            &mut state,
+            Event::Submit {
+                id: OperationId(id),
+                spec: spec(),
+            },
+        );
+        let effects = apply(
+            &mut store,
+            &mut state,
+            Event::Authorize {
+                id: OperationId(id),
+                now_ms: 2,
+            },
+        );
+        let [Effect::Dispatch { attempt, .. }] = effects.as_slice() else {
+            panic!()
+        };
+        apply(
+            &mut store,
+            &mut state,
+            Event::Completed {
+                attempt: attempt.clone(),
+                result: result(),
+            },
+        );
+    }
+    let before = store.load().unwrap();
+    let prune = proposed(
+        &mut state,
+        Event::Prune {
+            operations: vec![OperationId(1)],
+        },
+    );
+    // Retiring an unknown admission rolls back the snapshot too.
+    assert!(matches!(
+        store.commit_retiring(&prune, &["missing".into()]),
+        Err(StoreError::Conflict)
+    ));
+    assert_eq!(store.load().unwrap(), before);
+    assert_eq!(
+        store.submissions(0, 100).unwrap(),
+        vec![old.clone(), kept.clone()]
+    );
+    let id = store.commit_retiring(&prune, &["old".into()]).unwrap();
+    on_event(&mut state, Event::Committed(id)).unwrap();
+    assert!(store.load().unwrap().operation(OperationId(1)).is_none());
+    assert_eq!(store.submissions(0, 100).unwrap(), vec![kept.clone()]);
+    for input in [json!("first"), json!("changed")] {
+        assert!(matches!(
+            store.admit("old", &input),
+            Err(StoreError::Retired)
+        ));
+    }
+    assert!(!store.is_suspended());
+    drop(store);
+    let mut store = Store::open(dir.path(), session()).unwrap();
+    assert!(matches!(
+        store.admit("old", &json!("first")),
+        Err(StoreError::Retired)
+    ));
+    assert_eq!(store.submissions(0, 100).unwrap(), vec![kept]);
+    let next = store.admit("next", &json!("third")).unwrap();
+    assert!(next.sequence > old.sequence);
+}
+
+#[test]
 fn invalid_and_conflicting_commits_do_not_advance_storage() {
     let dir = private_dir();
     let mut store = Store::open(dir.path(), session()).unwrap();

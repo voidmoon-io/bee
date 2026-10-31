@@ -588,16 +588,24 @@ fn stopping_work_preserves_uncertainty_and_completed_results() {
     let [Effect::Stop(token)] = effects.as_slice() else {
         panic!()
     };
-    sim.apply(Event::Cleaned {
-        token: token.clone(),
-    });
+    // Cancelling retries cleanup, but proving the executor stopped does not settle the outcome.
+    assert_eq!(
+        sim.apply(Event::Cleaned {
+            token: token.clone(),
+        }),
+        vec![Effect::Unresolved {
+            id: OperationId(2),
+            reason: UnresolvedReason::UnknownOutcome
+        }]
+    );
     assert_eq!(
         sim.disk.operation(OperationId(2)).unwrap().phase,
-        Phase::Stopped {
-            reason: StopReason::Cancelled,
-            attempt: Some(attempt)
+        Phase::Unresolved {
+            reason: UnresolvedReason::UnknownOutcome,
+            attempt: attempt.clone()
         }
     );
+
     assert!(sim.disk.entries().is_empty()); // cleanup is not a successful tool result
 
     sim.submit(3, RecoveryPolicy::NeverReplay);
@@ -777,13 +785,10 @@ fn invalid_input_and_incompatible_snapshots_are_refused_without_progress() {
     );
     assert_eq!(sim.state.committed(), &before);
     assert!(sim.write.is_none());
-    for version in [1, 2, 3, 4, 999] {
+    for version in [1, 2, 3, 4, 5, 999] {
         let mut snapshot = serde_json::to_value(sim.disk.clone()).unwrap();
         snapshot["schema_version"] = json!(version);
-        assert!(matches!(
-            State::open(serde_json::from_value(snapshot).unwrap(), ActivationId(5)),
-            Err(Error::InvalidSnapshot)
-        ));
+        assert!(serde_json::from_value::<Snapshot>(snapshot).is_err());
     }
     assert!(matches!(
         State::open(sim.disk.clone(), ActivationId(1)),
@@ -1034,4 +1039,202 @@ fn resuming_reconciliation_requires_commit_and_current_generation() {
         now_ms: 200,
     });
     assert!(matches!(delivered.as_slice(), [Effect::Deliver(entry)] if entry.result == result));
+}
+
+#[test]
+fn cancelling_an_interrupted_mutation_leaves_it_unresolved_not_stopped() {
+    for (policy, expected) in [
+        (
+            RecoveryPolicy::NeverReplay,
+            Some(UnresolvedReason::UnknownOutcome),
+        ),
+        (
+            RecoveryPolicy::Reconcile,
+            Some(UnresolvedReason::ReconciliationRequired),
+        ),
+        (RecoveryPolicy::RetrySafe { max_attempts: 3 }, None),
+    ] {
+        for reason in [StopReason::Cancelled, StopReason::Deadline] {
+            let mut sim = Simulator::new();
+            sim.submit(1, policy);
+            let attempt = sim.start(1);
+            let now = if reason == StopReason::Deadline {
+                100
+            } else {
+                2
+            };
+            let effects = sim.crash(now);
+            let effects = if reason == StopReason::Cancelled {
+                assert!(matches!(effects.as_slice(), [Effect::Inspect(_)]));
+                sim.apply(Event::Cancel { id: OperationId(1) })
+            } else {
+                effects
+            };
+            let [Effect::Stop(token)] = effects.as_slice() else {
+                panic!("{effects:?}")
+            };
+            let effects = sim.apply(Event::Cleaned {
+                token: token.clone(),
+            });
+            let phase = sim.disk.operation(OperationId(1)).unwrap().phase.clone();
+            match expected {
+                Some(unresolved) => {
+                    assert_eq!(
+                        effects,
+                        vec![Effect::Unresolved {
+                            id: OperationId(1),
+                            reason: unresolved
+                        }]
+                    );
+                    assert_eq!(
+                        phase,
+                        Phase::Unresolved {
+                            attempt: attempt.clone(),
+                            reason: unresolved
+                        }
+                    );
+                }
+                None => assert_eq!(
+                    phase,
+                    Phase::Stopped {
+                        reason,
+                        attempt: Some(attempt.clone())
+                    }
+                ),
+            }
+            // A later deadline neither stops nor relabels it; a reopen keeps it; nothing reruns.
+            sim.apply(Event::Tick { now_ms: 200 });
+            assert_eq!(sim.disk.operation(OperationId(1)).unwrap().phase, phase);
+            sim.crash(201);
+            assert_eq!(sim.disk.operation(OperationId(1)).unwrap().phase, phase);
+            assert_eq!(sim.executions.len(), 1);
+        }
+    }
+}
+
+fn complete(sim: &mut Simulator, id: u64) {
+    sim.submit(id, RecoveryPolicy::NeverReplay);
+    let attempt = sim.start(id);
+    sim.apply(Event::Completed {
+        attempt,
+        result: result(),
+    });
+}
+
+#[test]
+fn pruning_lets_a_session_outlive_its_operation_bound() {
+    let mut sim = Simulator::new();
+    let total = MAX_OPERATIONS as u64 + 300;
+    for id in 1..=total {
+        // Pruning early keeps each simulated commit small; the bound itself is unchanged.
+        if sim.disk.operations().len() == 64 {
+            let operations: Vec<_> = sim.disk.operations().keys().copied().take(48).collect();
+            sim.apply(Event::Prune { operations });
+        }
+        complete(&mut sim, id);
+    }
+    assert!(sim.disk.operations().len() <= MAX_OPERATIONS);
+    assert_eq!(sim.executions.len() as u64, total);
+    // Entry sequences keep counting across pruning, so a delivery cursor never repeats.
+    let last = sim.disk.entries().last().unwrap();
+    assert_eq!(last.sequence, total);
+    assert_eq!(last.attempt.operation, OperationId(total));
+    assert!(sim
+        .apply(Event::Replay {
+            after_sequence: total
+        })
+        .is_empty());
+    // A pruned ID can never be admitted again, even with its original input.
+    assert_eq!(
+        sim.send(Event::Submit {
+            id: OperationId(1),
+            spec: spec(RecoveryPolicy::NeverReplay)
+        }),
+        Err(Error::Stale)
+    );
+    // The pruned snapshot survives a reopen.
+    sim.crash(2);
+    assert_eq!(sim.disk.entries().last().unwrap().sequence, total);
+    complete(&mut sim, total + 1);
+    assert_eq!(sim.disk.entries().last().unwrap().sequence, total + 1);
+}
+
+#[test]
+fn pruning_never_forgets_live_unknown_or_undelivered_work() {
+    let mut sim = Simulator::new();
+    complete(&mut sim, 1);
+    sim.submit(2, RecoveryPolicy::NeverReplay);
+    sim.submit(3, RecoveryPolicy::NeverReplay);
+    sim.start(3);
+    sim.submit(4, RecoveryPolicy::NeverReplay);
+    sim.start(4);
+    let token = inspection(&sim.crash(2));
+    sim.apply(Event::Recovered {
+        token,
+        outcome: RecoveryOutcome::Unknown,
+        now_ms: 2,
+    });
+    sim.submit(5, RecoveryPolicy::NeverReplay);
+    let attempt = sim.start(5);
+    let mut published = result();
+    published.receipt = Some(ReceiptPublication {
+        id: format!("sha256:{}", "a".repeat(64)),
+        bytes: "receipt".into(),
+    });
+    sim.apply(Event::Completed {
+        attempt,
+        result: published,
+    });
+    sim.submit(6, RecoveryPolicy::NeverReplay);
+    sim.start(6);
+    sim.apply(Event::Cancel { id: OperationId(6) });
+    // Ready, Recovering, Unresolved, Publishing, and Cancelling all refuse.
+    for id in [2, 3, 4, 5, 6] {
+        let phase = &sim.disk.operation(OperationId(id)).unwrap().phase;
+        assert!(
+            !matches!(phase, Phase::Completed { .. } | Phase::Stopped { .. }),
+            "{phase:?}"
+        );
+        let before = sim.disk.clone();
+        assert_eq!(
+            sim.send(Event::Prune {
+                operations: vec![OperationId(1), OperationId(id)]
+            }),
+            Err(Error::InvalidPhase),
+            "{id}"
+        );
+        assert_eq!(sim.disk, before);
+        assert!(sim.write.is_none());
+    }
+    sim.apply(Event::Prune {
+        operations: vec![OperationId(1)],
+    });
+    assert!(sim.disk.operation(OperationId(1)).is_none());
+    assert!(sim.disk.entries().is_empty());
+    for id in 2..=6 {
+        assert!(sim.disk.operation(OperationId(id)).is_some());
+    }
+    assert_eq!(
+        sim.send(Event::Prune {
+            operations: vec![OperationId(1)]
+        }),
+        Err(Error::NotFound)
+    );
+}
+
+#[test]
+fn prepruning_snapshots_load_with_their_counters_derived() {
+    let mut sim = Simulator::new();
+    complete(&mut sim, 1);
+    complete(&mut sim, 2);
+    let mut stored = serde_json::to_value(sim.disk.clone()).unwrap();
+    let object = stored.as_object_mut().unwrap();
+    object.remove("sequence");
+    object.remove("horizon");
+    object.insert("schema_version".into(), json!(5));
+    let loaded: Snapshot = serde_json::from_value(stored.clone()).unwrap();
+    assert_eq!(loaded, sim.disk);
+    // A current-version snapshot must carry the counters.
+    stored["schema_version"] = json!(SCHEMA_VERSION);
+    assert!(serde_json::from_value::<Snapshot>(stored).is_err());
 }

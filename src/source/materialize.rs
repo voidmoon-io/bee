@@ -156,7 +156,7 @@ pub(super) fn materialize(pin: SourcePin, destination: &Path) -> Result<Material
         .try_into_commit()
         .map_err(err)?;
     let tree = commit.tree_id().map_err(err)?.detach();
-    if tree.to_string() != pin.tree {
+    if tree != pin.tree {
         return Err("pin tree does not match commit".into());
     }
     let dir = directory(&parent, c"source")?;

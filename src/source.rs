@@ -119,7 +119,7 @@ pub fn query(request: Request) -> Result<serde_json::Value, String> {
                 .try_into_commit()
                 .map_err(err)?;
             let mut id = commit.tree_id().map_err(err)?.detach();
-            if id.to_string() != pin.tree {
+            if id != pin.tree {
                 return Err("pin tree does not match commit".into());
             }
             let components: Vec<_> = path.split('/').collect();

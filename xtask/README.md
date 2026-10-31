@@ -16,7 +16,7 @@ xtask/
 ├── src/serve.rs       a throwaway static server for dist/
 ├── viz-web/           the WASM preview app (ratzilla + ratatui + tachyonfx)
 │   ├── src/scenes.rs  ← the scene list. This is the file you edit.
-│   ├── src/mascot.rs  bee's sprite, as half-block glyphs
+│   ├── src/mascot.rs  shared bee artwork, as half-block glyphs
 │   ├── src/palette.rs bee's catppuccin-mocha role colors
 │   └── assets/        the bundled monospace font
 ├── puppeteer/         the headless-Chrome screenshot driver
@@ -28,8 +28,12 @@ xtask/
 ```bash
 rustup target add wasm32-unknown-unknown
 cargo install --locked trunk
-(cd xtask/puppeteer && npm install)     # also downloads Puppeteer's pinned Chromium
+(cd xtask/puppeteer && npm ci)     # also downloads Puppeteer's pinned Chromium
 ```
+
+The snapshot driver uses Puppeteer 25 and needs Node.js 22.12 or newer. On npm versions that
+block dependency install scripts, run `node xtask/puppeteer/node_modules/puppeteer/install.mjs`
+after `npm ci` to install Chromium.
 
 The runner checks for all three before it uses them and prints the install command if one is
 missing. They are deliberately *not* Cargo dependencies — dragging a JS toolchain and a WASM bundler
@@ -178,3 +182,19 @@ fallback font and build a differently-sized grid.
 excluded from `xtask`'s own workspace, and no shipping crate can reach either. `cargo build`,
 `cargo test` and `cargo clippy --workspace --all-targets` are unaffected — that is a requirement, not
 an accident, and `.cargo/config.toml` contains only the `xtask` alias for the same reason.
+
+## Mascot
+
+The bee is a cheeky 24×24 pixel sidekick with crooked antennae, a sideways glance, and a grin.
+`src/viz/bee/art.rs` owns its resting bitmap and six-color palette; the terminal and WASM fixtures
+both read it. The short `bee_animation()` greeting adds a wing flutter and one wink, ending on
+the resting pose. `cargo run --example bee_preview` shows the actual terminal rendering;
+add `-- --animate` for its idle loop (Ctrl-C to stop). The full-screen REPL runs the same loop
+while the mascot is visible, pausing offscreen or when covered. `BEE_NO_ANIMATION` keeps it still;
+`cargo xtask viz-screens` includes welcome screens at 80×24 and 120×32. Export the actual
+animation frames as JSON with `cargo run --example bee_preview -- --json`.
+
+Session expressions follow exchange and tool events. Try
+`cargo run --example bee_preview -- --animate --mood thinking` (also `working`, `finished`,
+`waiting`, or `concerned`). Motion-off sessions keep the matching static expression.
+Use `--moods-json` to export all the expression sequences.

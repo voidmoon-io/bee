@@ -37,8 +37,8 @@ The Rhai sprite/animation/palette/bee functions, the half-block rendering contra
 
 | Function | Rhai signature | Description |
 |----------|----------------|-------------|
-| `bee_sprite()` | `fn() -> Sprite` | The built-in 16×16 bee (SC-018). |
-| `bee_animation()` | `fn() -> Animation` | The 3-frame wing-flap (150 ms, bounce). |
+| `bee_sprite()` | `fn() -> Sprite` | The built-in 24×24 bee (SC-018). |
+| `bee_animation()` | `fn() -> Animation` | The 6-frame flap-and-wink greeting (120 ms/frame, no bounce). |
 
 `render(widget)` and `layout.add(widget)` accept `Sprite` and `Animation`. An `Animation` inside a
 layout renders **frame 0 only** (a layout is a static composition; the summary notes it).
@@ -107,8 +107,35 @@ the summary.)
 
 ## The bee (FR-032)
 
-`viz::bee::sprite()` / `viz::bee::animation()` provide the 16×16 bee + 3-frame wing-flap (150 ms,
-bounce), built once via `OnceLock`. Surfaces: REPL startup (opt-in `--bee` / `BEE_MASCOT=1`, played
-once then reclaimed), episode completion (static bee beside the final status), and the Rhai
-`bee_sprite()`/`bee_animation()` functions. Never forced: absent in batch mode, not default in the
-Rhai API.
+`viz::bee::sprite()` / `viz::bee::animation()` provide the 24×24 bee and a six-frame greeting
+(120 ms/frame, one cycle, no bounce), built once via `OnceLock`. The greeting flutters, winks,
+and settles back to the static pose. Artwork and palette live in `src/viz/bee/art.rs`, shared
+with the WASM visual fixtures without importing the application dependency graph.
+
+The full-screen REPL animates the mascot while its chat entry is visible: a brief flutter and wink
+every 4.8 seconds, with no redraws during the resting pause. Its clock pauses offscreen, under
+help/panel/takeover overlays and consent dialogs, or below the terminal's minimum size. `BEE_NO_ANIMATION` or
+`visual.animations = false` holds the resting pose. The inline REPL keeps a static banner so
+background cursor movement cannot interfere with readline.
+
+The mascot occupies 24 columns × 12 terminal rows; suppress it with
+`--no-bee` or `BEE_MASCOT=0`. The Rhai `bee_sprite()` and `bee_animation()` helpers expose the
+same artwork. Existing animation-off and monochrome rendering behavior still applies.
+
+### Session expressions
+
+The full-screen mascot follows typed events: exchange start means thinking, tool calls mean working,
+and tool results return it to thinking or concern. Actual exchange completion triggers a brief nod
+that settles into an attentive pose; exhausting the turn budget shows the waiting expression.
+Errors, kernel denials, cancellation, exhausted context, and stuck detection suppress the completion
+celebration for that exchange. The provider's
+`TurnDone` callback only ends its busy indicator and does not mean the exchange succeeded.
+
+Each expression has a static pose when animations are disabled. Completion and concern animations
+settle and stop scheduling redraws. The header keeps a plain-text activity label even when the
+mascot scrolls out of view; errors remain in the chat. Waiting means control has returned to the
+operator, not a guess about questions in generated prose.
+
+Preview a state with `cargo run --example bee_preview -- --animate --mood working`.
+Available moods: `idle`, `thinking`, `working`, `finished`, `waiting`, and `concerned`.
+`--moods-json` exports the expression sequences for visual review.

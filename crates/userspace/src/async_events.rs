@@ -37,7 +37,10 @@ impl AsyncAuditStream {
     /// readiness.
     pub fn new(rb: RingBuf<MapData>, scope_id: String) -> io::Result<Self> {
         let raw = rb.as_raw_fd();
-        let async_fd = AsyncFd::with_interest(RingBufFd(raw), Interest::READABLE)?;
+        // SAFETY: rb owns this fixed fd and is never replaced. async_fd is declared before rb,
+        // so its registration is dropped before the ring buffer closes the fd.
+        let async_fd =
+            unsafe { AsyncFd::register_with_interest(RingBufFd(raw), Interest::READABLE)? };
         Ok(AsyncAuditStream {
             async_fd,
             rb,

@@ -18,6 +18,7 @@ use super::panels::PanelRegistry;
 use crate::config::VisualConfig;
 use crate::render_spec::RenderSpec;
 use crate::tui::events::SessionEvent;
+use crate::viz::bee::Mood;
 
 /// Which region has keyboard focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,6 +123,12 @@ pub struct App {
     /// indicator takes its animation phase from this, so it moves exactly when data is flowing and
     /// holds still when the turn has stalled — motion as a report, not as decoration.
     pub activity: u64,
+    /// The mascot's clock advances only while its chat entry is visible and unobscured.
+    pub mascot_elapsed: Duration,
+    pub(crate) mascot_visible: bool,
+    pub mascot_mood: Mood,
+    mascot_had_error: bool,
+    mascot_pending_tools: usize,
     /// A consent question on screen (024 T059). It swallows input until answered.
     pub consent: Option<ConsentModal>,
     /// The operator's answer to [`App::consent`], for the event loop to send (drained via
@@ -169,9 +176,60 @@ impl App {
             model_id: String::new(),
             panel_sel: 0,
             activity: 0,
+            mascot_elapsed: Duration::ZERO,
+            mascot_visible: false,
+            mascot_mood: Mood::Idle,
+            mascot_had_error: false,
+            mascot_pending_tools: 0,
             consent: None,
             consent_answer: None,
         }
+    }
+
+    pub(crate) fn mascot_motion_allowed(&self) -> bool {
+        self.visual.animations
+            && self.consent.is_none()
+            && self.layout_mode != LayoutMode::TooSmall
+            && !self.help_open
+            && !self.overlay_open()
+            && !self.overlay_active()
+    }
+
+    pub(crate) fn mascot_tick(&self) -> Option<Duration> {
+        (self.mascot_visible && self.mascot_motion_allowed())
+            .then(|| crate::viz::bee::frame(self.mascot_mood, self.mascot_elapsed, true).1)
+            .flatten()
+    }
+
+    fn set_mascot_mood(&mut self, mood: Mood) {
+        if self.mascot_mood != mood {
+            self.mascot_mood = mood;
+            self.mascot_elapsed = Duration::ZERO;
+            self.mascot_visible = false;
+        }
+    }
+
+    fn start_exchange(&mut self) {
+        self.mascot_had_error = false;
+        self.mascot_pending_tools = 0;
+        self.turn = TurnState::Streaming;
+        self.set_mascot_mood(Mood::Thinking);
+    }
+
+    fn finish_exchange(&mut self, outcome: crate::repl::ExchangeOutcome) {
+        use crate::repl::ExchangeOutcome;
+        self.turn = TurnState::Idle;
+        self.mascot_pending_tools = 0;
+        let mood = match outcome {
+            ExchangeOutcome::ApiError(_)
+            | ExchangeOutcome::Terminated(_)
+            | ExchangeOutcome::ContextExhausted(_)
+            | ExchangeOutcome::Stuck { .. } => Mood::Concerned,
+            _ if self.mascot_had_error => Mood::Concerned,
+            ExchangeOutcome::BudgetExhausted => Mood::Waiting,
+            ExchangeOutcome::Responded => Mood::Finished,
+        };
+        self.set_mascot_mood(mood);
     }
 
     /// Put a consent question on screen.
@@ -363,6 +421,8 @@ impl App {
 pub fn update(app: &mut App, msg: Message) {
     match msg {
         Message::Quit => app.should_quit = true,
+        Message::ExchangeStarted => app.start_exchange(),
+        Message::ExchangeFinished(outcome) => app.finish_exchange(outcome),
         Message::Resize(cols, rows) => {
             app.size = (cols, rows);
             app.layout_mode = LayoutMode::from_size(cols, rows);
@@ -585,6 +645,9 @@ fn handle_session(app: &mut App, ev: SessionEvent) {
     app.activity = app.activity.wrapping_add(1);
     match ev {
         SessionEvent::AssistantDelta(s) => {
+            if app.mascot_pending_tools == 0 {
+                app.set_mascot_mood(Mood::Thinking);
+            }
             let s = safe_block(&s).into_owned();
             // FR-019: the model's reply to a message the operator sent *since* the overlay appeared
             // dismisses it — the conversation has moved past what the overlay was showing. Prose
@@ -618,6 +681,8 @@ fn handle_session(app: &mut App, ev: SessionEvent) {
             }
         }
         SessionEvent::ToolCall { name, arguments } => {
+            app.mascot_pending_tools = app.mascot_pending_tools.saturating_add(1);
+            app.set_mascot_mood(Mood::Working);
             app.push_line(
                 Role::Tool,
                 format!(
@@ -627,7 +692,17 @@ fn handle_session(app: &mut App, ev: SessionEvent) {
                 ),
             );
         }
-        SessionEvent::ToolResult { result, .. } => {
+        SessionEvent::ToolResult { result, audit } => {
+            app.mascot_pending_tools = app.mascot_pending_tools.saturating_sub(1);
+            let failed = result.is_error || audit.iter().any(|event| event.decision == "denied");
+            app.mascot_had_error |= failed;
+            app.set_mascot_mood(if failed {
+                Mood::Concerned
+            } else if app.mascot_pending_tools > 0 {
+                Mood::Working
+            } else {
+                Mood::Thinking
+            });
             let mark = if result.is_error { "✗" } else { "✓" };
             let line = safe_line(result.content.lines().next().unwrap_or_default());
             app.push_line(Role::Tool, format!("{mark} {line}"));
@@ -664,7 +739,11 @@ fn handle_session(app: &mut App, ev: SessionEvent) {
             ));
             app.autoscroll();
         }
-        SessionEvent::Error(s) => app.push_line(Role::System, format!("error: {}", safe_block(&s))),
+        SessionEvent::Error(s) => {
+            app.mascot_had_error = true;
+            app.set_mascot_mood(Mood::Concerned);
+            app.push_line(Role::System, format!("error: {}", safe_block(&s)));
+        }
         SessionEvent::Info(s) | SessionEvent::Footer(s) | SessionEvent::Steering(s) => {
             app.push_line(Role::System, safe_block(&s).into_owned())
         }
@@ -676,9 +755,15 @@ fn handle_session(app: &mut App, ev: SessionEvent) {
         // command says "conversation history", and it means it.
         SessionEvent::Cleared => {
             app.chat.clear();
+            app.set_mascot_mood(Mood::Idle);
             app.scroll_to_bottom();
         }
-        SessionEvent::TurnStarted => app.turn = TurnState::Streaming,
+        SessionEvent::TurnStarted => {
+            app.turn = TurnState::Streaming;
+            if app.mascot_pending_tools == 0 {
+                app.set_mascot_mood(Mood::Thinking);
+            }
+        }
         SessionEvent::TurnDone => app.turn = TurnState::Idle,
     }
 }
@@ -705,6 +790,151 @@ mod tests {
     fn type_str(a: &mut App, s: &str) {
         for c in s.chars() {
             update(a, Message::char(c));
+        }
+    }
+
+    #[test]
+    fn mascot_follows_exchange_and_tool_boundaries_not_busy_stop() {
+        let mut a = app();
+        update(&mut a, Message::ExchangeStarted);
+        assert_eq!(a.mascot_mood, Mood::Thinking);
+        update(&mut a, Message::session(SessionEvent::TurnDone));
+        assert_eq!(
+            a.mascot_mood,
+            Mood::Thinking,
+            "first token is not completion"
+        );
+        for name in ["read", "search"] {
+            update(
+                &mut a,
+                Message::session(SessionEvent::ToolCall {
+                    name: name.into(),
+                    arguments: serde_json::json!({}),
+                }),
+            );
+        }
+        assert_eq!(a.mascot_mood, Mood::Working);
+        update(
+            &mut a,
+            Message::session(SessionEvent::ToolResult {
+                result: crate::tools::ToolResult::ok("first"),
+                audit: vec![],
+            }),
+        );
+        assert_eq!(
+            a.mascot_mood,
+            Mood::Working,
+            "another tool is still running"
+        );
+        update(
+            &mut a,
+            Message::session(SessionEvent::ToolResult {
+                result: crate::tools::ToolResult::ok("second"),
+                audit: vec![],
+            }),
+        );
+        assert_eq!(a.mascot_mood, Mood::Thinking);
+        a.mascot_elapsed = Duration::from_millis(240);
+        update(
+            &mut a,
+            Message::session(SessionEvent::AssistantDelta("answer".into())),
+        );
+        assert_eq!(
+            a.mascot_elapsed,
+            Duration::from_millis(240),
+            "tokens don't restart the pose"
+        );
+        update(
+            &mut a,
+            Message::ExchangeFinished(crate::repl::ExchangeOutcome::Responded),
+        );
+        assert_eq!(a.mascot_mood, Mood::Finished);
+        assert_eq!(a.turn, TurnState::Idle);
+        assert_eq!(a.mascot_elapsed, Duration::ZERO);
+    }
+
+    #[test]
+    fn errors_are_not_celebrated_and_a_new_exchange_can_recover() {
+        let mut a = app();
+        update(&mut a, Message::ExchangeStarted);
+        update(
+            &mut a,
+            Message::session(SessionEvent::ToolResult {
+                result: crate::tools::ToolResult::error("denied"),
+                audit: vec![],
+            }),
+        );
+        assert_eq!(a.mascot_mood, Mood::Concerned);
+        update(&mut a, Message::session(SessionEvent::TurnStarted));
+        update(
+            &mut a,
+            Message::ExchangeFinished(crate::repl::ExchangeOutcome::Responded),
+        );
+        assert_eq!(a.mascot_mood, Mood::Concerned);
+        update(&mut a, Message::ExchangeStarted);
+        update(
+            &mut a,
+            Message::ExchangeFinished(crate::repl::ExchangeOutcome::Responded),
+        );
+        assert_eq!(a.mascot_mood, Mood::Finished);
+    }
+
+    #[test]
+    fn denied_audit_does_not_turn_into_a_success_reaction() {
+        let mut a = app();
+        update(&mut a, Message::ExchangeStarted);
+        let audit = bee_core::AuditEvent {
+            ts: "2026-10-31T00:00:00Z".into(),
+            scope_id: None,
+            cgroup_id: 0,
+            pid: None,
+            tgid: None,
+            op: "file_open".into(),
+            decision: "denied".into(),
+            errno: -13,
+            target: "/private".into(),
+        };
+        update(
+            &mut a,
+            Message::session(SessionEvent::ToolResult {
+                result: crate::tools::ToolResult::ok("process exited 0"),
+                audit: vec![audit],
+            }),
+        );
+        update(
+            &mut a,
+            Message::ExchangeFinished(crate::repl::ExchangeOutcome::Responded),
+        );
+        assert_eq!(a.mascot_mood, Mood::Concerned);
+    }
+
+    #[test]
+    fn returned_control_and_failure_have_distinct_reactions() {
+        use crate::repl::ExchangeOutcome;
+        for (outcome, mood) in [
+            (ExchangeOutcome::BudgetExhausted, Mood::Waiting),
+            (ExchangeOutcome::ApiError("offline".into()), Mood::Concerned),
+            (
+                ExchangeOutcome::ContextExhausted("full".into()),
+                Mood::Concerned,
+            ),
+            (
+                ExchangeOutcome::Stuck {
+                    tool: "read".into(),
+                    repeats: 3,
+                },
+                Mood::Concerned,
+            ),
+            (
+                ExchangeOutcome::Terminated("cancelled".into()),
+                Mood::Concerned,
+            ),
+        ] {
+            let mut a = app();
+            update(&mut a, Message::ExchangeStarted);
+            update(&mut a, Message::ExchangeFinished(outcome));
+            assert_eq!(a.mascot_mood, mood);
+            assert_eq!(a.turn, TurnState::Idle);
         }
     }
 

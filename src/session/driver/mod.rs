@@ -1,16 +1,19 @@
 //! Opt-in shared durable conversation driver. SQLite and the core have one serialized owner.
 //! UI callbacks are observations of committed state; admission IDs survive process restarts.
 mod budget;
+mod conversation;
 mod execution;
 mod executor;
 pub mod journal;
 mod presentation;
 mod recovery;
+mod retention;
 mod storage;
 mod types;
 mod wake;
 pub use budget::{Budget, Charge, Reservation};
 pub use presentation::{exchange, run_episode, RunBinding};
+pub use retention::Retention;
 pub use types::{Limits, Report};
 
 /// Optional diagnostics/fault-injection observer. Called on the storage owner thread;
@@ -118,13 +121,18 @@ impl Session {
         observer: Option<Arc<dyn Observer>>,
     ) -> Result<Arc<Self>, DriverError> {
         let evidence = EvidenceStore::for_session(path.join("evidence"), &id)?;
-        let (storage, snapshot, activation, inbox) =
+        let (storage, snapshot, activation, inbox, archived) =
             storage::Storage::open(path, id, observer).await?;
         let mut journal: Option<Journal> = snapshot
             .driver()
             .cloned()
             .map(serde_json::from_value)
             .transpose()?;
+        match &mut journal {
+            Some(journal) => journal.conversation.restore(archived)?,
+            None if !archived.is_empty() => return Err(core::Error::InvalidSnapshot.into()),
+            None => {}
+        }
         if let Some(journal) = &journal {
             journal.validate(&snapshot, &inbox)?;
         } else if !snapshot.operations().is_empty() {
@@ -138,6 +146,15 @@ impl Session {
         }
         if let Some(active) = journal.as_mut().and_then(|j| j.active.as_mut()) {
             active.budget.interrupt();
+        }
+        if let Some(journal) = journal.as_mut() {
+            // Sessions from before the journal kept receipt IDs still have them in their entries.
+            for entry in snapshot.entries() {
+                if let Some(receipt) = &entry.result.receipt {
+                    journal.commit_receipt(&receipt.id);
+                }
+            }
+            evidence.admit_committed(&journal.receipts);
         }
         let resume = resume
             .or_else(|| {
@@ -175,6 +192,7 @@ impl Session {
             interrupted: false,
             clock_epoch_ms,
             clock_start: std::time::Instant::now(),
+            retention: Retention::default(),
         };
         driver.apply(Event::Activate { now_ms: now_ms() }).await?;
         Ok(Arc::new(Self {
@@ -187,6 +205,14 @@ impl Session {
     }
     pub fn evidence(&self) -> EvidenceStore {
         self.evidence.clone()
+    }
+    /// Replace when finished submissions are pruned. The default suits real sessions.
+    pub async fn set_retention(&self, retention: Retention) -> Result<(), DriverError> {
+        if retention.keep >= retention.trigger || retention.trigger > MAX_OPERATIONS {
+            return Err(DriverError::Refused("invalid retention".into()));
+        }
+        self.driver.lock().await.retention = retention;
+        Ok(())
     }
     pub fn resume_request(&self) -> Option<&str> {
         self.resume.as_deref()
@@ -271,14 +297,61 @@ impl Session {
                 request, text, system, limits, model, registry, sandbox, output, hooks,
             )
             .await;
-        // Failed storage or a dropped future cannot be resumed in memory.
-        driver.interrupted = result.is_err();
+        // Failed storage or a dropped future cannot be resumed in memory. A retired request is
+        // refused before anything is admitted, so it leaves the session usable.
+        driver.interrupted = result.is_err()
+            && !matches!(
+                result,
+                Err(DriverError::Store(core::store::StoreError::Retired))
+            );
         *self.current.lock().expect("current submission") = None;
         while driver.controls.try_recv().is_ok() {
             output.error("input was not admitted: its submission already ended; submit it again");
         }
         result
     }
+}
+
+/// The first path in a session directory that a tool under `policy` could write, if any. A session
+/// directory a tool can write is not a record of what tools did. Decided with the kernel's own
+/// matcher; `resolver` supplies `:project_root` and `~`. An observe-mode policy blocks nothing.
+pub fn tool_writable_path(
+    policy: &bee_core::Policy,
+    dir: &std::path::Path,
+    resolver: &dyn bee_core::Resolver,
+) -> Result<Option<PathBuf>, String> {
+    use std::os::unix::ffi::OsStrExt;
+    if policy.mode == bee_core::Mode::Observe {
+        return Ok(Some(dir.to_path_buf()));
+    }
+    let rules = policy
+        .compile_filesystem(resolver)
+        .map_err(|e| e.to_string())?;
+    let default_deny = policy.denies_unmatched_writes();
+    let evidence = dir.join("evidence");
+    // Receipt names are digests; both extremes stand in for any suffix rule over hex.
+    let candidates = [
+        dir.to_path_buf(),
+        dir.join("session.sqlite3"),
+        dir.join("session.sqlite3-wal"),
+        dir.join("session.sqlite3-shm"),
+        dir.join("session.sqlite3-journal"),
+        evidence.join(format!("{}.json", "0".repeat(64))),
+        evidence.join(format!("{}.json", "f".repeat(64))),
+        evidence,
+    ];
+    for path in candidates {
+        let writable = bee_userspace::filesystem_allows_write(
+            &rules,
+            default_deny,
+            path.as_os_str().as_bytes(),
+        )
+        .map_err(|e| e.to_string())?;
+        if writable {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
 }
 
 struct Driver {
@@ -293,6 +366,7 @@ struct Driver {
     interrupted: bool,
     clock_epoch_ms: u64,
     clock_start: std::time::Instant,
+    retention: Retention,
 }
 impl Driver {
     fn journal(&self) -> &Journal {
@@ -311,13 +385,60 @@ impl Driver {
             .expect("active submission")
     }
     async fn apply(&mut self, event: Event) -> Result<Vec<Effect>, DriverError> {
+        // A publication commits its receipt ID atomically with the journal checkpoint below.
+        let published = match (&event, &self.journal) {
+            (Event::Published { receipt_id, .. }, Some(_)) => Some(receipt_id.clone()),
+            _ => None,
+        };
+        let Some(id) = published else {
+            return self.apply_retiring(event, Vec::new()).await;
+        };
+        let before = self.journal().receipts.clone();
+        let evicted = self.journal_mut().commit_receipt(&id);
+        match self.apply_retiring(event, Vec::new()).await {
+            Ok(effects) => {
+                self.evidence.admit_committed([&id]);
+                if let Some(evicted) = evicted {
+                    self.evidence.forget_committed(&evicted);
+                }
+                Ok(effects)
+            }
+            Err(error) => {
+                self.journal_mut().receipts = before;
+                Err(error)
+            }
+        }
+    }
+    async fn apply_retiring(
+        &mut self,
+        event: Event,
+        retire: Vec<String>,
+    ) -> Result<Vec<Effect>, DriverError> {
+        // An over-long tail moves to the conversation table with this commit, or not at all.
+        let archival = match &mut self.journal {
+            Some(journal) => journal.conversation.archive()?,
+            None => None,
+        };
+        let result = self.commit_event(event, retire, archival.as_ref()).await;
+        if let (Err(_), Some(archival)) = (&result, &archival) {
+            self.journal_mut().conversation.unarchive(archival);
+        }
+        result
+    }
+    async fn commit_event(
+        &mut self,
+        event: Event,
+        retire: Vec<String>,
+        archival: Option<&conversation::Archival>,
+    ) -> Result<Vec<Effect>, DriverError> {
         let effects = if let Some(journal) = &self.journal {
             core::on_event_with_checkpoint(&mut self.state, event, serde_json::to_value(journal)?)?
         } else {
             on_event(&mut self.state, event)?
         };
         if let [Effect::Persist(commit)] = effects.as_slice() {
-            match self.storage.commit(*commit.clone()).await {
+            let appends = archival.map(|a| a.appends.clone()).unwrap_or_default();
+            match self.storage.commit(*commit.clone(), retire, appends).await {
                 Ok(id) => Ok(on_event(&mut self.state, Event::Committed(id))?),
                 Err(error) => {
                     on_event(&mut self.state, Event::CommitFailed(commit.id.clone()))?;
@@ -325,12 +446,14 @@ impl Driver {
                 }
             }
         } else {
+            debug_assert!(archival.is_none(), "an archival needs a commit");
             Ok(effects)
         }
     }
     async fn save(&mut self) -> Result<(), DriverError> {
-        let value = serde_json::to_value(self.journal())?;
-        self.apply(Event::Checkpoint(value)).await?;
+        // The checkpoint commit carries the serialized journal; this payload is replaced.
+        self.apply(Event::Checkpoint(serde_json::Value::Null))
+            .await?;
         Ok(())
     }
     async fn admit(&mut self, id: String, input: Input) -> Result<Submission, DriverError> {
@@ -379,15 +502,13 @@ impl Driver {
                 version: 2,
                 compatibility: self.compatibility.clone(),
                 runtime: runtime.clone(),
-                conversation: Conversation {
-                    system: system.into(),
-                    messages: vec![],
-                },
+                conversation: conversation::StoredConversation::new(system.into()),
                 next_operation: 1,
                 next_wake_generation: 1,
                 observed_ms: now_ms(),
                 active: None,
                 finished: BTreeMap::new(),
+                receipts: Default::default(),
             });
         }
         if self.journal().conversation.system != system || self.journal().runtime != runtime {
@@ -418,6 +539,16 @@ impl Driver {
         } else {
             let text =
                 text.ok_or_else(|| DriverError::Refused("resume request not found".into()))?;
+            self.prune().await?;
+            let bytes = self.journal().conversation.total_bytes()?;
+            if bytes >= self.retention.conversation_bytes {
+                return Err(DriverError::Refused(format!(
+                    "this session's conversation is full ({} of {} MiB); it takes no new \
+                     submissions, so continue in a new session",
+                    bytes / (1024 * 1024),
+                    self.retention.conversation_bytes / (1024 * 1024)
+                )));
+            }
             let started_ms = self.time();
             self.admit(
                 request.into(),
@@ -496,7 +627,13 @@ impl Driver {
         self.save().await?;
         if let Some(id) = self.active().step.operation() {
             if self.state.committed().operation(id).is_some() {
-                self.apply(Event::Cancel { id }).await?;
+                // A stop the deadline forced is recorded as one, not as an operator cancel.
+                let event = if self.active().timed_out {
+                    Event::Expire { id }
+                } else {
+                    Event::Cancel { id }
+                };
+                self.apply(event).await?;
             }
         }
         Ok(())

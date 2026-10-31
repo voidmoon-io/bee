@@ -71,6 +71,8 @@ pub async fn run(
         messages: Vec::new(),
     };
     let steering: SteeringQueue = Arc::new(Mutex::new(VecDeque::new()));
+    // Lines submitted while a turn ran; each becomes its own turn, in order, once that one ends.
+    let mut queued: VecDeque<String> = VecDeque::new();
     let recorder = Recorder::new("tui", format!("tui:{}", std::process::id()));
 
     // Enter the alternate screen + raw mode; the panic hook (installed here) restores first. The
@@ -122,6 +124,7 @@ pub async fn run(
             sandbox,
             config,
             &steering,
+            &mut queued,
             recorder.as_ref(),
             &mut consent,
         )
@@ -142,7 +145,7 @@ pub async fn run(
         terminal.draw(|f| view::view(&mut app, f))?;
 
         // A submitted line starts a model turn; drive it to completion while still pumping the UI.
-        if let Some(text) = app.take_outbox() {
+        if let Some(text) = queued.pop_front().or_else(|| app.take_outbox()) {
             #[allow(clippy::too_many_arguments)]
             run_turn(
                 &mut app,
@@ -155,6 +158,7 @@ pub async fn run(
                 sandbox,
                 config,
                 &steering,
+                &mut queued,
                 recorder.as_ref(),
                 &mut consent,
             )
@@ -253,9 +257,13 @@ async fn run_turn(
     sandbox: &mut Sandbox,
     config: &ReplConfig,
     steering: &SteeringQueue,
+    queued: &mut VecDeque<String>,
     recorder: Option<&Recorder>,
     consent: &mut Option<ConsentReceiver>,
 ) -> io::Result<()> {
+    // A cancelled turn leaves the conversation as it found it, so no half-finished tool call reaches
+    // the next request.
+    let before = conversation.messages.len();
     let (sink, mut rx) = SessionSink::new();
     // The operator reports its decisions into this turn's chat.
     if let Some(esc) = &config.escalation {
@@ -263,97 +271,148 @@ async fn run_turn(
     }
     // The reply to the question on screen, if one is.
     let mut asking: Option<oneshot::Sender<Decision>> = None;
-    let exchange = run_exchange(
-        text,
-        model,
-        conversation,
-        registry,
-        sandbox,
-        config,
-        &sink,
-        steering,
-        recorder,
-    );
-    tokio::pin!(exchange);
+    let cancelled = {
+        let exchange = run_exchange(
+            text,
+            model,
+            conversation,
+            registry,
+            sandbox,
+            config,
+            &sink,
+            steering,
+            recorder,
+        );
+        tokio::pin!(exchange);
 
-    // The tick exists only for the duration of a turn — the "on-demand" tick (T018): it paces the
-    // "working…" indicator's redraws and idles completely between turns. While effects are running
-    // it tightens to the scheduler's 16ms so animations advance smoothly mid-turn (FR-002).
-    let mut turn_done = false;
-    #[cfg(feature = "durable-sessions")]
-    let mut cancel_sent = false;
+        // The tick exists only for the duration of a turn — the "on-demand" tick (T018): it paces the
+        // "working…" indicator's redraws and idles completely between turns. While effects are running
+        // it tightens to the scheduler's 16ms so animations advance smoothly mid-turn (FR-002).
+        let mut turn_done = false;
+        #[cfg(feature = "durable-sessions")]
+        let mut cancel_sent = false;
 
-    loop {
-        settle_consent(app, &mut asking);
-        let now = std::time::Instant::now();
-        app.panels.prune(now);
-        app.advance_overlay(now);
-        crate::viz::viewport::set(view::viewport_for(app));
-        app.tick_clock(now);
-        refresh_http_pane(app, config);
-        terminal.draw(|f| view::view(app, f))?;
-        let period = tick_interval(app).unwrap_or(SPINNER_TICK).min(SPINNER_TICK);
-        // Durable quit waits for committed cancellation and cleanup before dropping the exchange.
-        if app.should_quit {
-            #[cfg(feature = "durable-sessions")]
-            if let Some(session) = &config.durable {
-                if !cancel_sent && !turn_done {
-                    cancel_sent = session.cancel().is_ok();
-                }
-                if turn_done {
-                    return Ok(());
-                }
-            } else {
-                return Ok(());
-            }
-            #[cfg(not(feature = "durable-sessions"))]
-            return Ok(());
-        }
-
-        tokio::select! {
-            // Guarded so a completed future is never polled again.
-            _ = &mut exchange, if !turn_done => {
-                turn_done = true;
-                // The exchange emits its trailing events (footer/TurnDone) before returning; fold
-                // them in, redraw once more via the loop head, then finish.
-                while let Ok(ev) = rx.try_recv() {
-                    update(app, Message::session(ev));
-                }
-            }
-            Some(ev) = rx.recv() => update(app, Message::session(ev)),
-            Some(ask) = next_ask(consent) => {
-                app.ask_consent(ask.request.render_lines());
-                asking = Some(ask.reply);
-            }
-            maybe = events.next() => match maybe {
-                Some(Ok(ev)) => {
-                    if let Some(msg) = message_from_event(ev) {
-                        update(app, msg);
-                    }
-                    if drain_intents(app, terminal) {
-                        terminal.clear()?;
-                    }
-                    if let Some(text) = app.take_outbox() {
-                        #[cfg(feature = "durable-sessions")]
-                        if let Some(session) = &config.durable {
-                            let queued = if text == "/cancel" { session.cancel() } else { session.steer(text) };
-                            if let Err(error) = queued { crate::repl::ReplOutput::error(&sink, &error.to_string()); }
-                        } else { steering.lock().expect("steering queue").push_back(text); }
-                        #[cfg(not(feature = "durable-sessions"))]
-                        steering.lock().expect("steering queue").push_back(text);
-                    }
-                }
-                Some(Err(_)) | None => return Ok(()),
-            },
-            _ = tokio::time::sleep(period) => app.periodic_redraws += 1,
-        }
-
-        // Once the turn has ended and its trailing events are drained, one final redraw + return.
-        if turn_done {
+        loop {
+            settle_consent(app, &mut asking);
+            let now = std::time::Instant::now();
+            app.panels.prune(now);
+            app.advance_overlay(now);
+            crate::viz::viewport::set(view::viewport_for(app));
+            app.tick_clock(now);
             refresh_http_pane(app, config);
             terminal.draw(|f| view::view(app, f))?;
-            return Ok(());
+            let period = tick_interval(app).unwrap_or(SPINNER_TICK).min(SPINNER_TICK);
+            // Durable quit waits for committed cancellation and cleanup before dropping the exchange.
+            if app.should_quit {
+                #[cfg(feature = "durable-sessions")]
+                if let Some(session) = &config.durable {
+                    if !cancel_sent && !turn_done {
+                        cancel_sent = session.cancel().is_ok();
+                    }
+                    if turn_done {
+                        return Ok(());
+                    }
+                } else {
+                    return Ok(());
+                }
+                #[cfg(not(feature = "durable-sessions"))]
+                return Ok(());
+            }
+
+            tokio::select! {
+                // Guarded so a completed future is never polled again.
+                _ = &mut exchange, if !turn_done => {
+                    turn_done = true;
+                    // The exchange emits its trailing events (footer/TurnDone) before returning; fold
+                    // them in, redraw once more via the loop head, then finish.
+                    while let Ok(ev) = rx.try_recv() {
+                        update(app, Message::session(ev));
+                    }
+                }
+                Some(ev) = rx.recv() => update(app, Message::session(ev)),
+                Some(ask) = next_ask(consent) => {
+                    app.ask_consent(ask.request.render_lines());
+                    asking = Some(ask.reply);
+                }
+                maybe = events.next() => match maybe {
+                    Some(Ok(ev)) => {
+                        if let Some(msg) = message_from_event(ev) {
+                            update(app, msg);
+                        }
+                        if drain_intents(app, terminal) {
+                            terminal.clear()?;
+                        }
+                        if let Some(text) = app.take_outbox() {
+                            #[cfg(feature = "durable-sessions")]
+                            let durable = config.durable.as_ref();
+                            #[cfg(not(feature = "durable-sessions"))]
+                            let durable: Option<&()> = None;
+                            match route_mid_turn(text, durable.is_some()) {
+                                MidTurn::Cancel if durable.is_none() => break true,
+                                MidTurn::Next(text) => {
+                                    app.system_line("queued — sent when this turn ends");
+                                    queued.push_back(text);
+                                }
+                                #[cfg(feature = "durable-sessions")]
+                                routed => {
+                                    let session = durable.expect("durable routes only");
+                                    let admitted = match routed {
+                                        MidTurn::Steer(text) => session.steer(text),
+                                        _ => session.cancel(),
+                                    };
+                                    if let Err(error) = admitted {
+                                        crate::repl::ReplOutput::error(&sink, &error.to_string());
+                                    }
+                                }
+                                #[cfg(not(feature = "durable-sessions"))]
+                                _ => unreachable!("only a durable session steers"),
+                            }
+                        }
+                    }
+                    Some(Err(_)) | None => return Ok(()),
+                },
+                _ = tokio::time::sleep(period) => app.periodic_redraws += 1,
+            }
+
+            // Once the turn has ended and its trailing events are drained, one final redraw + return.
+            if turn_done {
+                refresh_http_pane(app, config);
+                terminal.draw(|f| view::view(app, f))?;
+                return Ok(());
+            }
         }
+    };
+    // Only a non-durable `/cancel` gets here: the exchange (and its in-flight call) is dropped.
+    debug_assert!(cancelled);
+    while let Ok(ev) = rx.try_recv() {
+        update(app, Message::session(ev));
+    }
+    conversation.messages.truncate(before);
+    update(
+        app,
+        Message::session(crate::tui::events::SessionEvent::TurnDone),
+    );
+    app.system_line("turn cancelled — it was not added to the conversation");
+    Ok(())
+}
+
+/// What a line submitted while a turn runs does. It never joins the running turn as text: a
+/// durable session admits it as steering (durable-sessions-plan.md), any other session sends it as
+/// the next turn. `/cancel` cancels in both.
+#[derive(Debug, PartialEq, Eq)]
+enum MidTurn {
+    Cancel,
+    Steer(String),
+    Next(String),
+}
+
+fn route_mid_turn(text: String, durable: bool) -> MidTurn {
+    if text.trim() == "/cancel" {
+        MidTurn::Cancel
+    } else if durable {
+        MidTurn::Steer(text)
+    } else {
+        MidTurn::Next(text)
     }
 }
 
@@ -478,6 +537,34 @@ mod consent_tests {
         let before = app.chat.len();
         settle_consent(&mut app, &mut asking);
         assert_eq!(app.chat.len(), before + 1, "the operator is told");
+    }
+}
+
+#[cfg(test)]
+mod mid_turn_tests {
+    use super::*;
+
+    #[test]
+    fn a_line_typed_mid_turn_waits_for_its_own_turn() {
+        assert_eq!(
+            route_mid_turn("and the tests?".into(), false),
+            MidTurn::Next("and the tests?".into())
+        );
+    }
+
+    #[test]
+    fn cancel_cancels_instead_of_reaching_the_model() {
+        assert_eq!(route_mid_turn("/cancel".into(), false), MidTurn::Cancel);
+        assert_eq!(route_mid_turn(" /cancel ".into(), false), MidTurn::Cancel);
+        assert_eq!(route_mid_turn("/cancel".into(), true), MidTurn::Cancel);
+    }
+
+    #[test]
+    fn a_durable_session_admits_mid_turn_text_as_steering() {
+        assert_eq!(
+            route_mid_turn("focus on auth".into(), true),
+            MidTurn::Steer("focus on auth".into())
+        );
     }
 }
 

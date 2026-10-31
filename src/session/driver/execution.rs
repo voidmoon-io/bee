@@ -33,7 +33,7 @@ impl Driver {
         let runtime = fingerprint(&(system, model.id(), registry.schemas(), enforced, policy))?;
         if let Some(report) = self.begin(request, text, system, limits, runtime).await? {
             self.replay_report(&report, registry, output)?;
-            return Ok((report, self.journal().conversation.clone()));
+            return Ok((report, self.journal().conversation.conversation().clone()));
         }
         output.info(&format!("durable submission admitted: {request}"));
         let active = self.active();
@@ -120,7 +120,7 @@ impl Driver {
             registry.set_deps(Arc::new(deps));
         }
         let report = result?;
-        Ok((report, self.journal().conversation.clone()))
+        Ok((report, self.journal().conversation.conversation().clone()))
     }
     fn replay_report(
         &self,
@@ -249,7 +249,7 @@ impl Driver {
                         }
                     }
                     let schemas = registry.schemas();
-                    let conversation = self.journal().conversation.clone();
+                    let conversation = self.journal().conversation.conversation().clone();
                     if let (true, Some(h), Some(active)) = (ready, hooks, active_policy.as_mut()) {
                         let future = crate::grants::escalate::lifecycle_step(
                             h,

@@ -236,6 +236,9 @@ pub fn on_event(state: &mut State, event: Event) -> Result<Vec<Effect>, Error> {
                     Err(Error::Conflict)
                 };
             }
+            if id < next.horizon {
+                return Err(Error::Stale);
+            }
             if next.operations.len() >= MAX_OPERATIONS {
                 return Err(Error::Limit);
             }
@@ -390,24 +393,63 @@ pub fn on_event(state: &mut State, event: Event) -> Result<Vec<Effect>, Error> {
                 }
             }
         }
-        Event::Cancel { id } => {
+        Event::Cancel { id } | Event::Expire { id } => {
+            let reason = match event {
+                Event::Expire { .. } => StopReason::Deadline,
+                _ => StopReason::Cancelled,
+            };
             let operation = next.operations.get_mut(&id).ok_or(Error::NotFound)?;
-            stop(operation, StopReason::Cancelled);
+            stop(operation, reason);
             release.extend(notification(state, id, &operation.phase));
+        }
+        Event::Prune { operations } => {
+            if operations.is_empty() || operations.len() > MAX_OPERATIONS {
+                return Err(Error::InvalidInput);
+            }
+            let mut forget = std::collections::BTreeSet::new();
+            for id in operations {
+                let operation = next.operations.get(&id).ok_or(Error::NotFound)?;
+                if !matches!(
+                    operation.phase,
+                    Phase::Completed { .. } | Phase::Stopped { .. }
+                ) || !forget.insert(id)
+                {
+                    return Err(Error::InvalidPhase);
+                }
+            }
+            next.operations.retain(|id, _| !forget.contains(id));
+            next.entries
+                .retain(|entry| !forget.contains(&entry.attempt.operation));
+            let last = *forget.last().expect("nonempty prune");
+            next.horizon = next
+                .horizon
+                .max(OperationId(last.0.checked_add(1).ok_or(Error::Limit)?));
         }
         Event::Cleaned { token } => {
             state.check_token(&token)?;
             let id = token.attempt.operation;
             let operation = next.operations.get_mut(&id).ok_or(Error::NotFound)?;
-            let Phase::Cancelling { attempt, reason } = &operation.phase else {
+            let Phase::Cancelling {
+                attempt,
+                reason,
+                unresolved,
+            } = &operation.phase
+            else {
                 return Err(Error::Stale);
             };
             if attempt != &token.attempt {
                 return Err(Error::Stale);
             }
-            operation.phase = Phase::Stopped {
-                reason: *reason,
-                attempt: Some(attempt.clone()),
+            // Proving the executor stopped does not reveal what an interrupted effect did.
+            operation.phase = match unresolved {
+                Some(unresolved) => Phase::Unresolved {
+                    attempt: attempt.clone(),
+                    reason: *unresolved,
+                },
+                None => Phase::Stopped {
+                    reason: *reason,
+                    attempt: Some(attempt.clone()),
+                },
             };
             release.extend(notification(state, id, &operation.phase));
         }
@@ -473,8 +515,9 @@ fn complete(
         attempt: attempt.clone(),
         result: result.clone(),
     };
+    snapshot.sequence = snapshot.sequence.checked_add(1).ok_or(Error::Limit)?;
     let entry = Entry {
-        sequence: snapshot.entries.len() as u64 + 1,
+        sequence: snapshot.sequence,
         attempt,
         result,
     };
@@ -503,24 +546,44 @@ fn notification(state: &State, id: OperationId, phase: &Phase) -> Option<Effect>
     }
 }
 
+/// Cancellation and expiry stop work; they never turn an unknown outcome into a known stop.
+/// Cancelling an `Unresolved` attempt retries cleanup and then returns it to `Unresolved`; an
+/// interrupted attempt whose policy cannot replay it becomes `Unresolved` once cleanup proves its
+/// executor stopped. Expiry leaves `Unresolved` alone: time reveals nothing new about it.
 fn stop(operation: &mut Operation, reason: StopReason) {
     operation.phase = match &operation.phase {
         Phase::Ready => Phase::Stopped {
             reason,
             attempt: None,
         },
-        Phase::Running { attempt }
-        | Phase::Recovering { attempt }
-        | Phase::Unresolved { attempt, .. } => Phase::Cancelling {
+        Phase::Running { attempt } => Phase::Cancelling {
             attempt: attempt.clone(),
             reason,
+            unresolved: None,
+        },
+        Phase::Unresolved {
+            attempt,
+            reason: unresolved,
+        } => Phase::Cancelling {
+            attempt: attempt.clone(),
+            reason,
+            unresolved: Some(*unresolved),
+        },
+        Phase::Recovering { attempt } => Phase::Cancelling {
+            attempt: attempt.clone(),
+            reason,
+            unresolved: match operation.spec.recovery {
+                RecoveryPolicy::RetrySafe { .. } => None,
+                RecoveryPolicy::Reconcile => Some(UnresolvedReason::ReconciliationRequired),
+                RecoveryPolicy::NeverReplay => Some(UnresolvedReason::UnknownOutcome),
+            },
         },
         other => other.clone(),
     };
 }
 
 fn expire(operation: &mut Operation, now_ms: u64) -> bool {
-    if now_ms < operation.spec.deadline_ms {
+    if now_ms < operation.spec.deadline_ms || matches!(operation.phase, Phase::Unresolved { .. }) {
         return false;
     }
     let before = operation.phase.clone();
@@ -652,14 +715,23 @@ fn validate_snapshot(snapshot: &Snapshot) -> Result<(), Error> {
     if completed != snapshot.entries.len() {
         return Err(Error::InvalidSnapshot);
     }
+    if snapshot.entries.len() as u64 > snapshot.sequence
+        || (snapshot.horizon.0 == 0 && snapshot.sequence != snapshot.entries.len() as u64)
+    {
+        return Err(Error::InvalidSnapshot);
+    }
     let mut seen = std::collections::BTreeSet::new();
-    for (index, entry) in snapshot.entries.iter().enumerate() {
-        if entry.sequence != index as u64 + 1 || !seen.insert(entry.attempt.operation)
+    let mut previous = 0;
+    for entry in &snapshot.entries {
+        if entry.sequence <= previous
+            || entry.sequence > snapshot.sequence
+            || !seen.insert(entry.attempt.operation)
             || !snapshot.operations.get(&entry.attempt.operation).is_some_and(|op| {
                 matches!(&op.phase, Phase::Completed { attempt, result } if attempt == &entry.attempt && result == &entry.result)
             }) {
             return Err(Error::InvalidSnapshot);
         }
+        previous = entry.sequence;
     }
     Ok(())
 }

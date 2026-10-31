@@ -103,7 +103,7 @@ impl Tool for Mutation {
             .unwrap();
         f.write_all(b"effect\n").unwrap();
         f.sync_all().unwrap();
-        if std::env::var("BEE_DRIVER_CRASH_MODE").as_deref() == Ok("after-effect") {
+        if std::env::var("BEE_DRIVER_CRASH_MODE").is_ok_and(|m| m.starts_with("after-effect")) {
             pause();
         }
         ToolResult::ok("exact observation")
@@ -659,7 +659,7 @@ async fn crash_child() {
     let mut registry = registry(&root, &session);
     let mode = std::env::var("BEE_DRIVER_CRASH_MODE").unwrap();
     let mut limits = limits();
-    if mode == "backoff-expired" {
+    if mode == "backoff-expired" || mode == "after-effect-deadline" {
         limits.timeout_ms = 1500;
     }
     if mode == "before-provider-budget" {
@@ -793,6 +793,62 @@ async fn sigkill_unknown_effect_stays_unresolved_and_partial_stream_never_dispat
             );
         }
     }
+}
+
+#[tokio::test]
+async fn a_deadline_passing_over_an_unknown_effect_keeps_it_unresolved() {
+    use bee::session::durable::{Phase, UnresolvedReason};
+    let root = tempfile::tempdir().unwrap();
+    let mut child = child(root.path(), "after-effect-deadline");
+    child.0.kill().unwrap();
+    child.0.wait().unwrap();
+    let resume = |root: PathBuf| async move {
+        let running = session(&root, None).await;
+        let mut registry = registry(&root, &running);
+        running
+            .run(
+                "request",
+                None,
+                "system",
+                limits(),
+                &model(),
+                &mut registry,
+                &mut Sandbox::host(vec![]),
+                &Output::default(),
+                None,
+            )
+            .await
+    };
+    // Host mode cannot prove the old executor stopped, so cleanup may still be pending; either
+    // way the phase must keep saying the outcome is unknown.
+    let unresolved = |root: &Path| {
+        let snap = snapshot(root);
+        snap.operations()
+            .values()
+            .find_map(|op| match &op.phase {
+                Phase::Unresolved { reason, .. } => Some((*reason, op.spec.deadline_ms)),
+                Phase::Cancelling {
+                    unresolved: Some(reason),
+                    ..
+                } => Some((*reason, op.spec.deadline_ms)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{:?}", snap.operations()))
+    };
+    for _ in 0..2 {
+        assert!(matches!(
+            resume(root.path().into()).await,
+            Err(DriverError::Unresolved(_))
+        ));
+        let (reason, deadline) = unresolved(root.path());
+        assert_eq!(reason, UnresolvedReason::UnknownOutcome);
+        // Past the deadline, expiry neither turns it into a stop nor reruns the effect.
+        wait_past_wall_deadline(deadline).await;
+    }
+    assert_eq!(
+        std::fs::read(root.path().join("effects")).unwrap(),
+        b"effect\n"
+    );
 }
 
 struct CancelProbe(PathBuf);
@@ -1558,4 +1614,318 @@ async fn library_entrypoints_refuse_unsupported_settings_before_admitting_work()
         matches!(result.outcome, ExchangeOutcome::Terminated(ref detail) if detail.contains("context/stuck"))
     );
     assert!(!root.path().join("effects").exists());
+}
+
+/// One tool call per submission: call while the newest message is the user's, then answer.
+fn per_request_model() -> MockModel {
+    MockModel::from_fn(|convo| {
+        if matches!(convo.messages.last(), Some(Message::User { .. })) {
+            Turn::calls(vec![ToolCall {
+                id: "call".into(),
+                name: "mutation".into(),
+                arguments: json!({}),
+            }])
+        } else {
+            Turn::text("finished")
+        }
+    })
+    .with_id("fixture-model")
+}
+
+#[tokio::test]
+async fn pruning_retires_old_submissions_and_survives_reopen() {
+    prune_fixture(30).await;
+}
+
+#[tokio::test]
+#[ignore = "slow (~40 s in debug builds): over a thousand synchronous commits"]
+async fn pruning_lets_a_session_run_past_its_operation_bound() {
+    let snap = prune_fixture(bee::session::durable::MAX_OPERATIONS / 3 + 10).await;
+    let allocated = snap.driver().unwrap()["next_operation"].as_u64().unwrap();
+    assert!(
+        allocated > bee::session::durable::MAX_OPERATIONS as u64 + 1,
+        "{allocated}"
+    );
+}
+
+/// Runs `submissions` one-tool submissions, pruning aggressively; returns the final snapshot.
+async fn prune_fixture(submissions: usize) -> Snapshot {
+    use bee::session::driver::Retention;
+    // Over a thousand synchronous commits: use memory-backed storage when the host has it.
+    let root = tempfile::tempdir_in("/dev/shm")
+        .or_else(|_| tempfile::tempdir())
+        .unwrap();
+    let mut running = session(root.path(), None).await;
+    let retention = Retention {
+        trigger: 12,
+        keep: 3,
+        journal_bytes: 16 * 1024 * 1024,
+        ..Retention::default()
+    };
+    running.set_retention(retention).await.unwrap();
+    let run = |session: Arc<Session>, request: String, text: &'static str| {
+        let mut registry = registry(root.path(), &session);
+        async move {
+            session
+                .run(
+                    &request,
+                    Some(text),
+                    "system",
+                    limits(),
+                    &per_request_model(),
+                    &mut registry,
+                    &mut Sandbox::host(vec![]),
+                    &Output::default(),
+                    None,
+                )
+                .await
+        }
+    };
+    // Each submission is a tool call between two provider calls: three operations.
+    for i in 0..submissions {
+        let (report, _) = run(running.clone(), format!("r{i}"), "investigate")
+            .await
+            .unwrap();
+        assert!(
+            matches!(report.status, bee::EpisodeStatus::Completed),
+            "{i}: {:?}",
+            report.status
+        );
+        if i == submissions / 2 {
+            // Reopen midway: the pruned snapshot and its tombstones load and keep working.
+            drop(running);
+            running = session(root.path(), None).await;
+            running.set_retention(retention).await.unwrap();
+        }
+    }
+    let snap = snapshot(root.path());
+    assert!(snap.operations().len() < retention.trigger + 6);
+    assert!(snap.horizon().0 > 3 * (submissions as u64 - 2 * retention.trigger as u64));
+    assert!(snap.entries().last().unwrap().sequence >= submissions as u64);
+    // Every tool ran exactly once and every receipt file is still on disk.
+    let effects = std::fs::read_to_string(root.path().join("effects")).unwrap();
+    assert_eq!(effects.lines().count(), submissions);
+    let receipts = std::fs::read_dir(root.path().join("session/evidence"))
+        .unwrap()
+        .count();
+    assert!(receipts >= submissions, "{receipts}");
+    // A pruned request is refused, never rerun, whatever text it carries.
+    for text in ["investigate", "changed"] {
+        let pruned = run(running.clone(), "r0".into(), text).await;
+        assert!(
+            matches!(
+                pruned,
+                Err(DriverError::Store(
+                    bee::session::durable::store::StoreError::Retired
+                ))
+            ),
+            "{pruned:?}"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("effects"))
+            .unwrap()
+            .lines()
+            .count(),
+        submissions
+    );
+    // A recent request still replays its saved report.
+    let last = format!("r{}", submissions - 1);
+    let (replayed, _) = run(running.clone(), last, "investigate").await.unwrap();
+    assert!(matches!(replayed.status, bee::EpisodeStatus::Completed));
+    drop(running);
+    let reopened = session(root.path(), None).await;
+    let (report, _) = run(reopened, "after".into(), "investigate").await.unwrap();
+    assert!(matches!(report.status, bee::EpisodeStatus::Completed));
+    snapshot(root.path())
+}
+
+/// Answers each submission with `bytes` of prose, after checking it sees every earlier submission
+/// once, in order: a lost or duplicated archived message fails the request.
+fn bulky_model(bytes: usize) -> MockModel {
+    MockModel::from_fn(move |convo| {
+        let asked: Vec<_> = convo
+            .messages
+            .iter()
+            .filter_map(|m| match m {
+                Message::User { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        let expected: Vec<_> = (0..asked.len()).map(|i| format!("q{i}")).collect();
+        assert_eq!(asked, expected, "the model must see the whole conversation");
+        assert_eq!(convo.messages.len(), asked.len() * 2 - 1);
+        Turn::text("x".repeat(bytes))
+    })
+    .with_id("fixture-model")
+}
+
+async fn ask(
+    session: &Arc<Session>,
+    root: &Path,
+    i: usize,
+    model: &MockModel,
+) -> Result<Conversation, DriverError> {
+    let mut registry = registry(root, session);
+    let (report, conversation) = session
+        .run(
+            &format!("r{i}"),
+            Some(&format!("q{i}")),
+            "system",
+            limits(),
+            model,
+            &mut registry,
+            &mut Sandbox::host(vec![]),
+            &Output::default(),
+            None,
+        )
+        .await?;
+    assert!(
+        matches!(report.status, bee::EpisodeStatus::NoToolCalls),
+        "{:?}",
+        report.status
+    );
+    Ok(conversation)
+}
+
+fn archived_rows(root: &Path) -> i64 {
+    rusqlite::Connection::open_with_flags(
+        root.join("session/session.sqlite3"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap()
+    .query_row("SELECT count(*) FROM conversation", [], |r| r.get(0))
+    .unwrap()
+}
+
+#[tokio::test]
+#[ignore = "slow in debug builds (~80 s): every model request hashes the whole 18 MiB conversation"]
+async fn a_conversation_past_the_old_journal_limit_keeps_taking_submissions() {
+    let root = tempfile::tempdir_in("/dev/shm")
+        .or_else(|_| tempfile::tempdir())
+        .unwrap();
+    let model = bulky_model(900 * 1024);
+    let mut running = session(root.path(), None).await;
+    let mut conversation = Conversation::default();
+    // 20 answers of 900 KiB: about 18 MiB, past the 16 MiB a whole-conversation journal allowed.
+    for i in 0..20 {
+        if i == 10 {
+            drop(running);
+            running = session(root.path(), None).await;
+        }
+        conversation = ask(&running, root.path(), i, &model).await.unwrap();
+    }
+    let total: usize = conversation
+        .messages
+        .iter()
+        .map(|m| serde_json::to_vec(m).unwrap().len())
+        .sum();
+    assert!(total > 16 * 1024 * 1024, "{total}");
+    // The journal carries a bounded tail; the rest is archived once, in order.
+    let driver = snapshot(root.path()).driver().unwrap().clone();
+    let tail = serde_json::to_vec(&driver["conversation"]).unwrap().len();
+    assert!(tail < 1024 * 1024, "{tail}");
+    // Retention keeps finished reports, the rest of the journal, within its own budget.
+    let journal = serde_json::to_vec(&driver).unwrap().len();
+    assert!(journal < 6 * 1024 * 1024, "{journal}");
+    assert!(archived_rows(root.path()) >= 38);
+    drop(running);
+    let reopened = session(root.path(), None).await;
+    let after = ask(&reopened, root.path(), 20, &model).await.unwrap();
+    assert_eq!(
+        serde_json::to_value(&after.messages[..conversation.messages.len()]).unwrap(),
+        serde_json::to_value(&conversation.messages).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn a_full_conversation_ends_the_session_with_a_reason() {
+    let root = tempfile::tempdir().unwrap();
+    let model = bulky_model(300 * 1024);
+    let running = session(root.path(), None).await;
+    let retention = bee::session::driver::Retention {
+        conversation_bytes: 1024 * 1024,
+        ..Default::default()
+    };
+    running.set_retention(retention).await.unwrap();
+    for i in 0..4 {
+        ask(&running, root.path(), i, &model).await.unwrap();
+    }
+    let refused = ask(&running, root.path(), 4, &model).await;
+    assert!(
+        matches!(&refused, Err(DriverError::Refused(reason)) if reason.contains("conversation is full")),
+        "{:?}",
+        refused.err()
+    );
+    drop(running);
+    let reopened = session(root.path(), None).await;
+    reopened.set_retention(retention).await.unwrap();
+    assert!(matches!(
+        ask(&reopened, root.path(), 4, &model).await,
+        Err(DriverError::Refused(_))
+    ));
+}
+
+/// Kills the storage owner just before the first commit that archives messages.
+struct CrashBeforeArchive(std::sync::atomic::AtomicBool);
+impl bee::session::driver::Observer for CrashBeforeArchive {
+    fn before_commit(&self, commit: &bee::session::durable::Commit) {
+        let archived = commit
+            .snapshot
+            .driver()
+            .and_then(|d| d["conversation"]["archived"].as_u64());
+        if archived.unwrap_or(0) > 0 && self.0.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            panic!("simulated crash before the archiving commit");
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_crash_before_an_archiving_commit_loses_neither_tail_nor_archive() {
+    let root = tempfile::tempdir().unwrap();
+    let model = bulky_model(100 * 1024);
+    let crashing = Session::open_observed(
+        root.path().join("session"),
+        SessionId("driver-fixture".into()),
+        "test-config".into(),
+        None,
+        Some(Arc::new(CrashBeforeArchive(true.into()))),
+    )
+    .await
+    .unwrap();
+    let mut crashed = None;
+    for i in 0..4 {
+        if let Err(error) = ask(&crashing, root.path(), i, &model).await {
+            crashed = Some((i, error));
+            break;
+        }
+    }
+    let (at, _) = crashed.expect("an archiving commit happened");
+    assert_eq!(archived_rows(root.path()), 0);
+    drop(crashing);
+    // Reopen resumes the interrupted submission from the last commit, then archives normally.
+    let reopened = session(root.path(), None).await;
+    let mut registry = registry(root.path(), &reopened);
+    let (report, _) = reopened
+        .run(
+            &format!("r{at}"),
+            None,
+            "system",
+            limits(),
+            &model,
+            &mut registry,
+            &mut Sandbox::host(vec![]),
+            &Output::default(),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(report.status, bee::EpisodeStatus::NoToolCalls),
+        "{:?}",
+        report.status
+    );
+    let conversation = ask(&reopened, root.path(), at + 1, &model).await.unwrap();
+    assert_eq!(conversation.messages.len(), (at + 2) * 2);
+    assert!(archived_rows(root.path()) > 0);
 }

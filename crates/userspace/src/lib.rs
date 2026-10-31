@@ -31,7 +31,7 @@ pub mod audit_demux;
 
 pub use bee_common::ScopeMode;
 pub use detect::{detect, Support};
-pub use plan::{EnforcementPlan, PlanError};
+pub use plan::{filesystem_allows_write, EnforcementPlan, PlanError};
 pub use reload::ReloadError;
 pub use resolve::SystemResolver;
 pub use spawn::{hardened_command, SpawnError};

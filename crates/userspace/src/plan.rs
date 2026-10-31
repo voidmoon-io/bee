@@ -138,6 +138,23 @@ fn display_bytes(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
+/// Whether an enforced scope with these filesystem rules lets a tool open `path` for writing.
+/// Decided by the same deny list and matcher the kernel program runs, so it cannot drift from
+/// enforcement. `write_default_deny` is [`CompiledPolicy::fs_write_default_deny`].
+pub fn filesystem_allows_write(
+    rules: &[FsPrimitive],
+    write_default_deny: bool,
+    path: &[u8],
+) -> Result<bool, PlanError> {
+    let list = plan_filesystem(rules)?;
+    Ok(!bee_common::matcher::fs_open_blocked(
+        path,
+        &list,
+        true,
+        write_default_deny,
+    ))
+}
+
 fn plan_filesystem(rules: &[FsPrimitive]) -> Result<DenyList, PlanError> {
     let mut encoded: Vec<(u8, u8, &[u8])> = Vec::with_capacity(rules.len());
     for rule in rules {

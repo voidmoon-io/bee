@@ -1,9 +1,11 @@
 //! Harness-owned tool receipts. A receipt proves what a tool returned, not that a claim is true.
 
+use std::collections::BTreeSet;
 use std::ffi::CString;
 use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -35,6 +37,9 @@ pub struct Receipt {
 pub struct EvidenceStore {
     root: PathBuf,
     session_id: String,
+    /// Durable only: receipt IDs the session store committed. A file on disk is not provenance;
+    /// the sandbox may be able to write there, so a durable citation must name a committed ID.
+    committed: Option<Arc<Mutex<BTreeSet<String>>>>,
 }
 
 impl EvidenceStore {
@@ -49,7 +54,27 @@ impl EvidenceStore {
         Ok(Self {
             root: root.into(),
             session_id: session.0.clone(),
+            committed: Some(Arc::default()),
         })
+    }
+
+    /// Durable only: these IDs were committed by the owned session store and may be cited. The
+    /// session driver calls this; a caller driving the store directly vouches for the same.
+    pub fn admit_committed<'a>(&self, ids: impl IntoIterator<Item = &'a String>) {
+        if let Some(committed) = &self.committed {
+            let mut committed = committed.lock().expect("committed receipts lock");
+            committed.extend(ids.into_iter().cloned());
+        }
+    }
+
+    /// Durable only: an ID evicted from the bounded committed set is no longer citable.
+    pub(crate) fn forget_committed(&self, id: &str) {
+        if let Some(committed) = &self.committed {
+            committed
+                .lock()
+                .expect("committed receipts lock")
+                .remove(id);
+        }
     }
 
     pub fn session_id(&self) -> &str {
@@ -65,6 +90,7 @@ impl EvidenceStore {
                 time::OffsetDateTime::now_utc().unix_timestamp_nanos(),
                 NEXT_SEQUENCE.fetch_add(1, Ordering::Relaxed)
             ),
+            committed: None,
         }
     }
 
@@ -183,10 +209,25 @@ impl EvidenceStore {
             ));
         }
         for id in ids {
-            if self.get(id)?.session_id != self.session_id {
+            let receipt = self.get(id)?;
+            if receipt.session_id != self.session_id {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
                     "evidence belongs to a different session",
+                ));
+            }
+            let Some(committed) = &self.committed else {
+                continue;
+            };
+            // The ID is the digest of the bytes, so a committed ID pins exactly what was observed.
+            let known = committed
+                .lock()
+                .expect("committed receipts lock")
+                .contains(id);
+            if !known || receipt.schema_version != 2 {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "evidence was not committed by this durable session",
                 ));
             }
         }

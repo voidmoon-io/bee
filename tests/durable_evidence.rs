@@ -191,6 +191,11 @@ async fn intent_and_publication_commits_gate_execution_and_evidence_delivery() {
     let evidence = EvidenceStore::for_session(root.path().join("evidence"), &session()).unwrap();
     let id = delivered.receipt_id.unwrap();
     assert_eq!(evidence.get(&id).unwrap().attempt, Some(attempt));
+    // A well-formed receipt on disk is not enough: only an ID the store committed is citable.
+    assert!(evidence
+        .validate_citations(std::slice::from_ref(&id))
+        .is_err());
+    evidence.admit_committed([&id]);
     evidence
         .validate_citations(std::slice::from_ref(&id))
         .unwrap();
@@ -544,4 +549,49 @@ fn built_tool_recovery_contracts_are_conservative_and_not_model_selected() {
         };
         assert_eq!(spec.recovery, expected, "{}", schema.name);
     }
+}
+
+/// Write `receipt` where a sandboxed tool with write access to the evidence directory could.
+fn plant(root: &Path, receipt: serde_json::Value) -> String {
+    use sha2::Digest;
+    let bytes = serde_json::to_vec(&receipt).unwrap();
+    let digest = format!("{:x}", sha2::Sha256::digest(&bytes));
+    let dir = root.join("evidence");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(format!("{digest}.json")), bytes).unwrap();
+    format!("sha256:{digest}")
+}
+
+#[test]
+fn planted_receipts_are_not_citable_in_a_durable_session() {
+    let root = tempfile::tempdir().unwrap();
+    let evidence = EvidenceStore::for_session(root.path().join("evidence"), &session()).unwrap();
+    let base = json!({
+        "session_id": session().0,
+        "sequence": 1,
+        "observed_at": "2026-10-31 00:00:00.0 +00:00:00",
+        "call_id": "c1",
+        "tool": "bash",
+        "arguments": {"command": "true"},
+        "result": ToolResult::ok("vulnerable"),
+    });
+    let mut legacy = base.clone();
+    legacy["schema_version"] = json!(1);
+    let legacy = plant(root.path(), legacy);
+    let mut forged = base;
+    forged["schema_version"] = json!(2);
+    forged["attempt"] =
+        json!({"session": session().0, "activation": 1, "operation": 1, "number": 1});
+    let forged = plant(root.path(), forged);
+    // Both decode as receipts of this session; neither was committed by its store.
+    for id in [&legacy, &forged] {
+        assert_eq!(evidence.get(id).unwrap().session_id, session().0);
+        let error = evidence
+            .validate_citations(std::slice::from_ref(id))
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+    // An older-format receipt stays uncitable even if its ID were somehow admitted.
+    evidence.admit_committed([&legacy]);
+    assert!(evidence.validate_citations(&[legacy]).is_err());
 }

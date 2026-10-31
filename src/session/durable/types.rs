@@ -2,7 +2,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-pub const SCHEMA_VERSION: u32 = 5;
+pub const SCHEMA_VERSION: u32 = 6;
+/// Snapshots written before pruning load unchanged: no entry or operation was ever removed.
+pub const PRUNELESS_SCHEMA_VERSION: u32 = 5;
 pub const MAX_OPERATIONS: usize = 1024;
 pub const MAX_PAYLOAD_BYTES: usize = 64 * 1024;
 pub const MAX_RECEIPT_BYTES: usize = 2 * 1024 * 1024;
@@ -103,6 +105,9 @@ pub enum Phase {
     Cancelling {
         attempt: Attempt,
         reason: StopReason,
+        /// The attempt's outcome was already unknown; cleanup returns it here, not to `Stopped`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        unresolved: Option<UnresolvedReason>,
     },
     Unresolved {
         attempt: Attempt,
@@ -141,7 +146,7 @@ pub struct Entry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(from = "StoredSnapshot")]
+#[serde(try_from = "StoredSnapshot")]
 pub struct Snapshot {
     pub(super) schema_version: u32,
     pub(super) session: SessionId,
@@ -150,6 +155,10 @@ pub struct Snapshot {
     pub(super) observed_ms: u64,
     pub(super) operations: BTreeMap<OperationId, Operation>,
     pub(super) entries: Vec<Entry>,
+    /// The last entry sequence assigned; pruned entries keep their numbers out of reuse.
+    pub(super) sequence: u64,
+    /// Every operation ID below this was either pruned or is still listed; none is reusable.
+    pub(super) horizon: OperationId,
     pub(super) driver: Option<Value>,
 }
 
@@ -164,11 +173,16 @@ struct StoredSnapshot {
     observed_ms: u64,
     operations: BTreeMap<OperationId, Operation>,
     entries: Vec<Entry>,
+    #[serde(default)]
+    sequence: Option<u64>,
+    #[serde(default)]
+    horizon: Option<OperationId>,
     driver: Option<Value>,
 }
 
-impl From<StoredSnapshot> for Snapshot {
-    fn from(stored: StoredSnapshot) -> Self {
+impl TryFrom<StoredSnapshot> for Snapshot {
+    type Error = &'static str;
+    fn try_from(stored: StoredSnapshot) -> Result<Self, Self::Error> {
         let mut operations = stored.operations;
         for entry in &stored.entries {
             if let Some(Operation {
@@ -181,16 +195,24 @@ impl From<StoredSnapshot> for Snapshot {
                 }
             }
         }
-        Self {
-            schema_version: stored.schema_version,
+        // A version-5 snapshot never pruned, so its counters follow from what it lists.
+        let (sequence, horizon) = match (stored.schema_version, stored.sequence, stored.horizon) {
+            (PRUNELESS_SCHEMA_VERSION, None, None) => (stored.entries.len() as u64, OperationId(0)),
+            (SCHEMA_VERSION, Some(sequence), Some(horizon)) => (sequence, horizon),
+            _ => return Err("unsupported snapshot version"),
+        };
+        Ok(Self {
+            schema_version: SCHEMA_VERSION,
             session: stored.session,
             activation: stored.activation,
             revision: stored.revision,
             observed_ms: stored.observed_ms,
             operations,
             entries: stored.entries,
+            sequence,
+            horizon,
             driver: stored.driver,
-        }
+        })
     }
 }
 
@@ -204,6 +226,8 @@ impl Snapshot {
             observed_ms: 0,
             operations: BTreeMap::new(),
             entries: Vec::new(),
+            sequence: 0,
+            horizon: OperationId(0),
             driver: None,
         }
     }
@@ -228,6 +252,10 @@ impl Snapshot {
     }
     pub fn operations(&self) -> &BTreeMap<OperationId, Operation> {
         &self.operations
+    }
+    /// Operation IDs below this that are not listed were pruned and can never be submitted again.
+    pub fn horizon(&self) -> OperationId {
+        self.horizon
     }
 }
 
@@ -296,6 +324,15 @@ pub enum Event {
     },
     Cancel {
         id: OperationId,
+    },
+    /// The host's deadline for this operation's work passed: stop it as `Deadline`, not `Cancelled`.
+    Expire {
+        id: OperationId,
+    },
+    /// Forget finished operations and their entries. Each must be `Completed` or `Stopped`;
+    /// unknown outcomes and live or undelivered work are never pruned. Receipt files are untouched.
+    Prune {
+        operations: Vec<OperationId>,
     },
     Cleaned {
         token: RecoveryToken,

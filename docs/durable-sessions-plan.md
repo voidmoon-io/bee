@@ -34,6 +34,14 @@ Adapter obligations for the next slices:
   executor is stopped, not merely unreachable. A recovered result must belong to
   the exact original attempt. Stopped attempts retain their identity; cleanup
   does not establish that their external effects never happened.
+- Cancellation and expiry never erase an unknown outcome. Cancelling an
+  `Unresolved` attempt retries cleanup (`Cancelling` carries the unresolved reason)
+  and then returns it to `Unresolved` with the same reason. An interrupted
+  (`Recovering`) attempt under `NeverReplay` or `Reconcile` likewise becomes
+  `Unresolved` once cleanup proves its executor stopped; only `RetrySafe` work
+  becomes `Stopped`. Expiry leaves `Unresolved` alone. Cancelling an attempt still
+  running in the current activation ends as `Stopped`, which already records that
+  its external outcome can be unknown.
 - Deduplicate presentation by stable session ID and entry sequence. Reopen can
   redeliver committed entries; `Replay` accepts the last consumed sequence.
 
@@ -101,9 +109,12 @@ same request ID. `Store::submissions(after_sequence, limit)` pages admissions in
 ascending order, with at most 100 per page. Admission does not yet create a task,
 consume input, or acknowledge completion; those belong to the shared session driver.
 
-Initial limits are 1024 inbox entries, 64 KiB per input, 256 MiB per serialized
-checkpoint, and SQLite's signed 64-bit revision range. No automatic pruning occurs;
-capacity exhaustion is explicit. WAL autocheckpointing and a 16 MiB retained-journal
+Limits are 1024 live inbox entries, 64 KiB per input, 256 MiB per serialized
+checkpoint, and SQLite's signed 64-bit revision range. Pruning (below) retires
+admissions: a retired row keeps only its request ID and digest, is skipped by
+`submissions`, and makes `admit` return `Retired` for that ID whatever its input.
+At most 65,536 retired rows are kept; beyond that, new admissions are refused
+with `Limit` rather than forgetting a request ID. Capacity exhaustion is explicit. WAL autocheckpointing and a 16 MiB retained-journal
 target control routine growth, but are not a total on-disk quota or a live-WAL cap.
 Retain the directory with its SQLite sidecars; copying only an active main database
 is not a backup protocol.
@@ -156,6 +167,26 @@ can inspect prior receipts but cannot cite them as their own observations. Exist
 schema-1 receipts stay readable and are never rewritten. Durable observations use
 receipt schema 2 with the exact session, activation, operation, and attempt number;
 its sequence field is the operation ID, with retries distinguished by attempt.
+
+A receipt file is not provenance: a tool that can write the evidence directory can
+plant one. A durable session therefore cites only receipt IDs its store committed.
+Publishing a receipt records its ID in the driver checkpoint in the same commit;
+reopen restores that list and adds IDs still held by committed entries. Because an
+ID is the digest of the receipt bytes, a committed ID pins the exact observation.
+`validate_citations` refuses any other ID, and any schema-1 receipt, even one that
+names this session. The list keeps the newest 1,024 IDs, independent of the operation
+log, so pruning operations does not make recent receipts uncitable; an evicted ID
+can no longer be cited. Non-durable runs keep schema-1 receipts and their checks.
+
+`bee run` and `bee repl` refuse a `--session-dir` that the active policy, or the
+ceiling a grant could widen it to, lets a sandboxed tool write. The check uses the
+kernel's own deny list and matcher on the directory, its SQLite files, and the
+evidence directory and receipt names, so a write grant on the directory, an
+ancestor, a descendant, or a matching suffix is refused, as is an observe-mode
+policy or one with no write rule (unmatched writes stay allowed). Under `--host`
+there is no policy and no check: the operator chose unscoped tools, and planted
+receipts are still uncitable. Tampering with the SQLite store itself is outside
+this protection, as with any same-user process.
 
 The adapter protocol extends stage 2:
 
@@ -229,7 +260,38 @@ receive generated request IDs printed after durable admission.
 The driver persists admission, conversation, active submission, operation IDs,
 completed reports, original limits/deadlines, charged provider calls, known usage,
 audit events, and elapsed call times. Its checkpoint is bounded at 16 MiB within
-the store's existing limits. No pruning or transcript-retention policy is enabled.
+the store's existing limits.
+
+The checkpoint carries only the conversation's tail. Once the tail holds 64
+messages or 256 KiB, the next commit moves it to the store's append-only
+`conversation` table (store version 6; a version-5 store gains the table when it
+is opened) in the same transaction, so a commit never rewrites the whole history
+and a crash keeps either both the archive and its checkpoint or neither. Rows must
+continue the table exactly; each carries its digest, and reopen refuses a session
+whose row count differs from the checkpoint's `archived` count. Journals written
+before version 6 have no `archived` and load with the whole conversation as tail.
+The conversation is never compacted: every request still sends all of it, and
+context compaction (025) is not wired into durable sessions, because its summaries
+call the model and its state would need its own durable recording. Instead, a
+session whose conversation reaches 64 MiB (`Retention::conversation_bytes`) takes
+no new submission and says so; resuming or replaying admitted ones still works.
+A provider whose context window is smaller fails the request first, ending that
+submission as `Terminated`.
+
+Before admitting a new submission, the driver prunes once live operations,
+finished reports, or live admissions reach 768, or the journal reaches 4 MiB
+(`Retention`). It keeps the newest 256 finished reports, as many as fit in half
+that budget: a report carries its submission's transcript, so bulky ones go sooner. An older report is pruned
+only if every operation it charged is `Completed` or `Stopped`; a submission with
+any unresolved, live, or undelivered operation keeps its report and operations.
+One commit then removes the reports from the journal, applies core `Prune` to the
+operations no remaining report charges (dropping their entries), retires those
+submissions' admissions with their steering and cancel inputs, and deletes worker
+journals of pruned operations. Receipt files are never deleted. The core refuses
+to prune anything not `Completed` or `Stopped`, keeps entry sequences counting
+(`sequence`), and refuses resubmission of any absent ID below `horizon`. Snapshot
+schema 6 adds these counters; schema-5 snapshots load with them derived. A pruned
+request is refused (`Retired`) instead of replayed; its saved report is gone.
 Store failures stop progress and require reopen; an interrupted in-memory driver
 cannot continue from an uncertain journal. A capacity limit or a refusal (hook,
 response bound) would recur on every resume, so it ends the submission through the

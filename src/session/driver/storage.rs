@@ -3,7 +3,7 @@
 use super::DriverError;
 use crate::session::durable::{store::journal::WorkerRecord, Attempt};
 use crate::session::durable::{
-    store::{Store, Submission},
+    store::{Append, Store, Submission},
     ActivationId, Commit, CommitId, SessionId, Snapshot,
 };
 use std::path::PathBuf;
@@ -14,7 +14,12 @@ pub(super) struct Storage {
     owner: Option<std::thread::JoinHandle<()>>,
 }
 pub(super) enum Request {
-    Commit(Box<Commit>, oneshot::Sender<Result<CommitId, DriverError>>),
+    Commit(
+        Box<Commit>,
+        Vec<String>,
+        Vec<Append>,
+        oneshot::Sender<Result<CommitId, DriverError>>,
+    ),
     Admit(
         String,
         serde_json::Value,
@@ -31,7 +36,7 @@ impl Storage {
         path: PathBuf,
         session: SessionId,
         observer: Option<std::sync::Arc<dyn super::Observer>>,
-    ) -> Result<(Self, Snapshot, ActivationId, Vec<Submission>), DriverError> {
+    ) -> Result<(Self, Snapshot, ActivationId, Vec<Submission>, Vec<Vec<u8>>), DriverError> {
         let (tx, mut rx) = mpsc::channel(16);
         let (opened, ready) = oneshot::channel();
         let owner = std::thread::Builder::new()
@@ -49,9 +54,10 @@ impl Storage {
                         }
                         inbox.extend(page);
                     }
-                    Ok::<_, DriverError>((store, snapshot, inbox))
+                    let conversation = store.conversation()?;
+                    Ok::<_, DriverError>((store, snapshot, inbox, conversation))
                 })();
-                let (mut store, snapshot, inbox) = match prepared {
+                let (mut store, snapshot, inbox, conversation) = match prepared {
                     Ok(value) => value,
                     Err(error) => {
                         let _ = opened.send(Err(error));
@@ -59,18 +65,20 @@ impl Storage {
                     }
                 };
                 if opened
-                    .send(Ok((snapshot, store.activation(), inbox)))
+                    .send(Ok((snapshot, store.activation(), inbox, conversation)))
                     .is_err()
                 {
                     return;
                 }
                 while let Some(request) = rx.blocking_recv() {
                     match request {
-                        Request::Commit(commit, reply) => {
+                        Request::Commit(commit, retire, appends, reply) => {
                             if let Some(observer) = &observer {
                                 observer.before_commit(&commit);
                             }
-                            let result = store.commit(&commit).map_err(Into::into);
+                            let result = store
+                                .commit_appending(&commit, &retire, &appends)
+                                .map_err(Into::into);
                             if result.is_ok() {
                                 if let Some(observer) = &observer {
                                     observer.committed(&commit);
@@ -96,7 +104,7 @@ impl Storage {
                     }
                 }
             })?;
-        let (snapshot, activation, inbox) =
+        let (snapshot, activation, inbox, conversation) =
             ready.await.map_err(|_| DriverError::StorageClosed)??;
         Ok((
             Self {
@@ -106,14 +114,22 @@ impl Storage {
             snapshot,
             activation,
             inbox,
+            conversation,
         ))
     }
-    pub async fn commit(&self, commit: Commit) -> Result<CommitId, DriverError> {
+    /// `retire` names admissions whose reports this commit prunes and `appends` the conversation
+    /// messages it archives; all of it lands or none of it does.
+    pub async fn commit(
+        &self,
+        commit: Commit,
+        retire: Vec<String>,
+        appends: Vec<Append>,
+    ) -> Result<CommitId, DriverError> {
         let (tx, rx) = oneshot::channel();
         self.tx
             .as_ref()
             .expect("live storage")
-            .send(Request::Commit(Box::new(commit), tx))
+            .send(Request::Commit(Box::new(commit), retire, appends, tx))
             .await
             .map_err(|_| DriverError::StorageClosed)?;
         rx.await.map_err(|_| DriverError::StorageClosed)?

@@ -33,6 +33,8 @@ Exit status:
 
 #[derive(Args, Debug)]
 pub struct RunArgs {
+    #[command(flatten)]
+    pub durable: super::durable::DurableArgs,
     /// Scenario TOML (policy + task + limits). Omit and use --task for an ad-hoc run.
     #[arg(long, conflicts_with = "task")]
     pub scenario: Option<PathBuf>,
@@ -70,16 +72,16 @@ pub struct RunArgs {
     #[arg(long)]
     pub ceiling_policy: Option<PathBuf>,
     /// System prompt for --task runs.
-    #[arg(long, requires = "task")]
+    #[arg(long)]
     pub system: Option<String>,
     /// Comma-separated tools for --task runs.
-    #[arg(long, requires = "task")]
+    #[arg(long)]
     pub tools: Option<String>,
     /// Max tool-call rounds for --task runs.
-    #[arg(long, requires = "task")]
+    #[arg(long)]
     pub turn_limit: Option<u32>,
     /// Wall-clock cap (seconds) for --task runs.
-    #[arg(long, requires = "task")]
+    #[arg(long)]
     pub timeout_secs: Option<u64>,
 
     /// Directory the scenario's `[scenario.workdir]` files and dirs must be created under.
@@ -151,8 +153,9 @@ impl RunArgs {
         }
         let task = self
             .task
-            .as_ref()
-            .ok_or("either --scenario or --task is required")?;
+            .clone()
+            .or_else(|| self.durable.resume.as_ref().map(|_| String::new()))
+            .ok_or("either --scenario, --task, or --resume is required")?;
         // An enforced scope must have a real policy, and the `/dev/null` placeholder below is only
         // valid when nothing will compile it. That rule used to live here, as an enforce-gated
         // guard. It belongs to the enforcement invariant instead (`session::resolve_enforcement`),
@@ -214,6 +217,18 @@ pub fn main(args: RunArgs) -> ExitCode {
 }
 
 async fn run(args: RunArgs) -> ExitCode {
+    if let Err(error) = args.durable.validate() {
+        eprintln!("{CMD}: {error}");
+        return ExitCode::from(EX_USAGE);
+    }
+    if args.durable.session_dir.is_some()
+        && (args.batch || (args.durable.request_id.is_none() && args.durable.resume.is_none()))
+    {
+        eprintln!(
+            "{CMD}: durable run requires --request-id or --resume and does not support --batch"
+        );
+        return ExitCode::from(EX_USAGE);
+    }
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     // Batch mode carries its own providers, so it resolves configuration only for presentation.
@@ -275,21 +290,80 @@ async fn run(args: RunArgs) -> ExitCode {
         Err(e) => return session::fail(CMD, &e),
     };
 
+    let episode_options = EpisodeOptions {
+        http_scope_advisory: args.http_scope_advisory,
+        enforcement: args.host.then_some(bee::session::Enforcement::Host),
+        context: bee::context::ContextInputs {
+            config: cfg.context,
+            provider_window: cfg.provider.context_window,
+            max_tokens: cfg.provider.max_tokens,
+        },
+        stuck: cfg.stuck,
+    };
+    #[cfg(feature = "durable-sessions")]
+    let durable = match args
+        .durable
+        .open(&cfg, &scenario.tools, &scenario.security)
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("{CMD}: {error}");
+            return ExitCode::from(EX_USAGE);
+        }
+    };
+    #[cfg(feature = "durable-sessions")]
+    let transcript = if let Some(durable) = durable {
+        let controls = durable.clone();
+        let running = bee::episode::run_durable_episode(
+            session.model.as_ref(),
+            &scenario,
+            session.key_env.as_deref(),
+            progress_sink(args.quiet),
+            episode_options,
+            bee::session::driver::RunBinding {
+                session: durable,
+                request_id: args
+                    .durable
+                    .request_id
+                    .clone()
+                    .or(args.durable.resume.clone())
+                    .expect("validated request"),
+                resume: args.durable.resume.is_some(),
+                tool_call_limit: args.durable.tool_call_limit.unwrap_or(1024),
+            },
+        );
+        tokio::pin!(running);
+        let mut cancelling = false;
+        let mut cancel_queued = false;
+        loop {
+            tokio::select! {
+                result = &mut running => break result,
+                signal = tokio::signal::ctrl_c(), if !cancelling => {
+                    if signal.is_ok() { cancelling = true; }
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_millis(20)), if cancelling && !cancel_queued => {
+                    cancel_queued = controls.cancel().is_ok();
+                }
+            }
+        }
+    } else {
+        run_episode_with(
+            session.model.as_ref(),
+            &scenario,
+            session.key_env.as_deref(),
+            progress_sink(args.quiet),
+            episode_options,
+        )
+        .await
+    };
+    #[cfg(not(feature = "durable-sessions"))]
     let transcript = run_episode_with(
         session.model.as_ref(),
         &scenario,
         session.key_env.as_deref(),
         progress_sink(args.quiet),
-        EpisodeOptions {
-            http_scope_advisory: args.http_scope_advisory,
-            enforcement: args.host.then_some(bee::session::Enforcement::Host),
-            context: bee::context::ContextInputs {
-                config: cfg.context,
-                provider_window: cfg.provider.context_window,
-                max_tokens: cfg.provider.max_tokens,
-            },
-            stuck: cfg.stuck,
-        },
+        episode_options,
     )
     .await;
 

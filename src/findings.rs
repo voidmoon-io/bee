@@ -33,7 +33,7 @@
 use std::collections::HashMap;
 use std::io::{BufRead, Read};
 
-mod storage;
+pub(crate) mod storage;
 use std::path::{Path, PathBuf};
 use storage::Storage;
 
@@ -299,6 +299,9 @@ pub struct Finding {
     pub title: String,
     /// What makes it real. **Untrusted.**
     pub evidence: String,
+    /// Harness-issued receipts. These establish provenance, not verification or impact.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_refs: Vec<String>,
     pub source: FindingSource,
     /// Computed only, never asserted (FR-005).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -331,6 +334,7 @@ impl Finding {
             class,
             title,
             evidence,
+            evidence_refs: Vec::new(),
             source,
             severity: None,
             advisory_level: None,
@@ -832,6 +836,13 @@ fn fold_locked(ledger: &Ledger, storage: &Storage) -> Result<View, LedgerError> 
                 ..
             } => match by_id.get_mut(&id) {
                 Some(existing) => {
+                    if let Some(finding) = finding {
+                        for reference in finding.evidence_refs {
+                            if !existing.evidence_refs.contains(&reference) {
+                                existing.evidence_refs.push(reference);
+                            }
+                        }
+                    }
                     // The record is deliberately *not* re-applied. The first sight is the canonical
                     // description; letting a later one rewrite it would be the overwrite this whole
                     // structure exists to prevent, and would give a scanner a way to reword a

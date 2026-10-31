@@ -180,6 +180,12 @@ fn render(
             safe_line(&f.source.to_string())
         ));
         out.push_str(&format!("    {}\n", safe_line(&f.evidence)));
+        if !f.evidence_refs.is_empty() {
+            out.push_str(&format!(
+                "    evidence receipts: {}\n",
+                safe_line(&f.evidence_refs.join(", "))
+            ));
+        }
         // Cited exchanges (019 US8), resolved now: one evicted or gone since reads as `missing`.
         let mut refs: Vec<&String> = f.sightings.iter().flat_map(|s| &s.evidence_refs).collect();
         refs.sort();

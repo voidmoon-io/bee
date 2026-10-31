@@ -234,6 +234,10 @@ pub struct EpisodeTranscript {
     pub timing: Timing,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
+    /// Attempt charges, including unresolved outcomes; `usage` contains only known totals.
+    #[cfg(feature = "durable-sessions")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durable_budget: Option<crate::session::driver::Budget>,
     /// CTF scoring (US3). `None` for non-CTF episodes; `Some` when `scenario.mode == Ctf`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub score: Option<ScoreReport>,
@@ -395,6 +399,8 @@ impl EpisodeTranscript {
                 total_ms: 0,
             },
             usage: None,
+            #[cfg(feature = "durable-sessions")]
+            durable_budget: None,
             score: None,
         }
     }
@@ -534,6 +540,7 @@ pub fn tool_result_from_output(
 ) -> ToolResult {
     let (content, truncated, original_len) = truncate(content, cap);
     ToolResult {
+        receipt_id: None,
         content,
         exit_code,
         is_error,

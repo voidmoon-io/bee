@@ -33,6 +33,8 @@ pub mod config;
 // Context budget and compaction for long runs (025-long-run-resilience).
 pub mod context;
 pub mod episode;
+#[cfg(feature = "findings")]
+pub mod evidence;
 // The finding ledger (016-native-tools US2). Gated: it is the substrate the security tools write
 // into, and a build that selects none of them has nothing to record.
 #[cfg(feature = "findings")]
@@ -45,6 +47,8 @@ pub mod grants;
 pub mod hooks;
 // HTTP(S) interception (019-http-intercept). Gated: the proxy worker, its TLS stack and the exchange
 // store exist only in a build that asked for them (SC-009).
+#[cfg(feature = "source")]
+pub mod hunt;
 #[cfg(feature = "intercept")]
 pub mod intercept;
 pub mod mcp;
@@ -56,6 +60,8 @@ pub mod proxy_event;
 pub mod render_api;
 pub mod render_spec;
 pub mod repl;
+#[cfg(feature = "repro")]
+pub mod reproduction;
 // Terminal-safety for untrusted text. Ungated: every front-end and the consent prompt need it.
 pub mod safe_text;
 pub mod sandbox;
@@ -67,6 +73,8 @@ pub mod sarif;
 pub mod scanners;
 pub mod scenario;
 pub mod search;
+#[cfg(feature = "source")]
+pub mod source;
 // Operator configuration for the security tooling (016-native-tools). Ungated: plain data, so a
 // configuration file keeps parsing on a build that compiled none of the tools.
 pub mod security;

@@ -66,6 +66,8 @@ fn transcript(turns: Vec<TranscriptTurn>) -> EpisodeTranscript {
         audit_health: Default::default(),
         timing: Timing::default(),
         usage: None::<Usage>,
+        #[cfg(feature = "durable-sessions")]
+        durable_budget: None,
         score: None,
     }
 }

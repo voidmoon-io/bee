@@ -95,6 +95,9 @@ path = "src/lib.rs"
 
 [features]
 default = ["tui"]
+# Local durable session storage; the pure decision core has no SQLite dependency.
+durable-store = ["dep:rusqlite", "dep:sha2", "dep:getrandom"]
+durable-sessions = ["durable-store", "findings", "tokio/signal"]
 # Real kernel enforcement. Pulls bee-userspace's eBPF-LSM path (nightly bpf toolchain + BPF-LSM
 # kernel to build/attach). WITHOUT this feature the harness runs tools as hardened, credential-
 # stripped host processes with NO scope — enough for offline (MockModel) tests and live-provider
@@ -151,13 +154,16 @@ astgrep-java = ["astgrep", "ast-grep-language/tree-sitter-java"]
 astgrep-ruby = ["astgrep", "ast-grep-language/tree-sitter-ruby"]
 # Repository history via gix (US5).
 gitlog = ["dep:gix"]
+# Commit-pinned source tools share the Git engine and durable evidence store.
+source = ["gitlog", "findings"]
+repro = ["source", "dep:tempfile"]
 # CVSS scoring (US4).
 cvss = ["dep:cvss"]
 # External scanner adapters + the SARIF normaliser. Implies `findings` because normalised scanner
 # results have nowhere to go without the ledger.
 scanners = ["findings"]
 # Convenience umbrella for a security-tooling build. Grammars are still chosen explicitly.
-sec = ["findings", "astgrep", "gitlog", "cvss", "scanners"]
+sec = ["findings", "astgrep", "gitlog", "cvss", "scanners", "source", "repro"]
 
 # ── HTTP(S) interception (019-http-intercept) ──────────────────────────────────────────────────
 # The interception proxy and the `http_*` tools. Default-off, so a build without it has the
@@ -203,6 +209,9 @@ vm-test = ["intercept"]
 test-support = []
 
 [dependencies]
+rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled", "limits"], optional = true }
+getrandom = { version = "0.3", optional = true }
+tempfile = { version = "3", optional = true }
 bee-core = { workspace = true }
 bee-userspace = { workspace = true }
 
@@ -343,7 +352,6 @@ regex = { version = "1", optional = true }
 # The lockfile holds rcgen at 0.14.9: 0.14.10 requires aws-lc-rs ^1.18, which would move the
 # aws-lc-rs every default build already links (SC-009 — the default tree must not change).
 rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem", "zeroize"], optional = true }
-rusqlite = { version = "0.40", features = ["bundled"], optional = true }
 brotli-decompressor = { version = "6", optional = true }
 ruzstd = { version = "0.9", optional = true }
 json-patch = { version = "4.2", optional = true }

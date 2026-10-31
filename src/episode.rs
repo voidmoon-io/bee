@@ -25,6 +25,8 @@ pub type ProgressSink = Box<dyn Fn(&str) + Send + Sync>;
 
 /// Loop tuning knobs.
 pub struct LoopOptions {
+    #[cfg(feature = "durable-sessions")]
+    pub durable: Option<crate::session::driver::RunBinding>,
     /// Max retries for transient (429/5xx) provider errors before `api_error` (FR-017).
     pub max_retries: u32,
     /// Optional live-progress sink (per-turn / per-tool-call / per-denial lines).
@@ -49,6 +51,8 @@ pub struct LoopOptions {
 impl Default for LoopOptions {
     fn default() -> Self {
         LoopOptions {
+            #[cfg(feature = "durable-sessions")]
+            durable: None,
             max_retries: 5,
             progress: None,
             metrics: None,
@@ -220,6 +224,13 @@ pub async fn run_loop(
     sandbox: &mut Sandbox,
     opts: &LoopOptions,
 ) -> EpisodeTranscript {
+    #[cfg(feature = "durable-sessions")]
+    if let Some(binding) = &opts.durable {
+        return crate::session::driver::run_episode(
+            model, scenario, registry, sandbox, opts, binding,
+        )
+        .await;
+    }
     let started_at = OffsetDateTime::now_utc();
     let start = Instant::now();
     let deadline = start + scenario.timeout();
@@ -728,6 +739,8 @@ pub async fn run_loop(
             total_ms: ms_since(start),
         },
         usage: usage_total,
+        #[cfg(feature = "durable-sessions")]
+        durable_budget: None,
         score: None,
     }
 }
@@ -776,6 +789,8 @@ fn infra_error(scenario: &Scenario, model: &dyn Model, detail: String) -> Episod
             total_ms: 0,
         },
         usage: None,
+        #[cfg(feature = "durable-sessions")]
+        durable_budget: None,
         score: None,
     }
 }
@@ -921,6 +936,55 @@ pub async fn run_episode_with(
     progress: Option<ProgressSink>,
     eopts: EpisodeOptions,
 ) -> EpisodeTranscript {
+    run_episode_inner(
+        model,
+        scenario,
+        provider_key_env,
+        progress,
+        eopts,
+        #[cfg(feature = "durable-sessions")]
+        None,
+    )
+    .await
+}
+
+#[cfg(feature = "durable-sessions")]
+pub async fn run_durable_episode(
+    model: &dyn Model,
+    scenario: &Scenario,
+    provider_key_env: Option<&str>,
+    progress: Option<ProgressSink>,
+    eopts: EpisodeOptions,
+    binding: crate::session::driver::RunBinding,
+) -> EpisodeTranscript {
+    run_episode_inner(
+        model,
+        scenario,
+        provider_key_env,
+        progress,
+        eopts,
+        Some(binding),
+    )
+    .await
+}
+
+async fn run_episode_inner(
+    model: &dyn Model,
+    scenario: &Scenario,
+    provider_key_env: Option<&str>,
+    progress: Option<ProgressSink>,
+    eopts: EpisodeOptions,
+    #[cfg(feature = "durable-sessions")] durable: Option<crate::session::driver::RunBinding>,
+) -> EpisodeTranscript {
+    #[cfg(feature = "durable-sessions")]
+    if durable.is_some()
+        && (!scenario.workdir.create_files.is_empty()
+            || !scenario.workdir.create_dirs.is_empty()
+            || scenario.workdir.flag.is_some()
+            || scenario.mcp.enabled)
+    {
+        return infra_error(scenario, model, "durable sessions require an existing workdir and do not support persistent MCP transports".into());
+    }
     // Strip the provider key vars plus any configured MCP `token_env` names from every tool child
     // (FR-018/FR-041), so an MCP Bearer token never leaks into a sandboxed stdio server's env.
     let mut strip_env = sandbox::key_vars(provider_key_env);
@@ -933,6 +997,8 @@ pub async fn run_episode_with(
         None => std::sync::Arc::new(crate::operator::NullOutput),
     });
     let mut opts = LoopOptions {
+        #[cfg(feature = "durable-sessions")]
+        durable,
         progress: progress.map(|p| Box::new(move |line: &str| p(line)) as ProgressSink),
         metrics: Recorder::new(
             "episode",
@@ -950,18 +1016,43 @@ pub async fn run_episode_with(
     // The session, built the one way every entry point builds it (024 FR-006): skill grants, the
     // `[policy.http]` advisory, the sandbox, the Interceptor, the tool surface, MCP servers and
     // escalation.
-    let spec = spec_from_scenario(scenario, strip_env, &eopts, operator);
+    #[allow(unused_mut)]
+    let mut spec = spec_from_scenario(scenario, strip_env, &eopts, operator);
+    #[cfg(feature = "durable-sessions")]
+    if opts.durable.is_some() {
+        if scenario.context != Default::default()
+            || eopts.context.config != Default::default()
+            || scenario.stuck != Default::default()
+            || eopts.stuck != Default::default()
+            || spec.policy.as_ref().is_some_and(|p| p.http.is_some())
+            || scenario.tools.iter().any(|t| t == "finish")
+        {
+            return infra_error(scenario, model, "durable sessions do not yet support context/stuck settings, HTTP interception, or finish".into());
+        }
+        // Durable run and REPL use the same explicit tool surface and completion semantics.
+        spec.tools = scenario.tools.clone();
+    }
     let mut session = match crate::session::build(spec, &|line| emit(&opts, line)).await {
         Ok(s) => s,
         Err(e) => return infra_error(scenario, model, e.to_string()),
     };
+    #[cfg(feature = "durable-sessions")]
+    if let Some(binding) = &opts.durable {
+        session.registry.enable_evidence(binding.session.evidence());
+    }
     opts.escalation = session.escalation.take();
     opts.tool_refresh = session.tool_refresh.clone();
 
     // The model is given the session's system prompt: the scenario's, plus the notes for the tools
     // the session holds — the same prompt the REPL builds (024 FR-007).
+    #[allow(unused_mut)]
+    let mut system_prompt = session.system_prompt.clone();
+    #[cfg(feature = "durable-sessions")]
+    if opts.durable.is_some() {
+        system_prompt = scenario.system_prompt.clone();
+    }
     let scenario = Scenario {
-        system_prompt: session.system_prompt.clone(),
+        system_prompt,
         ..scenario.clone()
     };
     let mut transcript = run_loop(

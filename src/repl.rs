@@ -54,6 +54,12 @@ pub type SteeringQueue = Arc<Mutex<VecDeque<String>>>;
 
 /// Configuration for an interactive REPL session.
 pub struct ReplConfig {
+    #[cfg(feature = "durable-sessions")]
+    pub durable: Option<Arc<crate::session::driver::Session>>,
+    #[cfg(feature = "durable-sessions")]
+    pub durable_timeout_secs: u64,
+    #[cfg(feature = "durable-sessions")]
+    pub durable_tool_call_limit: u32,
     /// System prompt for the session.
     pub system_prompt: String,
     /// Max model calls per user message before forcing a pause (safety cap).
@@ -192,6 +198,12 @@ impl ReplEscalation {
 impl Default for ReplConfig {
     fn default() -> Self {
         ReplConfig {
+            #[cfg(feature = "durable-sessions")]
+            durable: None,
+            #[cfg(feature = "durable-sessions")]
+            durable_timeout_secs: 120,
+            #[cfg(feature = "durable-sessions")]
+            durable_tool_call_limit: 1024,
             system_prompt: "You are a coding agent operating in a sandbox. You have access to \
                             bash, read_file, write_file, and list_directory tools. Use them to \
                             help the user with their tasks."
@@ -319,6 +331,8 @@ const SUMMARY_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The result of running one user→agent exchange (used by [`run_repl`] and by tests).
 pub struct ExchangeResult {
+    #[cfg(feature = "durable-sessions")]
+    pub durable_budget: Option<crate::session::driver::Budget>,
     /// Why the exchange ended.
     pub outcome: ExchangeOutcome,
     /// Model round-trips made during this exchange.
@@ -591,6 +605,21 @@ pub async fn run_exchange(
     steering: &SteeringQueue,
     recorder: Option<&crate::metrics::Recorder>,
 ) -> ExchangeResult {
+    #[cfg(feature = "durable-sessions")]
+    if let Some(session) = &config.durable {
+        return crate::session::driver::exchange(
+            user_message,
+            model,
+            conversation,
+            registry,
+            sandbox,
+            config,
+            output,
+            steering,
+            session,
+        )
+        .await;
+    }
     conversation.push(Message::User {
         text: user_message.to_string(),
     });
@@ -606,6 +635,8 @@ pub async fn run_exchange(
     macro_rules! terminate {
         ($reason:expr) => {{
             return ExchangeResult {
+                #[cfg(feature = "durable-sessions")]
+                durable_budget: None,
                 outcome: ExchangeOutcome::Terminated($reason),
                 model_calls,
                 tool_calls,
@@ -737,6 +768,8 @@ pub async fn run_exchange(
             Err(detail) => {
                 output.error(&format!("context exhausted: {detail}"));
                 return ExchangeResult {
+                    #[cfg(feature = "durable-sessions")]
+                    durable_budget: None,
                     outcome: ExchangeOutcome::ContextExhausted(detail),
                     model_calls,
                     tool_calls,
@@ -771,6 +804,8 @@ pub async fn run_exchange(
                         );
                     }
                     return ExchangeResult {
+                        #[cfg(feature = "durable-sessions")]
+                        durable_budget: None,
                         outcome: exchange_error(detail),
                         model_calls,
                         tool_calls,
@@ -797,6 +832,8 @@ pub async fn run_exchange(
                     );
                 }
                 return ExchangeResult {
+                    #[cfg(feature = "durable-sessions")]
+                    durable_budget: None,
                     outcome: exchange_error(detail),
                     model_calls,
                     tool_calls,
@@ -845,6 +882,8 @@ pub async fn run_exchange(
             });
             if steering.lock().expect("steering queue").is_empty() {
                 return ExchangeResult {
+                    #[cfg(feature = "durable-sessions")]
+                    durable_budget: None,
                     outcome: ExchangeOutcome::Responded,
                     model_calls,
                     tool_calls,
@@ -1027,6 +1066,8 @@ pub async fn run_exchange(
                         duration_ms: turn_start.elapsed().as_millis() as u64,
                     });
                     return ExchangeResult {
+                        #[cfg(feature = "durable-sessions")]
+                        durable_budget: None,
                         outcome: ExchangeOutcome::Stuck { tool, repeats },
                         model_calls,
                         tool_calls,
@@ -1054,6 +1095,8 @@ pub async fn run_exchange(
     // user can send another message and the agent can continue.
     output.info("[agent reached tool-call limit for this exchange — returning control to you]");
     ExchangeResult {
+        #[cfg(feature = "durable-sessions")]
+        durable_budget: None,
         outcome: ExchangeOutcome::BudgetExhausted,
         model_calls,
         tool_calls,
@@ -1143,6 +1186,7 @@ fn rfc3339(t: OffsetDateTime) -> String {
 
 /// Build a session transcript from the accumulated turns. A REPL session always ends `Completed`
 /// (there is no turn limit or deadline that could time it out).
+#[allow(clippy::too_many_arguments)]
 fn build_transcript(
     model_id: &str,
     started_at: OffsetDateTime,
@@ -1151,6 +1195,7 @@ fn build_transcript(
     audit_trail: &[AuditEvent],
     usage: Option<Usage>,
     compactions: &[crate::transcript::CompactionEvent],
+    #[cfg(feature = "durable-sessions")] durable_budget: Option<crate::session::driver::Budget>,
 ) -> EpisodeTranscript {
     EpisodeTranscript {
         audit_health: Default::default(),
@@ -1174,6 +1219,8 @@ fn build_transcript(
             total_ms: start.elapsed().as_millis() as u64,
         },
         usage,
+        #[cfg(feature = "durable-sessions")]
+        durable_budget,
         score: None,
     }
 }
@@ -1276,6 +1323,15 @@ pub struct ReplTerminal {
 impl ReplTerminal {
     /// Open the terminal: the line editor with its history, and its printer.
     pub fn open() -> Result<Self, String> {
+        Self::open_inner(false)
+    }
+
+    #[cfg(feature = "durable-sessions")]
+    pub fn open_durable() -> Result<Self, String> {
+        Self::open_inner(true)
+    }
+
+    fn open_inner(#[allow(unused_variables)] allow_pipe: bool) -> Result<Self, String> {
         let mut editor =
             DefaultEditor::new().map_err(|e| format!("could not initialize readline: {e}"))?;
         let hist_path = history_path();
@@ -1284,12 +1340,21 @@ impl ReplTerminal {
         }
         let printer = editor
             .create_external_printer()
-            .map_err(|e| format!("could not initialize terminal output: {e}"))?;
+            .map(|p| Box::new(p) as Box<dyn rustyline::ExternalPrinter + Send>);
+        #[cfg(feature = "durable-sessions")]
+        let printer = printer.or_else(|e| {
+            if allow_pipe {
+                Ok(Box::new(terminal::PipePrinter) as Box<dyn rustyline::ExternalPrinter + Send>)
+            } else {
+                Err(e)
+            }
+        });
+        let printer = printer.map_err(|e| format!("could not initialize terminal output: {e}"))?;
         Ok(ReplTerminal {
             editor: Some(editor),
             pending: None,
             hist_path,
-            output: Arc::new(TerminalOutput::new(Box::new(printer))),
+            output: Arc::new(TerminalOutput::new(printer)),
             consent_rx: None,
         })
     }
@@ -1471,6 +1536,8 @@ pub async fn run_repl(
     let mut total_denials = 0u32;
     let mut message_log: Vec<String> = Vec::new();
     let mut last_user_message: Option<String> = None;
+    #[cfg(feature = "durable-sessions")]
+    let mut durable_budget: Option<crate::session::driver::Budget> = None;
 
     let terminal = match terminal {
         Ok(t) => t,
@@ -1484,6 +1551,8 @@ pub async fn run_repl(
                 &audit_trail,
                 usage_total,
                 &compactions,
+                #[cfg(feature = "durable-sessions")]
+                durable_budget.clone(),
             );
             return ReplSession {
                 conversation,
@@ -1547,6 +1616,13 @@ pub async fn run_repl(
     let recorder = crate::metrics::Recorder::new("repl", format!("repl:{}", std::process::id()));
 
     let steering: SteeringQueue = Arc::new(Mutex::new(VecDeque::new()));
+    #[cfg(feature = "durable-sessions")]
+    let mut resume_pending = config
+        .durable
+        .as_ref()
+        .is_some_and(|s| s.resume_request().is_some());
+    #[cfg(not(feature = "durable-sessions"))]
+    let mut resume_pending = false;
     let prompt = "bee> ".to_string();
     // Exactly one readline is outstanding at all times. A read left over from start-up consent is
     // that read: the operator stopped waiting while it was open, so an answer typed into it is late.
@@ -1558,130 +1634,149 @@ pub async fn run_repl(
     };
 
     loop {
-        // Idle: wait for the next full line.
-        let (mut editor, line_res) = pending.await.expect("readline task panicked");
-        let line = match line_res {
-            Ok(l) => l,
-            // Ctrl-D (EOF) ends the session; Ctrl-C cancels the current line and re-prompts.
-            Err(ReadlineError::Eof) => break,
-            Err(ReadlineError::Interrupted) => {
+        let msg = if std::mem::take(&mut resume_pending) {
+            String::new()
+        } else {
+            // Idle: wait for the next full line.
+            let (mut editor, line_res) = pending.await.expect("readline task panicked");
+            let line = match line_res {
+                Ok(l) => l,
+                // Ctrl-D (EOF) ends the session; Ctrl-C cancels the current line and re-prompts.
+                Err(ReadlineError::Eof) => break,
+                Err(ReadlineError::Interrupted) => {
+                    pending = issue_read(editor, prompt.clone());
+                    continue;
+                }
+                Err(e) => {
+                    output.error(&format!("input error: {e}"));
+                    break;
+                }
+            };
+            let line = line.trim().to_string();
+            if std::mem::take(&mut late_startup_answer) && consent_input::parse(&line).is_ok() {
+                output.info(consent_input::TOO_LATE);
                 pending = issue_read(editor, prompt.clone());
                 continue;
             }
-            Err(e) => {
-                output.error(&format!("input error: {e}"));
+            if line.is_empty() {
+                pending = issue_read(editor, prompt.clone());
+                continue;
+            }
+            remember(&mut editor, &hist_path, &line);
+
+            // Decide what (if anything) to send to the agent this iteration.
+            let mut to_run: Option<String> = None;
+            let mut quit = false;
+            if let Some(cmd) = parse_meta_command(&line) {
+                match cmd {
+                    MetaCommand::Quit => quit = true,
+                    MetaCommand::Help => output.info(HELP_TEXT),
+                    MetaCommand::Audit => output.info(&audit_summary(&audit_trail)),
+                    MetaCommand::Tools => output.info(&tools_summary(registry)),
+                    MetaCommand::Policy => output.info(&format!("policy: {}", config.policy_label)),
+                    MetaCommand::Mcp => output.info(
+                        config
+                            .mcp_summary
+                            .as_deref()
+                            .unwrap_or("MCP: not configured"),
+                    ),
+                    MetaCommand::Skill(None) => output.info(&skills_summary(&config.skills)),
+                    MetaCommand::Skill(Some(name)) => match config.skills.get(&name) {
+                        Some(skill) => match skill.body() {
+                            Ok(body) => {
+                                output
+                                    .info(&format!("loaded skill '{name}' into the conversation."));
+                                // Show the operator the instructions the agent was just handed. A
+                                // SKILL.md body is markdown by definition (006-skills), so it is
+                                // declared as such rather than guessed at (010).
+                                output.markdown(&body);
+                                to_run = Some(crate::tools::skill::load_message(
+                                    &skill.name,
+                                    &body,
+                                    &serde_json::Value::Null,
+                                ));
+                            }
+                            Err(e) => output.error(&format!("skill '{name}': {e}")),
+                        },
+                        None => output
+                            .error(&format!("unknown skill '{name}'. try /skill to list them.")),
+                    },
+                    MetaCommand::System(None) => {
+                        output.info(&format!("system prompt:\n{}", conversation.system));
+                    }
+                    MetaCommand::System(Some(text)) => {
+                        #[cfg(feature = "durable-sessions")]
+                        if config.durable.is_some() {
+                            output.error("durable sessions bind the system prompt; start a new session to change it");
+                            pending = issue_read(editor, prompt.clone());
+                            continue;
+                        }
+                        conversation.system = text;
+                        output.info("system prompt updated.");
+                    }
+                    MetaCommand::History => output.info(&history_summary(&message_log)),
+                    MetaCommand::Retry => match &last_user_message {
+                        Some(m) => to_run = Some(m.clone()),
+                        None => output.error("nothing to retry yet."),
+                    },
+                    MetaCommand::Clear => {
+                        #[cfg(feature = "durable-sessions")]
+                        if config.durable.is_some() {
+                            output.error("durable history is retained; start a new session for an empty conversation");
+                            pending = issue_read(editor, prompt.clone());
+                            continue;
+                        }
+                        conversation.messages.clear();
+                        lock_state(config).reset();
+                        // Before the info line, so a front-end that wipes its transcript still shows the
+                        // acknowledgement afterwards rather than clearing it away again (010).
+                        output.clear_history();
+                        output.info("conversation history cleared (system prompt kept).");
+                    }
+                    MetaCommand::Save(path) => {
+                        let path = path.unwrap_or_else(|| "bee-repl-session.json".to_string());
+                        let mut transcript = build_transcript(
+                            model.id(),
+                            started_at,
+                            start,
+                            &turns,
+                            &audit_trail,
+                            usage_total,
+                            &compactions,
+                            #[cfg(feature = "durable-sessions")]
+                            durable_budget.clone(),
+                        );
+                        transcript.consents = operator.map(|op| op.log()).unwrap_or_default();
+                        // Each MCP server's own kernel events so far (024 FR-027).
+                        transcript.mcp_audit = sandbox.mcp_audit().clone();
+                        transcript.audit_health = sandbox.audit_health();
+                        match std::fs::write(&path, transcript.to_json()) {
+                            Ok(()) => output.info(&format!("saved transcript to {path}")),
+                            Err(e) => output.error(&format!("could not write {path}: {e}")),
+                        }
+                    }
+                    MetaCommand::Unknown(c) => {
+                        output.error(&format!("unknown command: {c} (try /help)"));
+                    }
+                }
+            } else {
+                last_user_message = Some(line.clone());
+                message_log.push(line.clone());
+                to_run = Some(line);
+            }
+
+            if quit {
                 break;
             }
-        };
-        let line = line.trim().to_string();
-        if std::mem::take(&mut late_startup_answer) && consent_input::parse(&line).is_ok() {
-            output.info(consent_input::TOO_LATE);
+
+            // Re-issue exactly one outstanding read now. While the exchange runs it feeds steering; when
+            // idle it is the next prompt.
             pending = issue_read(editor, prompt.clone());
-            continue;
-        }
-        if line.is_empty() {
-            pending = issue_read(editor, prompt.clone());
-            continue;
-        }
-        remember(&mut editor, &hist_path, &line);
 
-        // Decide what (if anything) to send to the agent this iteration.
-        let mut to_run: Option<String> = None;
-        let mut quit = false;
-        if let Some(cmd) = parse_meta_command(&line) {
-            match cmd {
-                MetaCommand::Quit => quit = true,
-                MetaCommand::Help => output.info(HELP_TEXT),
-                MetaCommand::Audit => output.info(&audit_summary(&audit_trail)),
-                MetaCommand::Tools => output.info(&tools_summary(registry)),
-                MetaCommand::Policy => output.info(&format!("policy: {}", config.policy_label)),
-                MetaCommand::Mcp => output.info(
-                    config
-                        .mcp_summary
-                        .as_deref()
-                        .unwrap_or("MCP: not configured"),
-                ),
-                MetaCommand::Skill(None) => output.info(&skills_summary(&config.skills)),
-                MetaCommand::Skill(Some(name)) => match config.skills.get(&name) {
-                    Some(skill) => match skill.body() {
-                        Ok(body) => {
-                            output.info(&format!("loaded skill '{name}' into the conversation."));
-                            // Show the operator the instructions the agent was just handed. A
-                            // SKILL.md body is markdown by definition (006-skills), so it is
-                            // declared as such rather than guessed at (010).
-                            output.markdown(&body);
-                            to_run = Some(crate::tools::skill::load_message(
-                                &skill.name,
-                                &body,
-                                &serde_json::Value::Null,
-                            ));
-                        }
-                        Err(e) => output.error(&format!("skill '{name}': {e}")),
-                    },
-                    None => {
-                        output.error(&format!("unknown skill '{name}'. try /skill to list them."))
-                    }
-                },
-                MetaCommand::System(None) => {
-                    output.info(&format!("system prompt:\n{}", conversation.system));
-                }
-                MetaCommand::System(Some(text)) => {
-                    conversation.system = text;
-                    output.info("system prompt updated.");
-                }
-                MetaCommand::History => output.info(&history_summary(&message_log)),
-                MetaCommand::Retry => match &last_user_message {
-                    Some(m) => to_run = Some(m.clone()),
-                    None => output.error("nothing to retry yet."),
-                },
-                MetaCommand::Clear => {
-                    conversation.messages.clear();
-                    lock_state(config).reset();
-                    // Before the info line, so a front-end that wipes its transcript still shows the
-                    // acknowledgement afterwards rather than clearing it away again (010).
-                    output.clear_history();
-                    output.info("conversation history cleared (system prompt kept).");
-                }
-                MetaCommand::Save(path) => {
-                    let path = path.unwrap_or_else(|| "bee-repl-session.json".to_string());
-                    let mut transcript = build_transcript(
-                        model.id(),
-                        started_at,
-                        start,
-                        &turns,
-                        &audit_trail,
-                        usage_total,
-                        &compactions,
-                    );
-                    transcript.consents = operator.map(|op| op.log()).unwrap_or_default();
-                    // Each MCP server's own kernel events so far (024 FR-027).
-                    transcript.mcp_audit = sandbox.mcp_audit().clone();
-                    transcript.audit_health = sandbox.audit_health();
-                    match std::fs::write(&path, transcript.to_json()) {
-                        Ok(()) => output.info(&format!("saved transcript to {path}")),
-                        Err(e) => output.error(&format!("could not write {path}: {e}")),
-                    }
-                }
-                MetaCommand::Unknown(c) => {
-                    output.error(&format!("unknown command: {c} (try /help)"));
-                }
-            }
-        } else {
-            last_user_message = Some(line.clone());
-            message_log.push(line.clone());
-            to_run = Some(line);
-        }
-
-        if quit {
-            break;
-        }
-
-        // Re-issue exactly one outstanding read now. While the exchange runs it feeds steering; when
-        // idle it is the next prompt.
-        pending = issue_read(editor, prompt.clone());
-
-        let Some(msg) = to_run else {
-            continue;
+            let Some(msg) = to_run else {
+                continue;
+            };
+            msg
         };
 
         // Run the exchange, folding in any line the user submits mid-flight as a steering message.
@@ -1710,7 +1805,7 @@ pub async fn run_repl(
                         question.show(output);
                         asking = Some(question);
                     }
-                    joined = &mut pending => {
+                    joined = &mut pending, if !quit_after => {
                         let (mut editor, line_res) = joined.expect("readline task panicked");
                         match line_res {
                             Ok(l) => {
@@ -1724,6 +1819,13 @@ pub async fn run_repl(
                                         if !l.is_empty() {
                                             remember(&mut editor, &hist_path, &l);
                                             output.steering(&format!("↳ queued: {l}"));
+                                            #[cfg(feature = "durable-sessions")]
+                                            if let Some(session) = &config.durable {
+                                                let queued = if l == "/cancel" { session.cancel() } else { session.steer(l) };
+                                                if let Err(error) = queued { output.error(&error.to_string()); }
+                                                pending = issue_read(editor, prompt.clone());
+                                                continue;
+                                            }
                                             steering.lock().expect("steering queue").push_back(l);
                                         }
                                         if let Some(q) = &asking {
@@ -1751,6 +1853,13 @@ pub async fn run_repl(
             usage_total = Some(usage_total.map_or(u, |acc| acc + u));
         }
         output.footer(&exchange_footer(&result, ex_start.elapsed(), model.id()));
+        #[cfg(feature = "durable-sessions")]
+        if let Some(budget) = result.durable_budget {
+            durable_budget
+                .get_or_insert_with(Default::default)
+                .reservations
+                .extend(budget.reservations);
+        }
         // Re-index the exchange's turns into the session-wide sequence before accumulating.
         for mut t in result.turns {
             t.index = turns.len() as u32;
@@ -1779,6 +1888,8 @@ pub async fn run_repl(
         &audit_trail,
         usage_total,
         &compactions,
+        #[cfg(feature = "durable-sessions")]
+        durable_budget.clone(),
     );
     transcript.consents = operator.map(|op| op.log()).unwrap_or_default();
     transcript.mcp_audit = sandbox.finish_mcp_audit().await;
@@ -2136,6 +2247,8 @@ mod tests {
     #[test]
     fn footer_reads_cleanly() {
         let result = ExchangeResult {
+            #[cfg(feature = "durable-sessions")]
+            durable_budget: None,
             outcome: ExchangeOutcome::Responded,
             compactions: Vec::new(),
             model_calls: 2,
@@ -2169,6 +2282,8 @@ mod tests {
     fn footer_shows_cache_reads_and_writes() {
         // First turn: cache written but not yet read.
         let write_only = ExchangeResult {
+            #[cfg(feature = "durable-sessions")]
+            durable_budget: None,
             outcome: ExchangeOutcome::Responded,
             compactions: Vec::new(),
             model_calls: 1,
@@ -2189,6 +2304,8 @@ mod tests {
 
         // A later turn: the prefix is re-read from cache, and the new tail is written.
         let read_and_write = ExchangeResult {
+            #[cfg(feature = "durable-sessions")]
+            durable_budget: None,
             usage: Some(Usage {
                 input_tokens: 80,
                 output_tokens: 60,
@@ -2205,6 +2322,8 @@ mod tests {
     #[test]
     fn footer_omits_cost_for_unpriced_model() {
         let result = ExchangeResult {
+            #[cfg(feature = "durable-sessions")]
+            durable_budget: None,
             outcome: ExchangeOutcome::Responded,
             compactions: Vec::new(),
             model_calls: 1,
@@ -2227,5 +2346,78 @@ mod tests {
         assert_eq!(plural(1, "denial"), "1 denial");
         assert_eq!(plural(0, "denial"), "0 denials");
         assert_eq!(plural(2, "exchange"), "2 exchanges");
+    }
+}
+
+#[cfg(all(test, feature = "durable-sessions"))]
+mod durable_resume_tests {
+    use super::*;
+    struct WaitingModel(Arc<tokio::sync::Notify>);
+    #[async_trait::async_trait]
+    impl Model for WaitingModel {
+        fn id(&self) -> &str {
+            "waiting"
+        }
+        async fn complete(&self, _: &Conversation, _: &[ToolSchema]) -> Result<Turn, ModelError> {
+            self.0.notify_one();
+            std::future::pending().await
+        }
+    }
+    #[tokio::test]
+    async fn resumed_inline_exchange_services_cancellation_while_provider_is_pending() {
+        use crate::session::{driver, durable};
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("session");
+        let id = durable::SessionId("resume-input".into());
+        let mut store = durable::store::Store::open(&path, id.clone()).unwrap();
+        store.admit("request", &serde_json::json!({"kind":"Submission", "text":"work", "started_ms":driver::now_ms(), "limits":{"turns":5,"tool_calls":5,"timeout_ms":30000,"tool_timeout_ms":10000,"model_attempts":2}})).unwrap();
+        drop(store);
+        let session = driver::Session::open(path, id, "fixture".into(), Some("request".into()))
+            .await
+            .unwrap();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let editor = DefaultEditor::new().unwrap();
+        let input_ready = started.clone();
+        let terminal = ReplTerminal {
+            editor: None,
+            pending: Some(tokio::spawn(async move {
+                input_ready.notified().await;
+                (editor, Ok("/cancel".into()))
+            })),
+            hist_path: None,
+            output: Arc::new(TerminalOutput::new(Box::new(terminal::PipePrinter))),
+            consent_rx: None,
+        };
+        let config = ReplConfig {
+            durable: Some(session.clone()),
+            system_prompt: "system".into(),
+            mascot: false,
+            ..Default::default()
+        };
+        let mut registry = ToolRegistry::new();
+        registry.enable_evidence(session.evidence());
+        let mut sandbox = Sandbox::host(vec![]);
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_repl(
+                Ok(terminal),
+                &WaitingModel(started),
+                &mut registry,
+                &mut sandbox,
+                &config,
+            ),
+        )
+        .await
+        .expect("resume did not service /cancel");
+        assert_eq!(result.exchanges, 1);
+        assert_eq!(
+            result
+                .transcript
+                .unwrap()
+                .durable_budget
+                .unwrap()
+                .unresolved(),
+            1
+        );
     }
 }

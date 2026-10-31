@@ -20,6 +20,8 @@ const CMD: &str = "bee repl";
 
 #[derive(Args, Debug)]
 pub struct ReplArgs {
+    #[command(flatten)]
+    pub durable: super::durable::DurableArgs,
     /// Provider TOML (which model / endpoint, or a `mock` script). May also come from
     /// configuration.
     #[arg(long)]
@@ -121,6 +123,14 @@ pub fn main(args: ReplArgs) -> ExitCode {
 }
 
 async fn repl(args: ReplArgs) -> ExitCode {
+    if let Err(error) = args.durable.validate() {
+        eprintln!("{CMD}: {error}");
+        return ExitCode::from(EX_USAGE);
+    }
+    if args.durable.request_id.is_some() {
+        eprintln!("{CMD}: use --resume for an admitted request; new REPL submissions receive fresh request IDs");
+        return ExitCode::from(EX_USAGE);
+    }
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     let cfg = match config::resolve(&cwd, &args.flags()) {
@@ -188,6 +198,19 @@ async fn repl(args: ReplArgs) -> ExitCode {
             return ExitCode::from(EX_USAGE);
         }
     };
+    if args.durable.session_dir.is_some() && cfg.mcp_config.is_some() {
+        eprintln!("{CMD}: durable sessions do not yet support persistent MCP transports");
+        return ExitCode::from(EX_USAGE);
+    }
+
+    #[cfg(feature = "durable-sessions")]
+    let durable = match args.durable.open(&cfg, &cfg.tools, &cfg.security).await {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("{CMD}: {error}");
+            return ExitCode::from(EX_USAGE);
+        }
+    };
 
     // MCP servers come from the configured file; a bad one is a usage error before anything starts.
     let mcp = match &cfg.mcp_config {
@@ -222,7 +245,15 @@ async fn repl(args: ReplArgs) -> ExitCode {
     } else {
         // Off a terminal there is nobody to ask: the channel's far end is dropped, so every request
         // is refused, and `run_repl` reports why the session cannot start.
-        let terminal = ReplTerminal::open().map(|t| t.with_consent(consent_rx));
+        #[cfg(feature = "durable-sessions")]
+        let terminal = if durable.is_some() {
+            ReplTerminal::open_durable()
+        } else {
+            ReplTerminal::open()
+        };
+        #[cfg(not(feature = "durable-sessions"))]
+        let terminal = ReplTerminal::open();
+        let terminal = terminal.map(|t| t.with_consent(consent_rx));
         let output: std::sync::Arc<dyn bee::operator::SessionOutput> = match &terminal {
             Ok(t) => t.output(),
             Err(_) => std::sync::Arc::new(bee::operator::NullOutput),
@@ -280,6 +311,10 @@ async fn repl(args: ReplArgs) -> ExitCode {
             return ExitCode::from(EX_USAGE);
         }
     };
+    #[cfg(feature = "durable-sessions")]
+    if let Some(session) = &durable {
+        built.registry.enable_evidence(session.evidence());
+    }
     #[cfg(feature = "intercept")]
     if let Some(h) = &built.http {
         eprintln!(
@@ -293,6 +328,12 @@ async fn repl(args: ReplArgs) -> ExitCode {
     let config = ReplConfig {
         // The base prompt: `run_repl` adds the notes for the tools the session holds, as the builder
         // did for the snapshot.
+        #[cfg(feature = "durable-sessions")]
+        durable,
+        #[cfg(feature = "durable-sessions")]
+        durable_timeout_secs: cfg.timeout_secs,
+        #[cfg(feature = "durable-sessions")]
+        durable_tool_call_limit: args.durable.tool_call_limit.unwrap_or(1024),
         system_prompt: cfg
             .system
             .clone()

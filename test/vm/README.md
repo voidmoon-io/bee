@@ -11,6 +11,7 @@ pattern in `agentcontainers/test/vm/`.
 |------|------|
 | `matrix.sh` | **Host-side orchestrator**: builds `bee --features enforce`, ships it + the runner into the VM over the `virtctl` tunnel, runs the matrix as root, and gates on the results. |
 | `remote-matrix.sh` | **VM-side runner**: exercises the enforcement matrix against the real kernel and emits `RESULT\|<case>\|<PASS\|FAIL>\|<note>` lines. Exits non-zero on any failure. |
+| `durable.sh` | Builds and runs the durable executor SIGKILL/reopen gate in the real VM. |
 | `cases.txt` | Shared manifest of the required case names, shipped with the runner. |
 | `validate_results.py` | Validates guest exit status, complete unique results, and one consistent summary. Missing, duplicate, skipped, or failed cases fail the gate. |
 | `test_results.py` | Local parser fixtures, including malformed output and transport failure. |
@@ -54,6 +55,22 @@ These five tests cover attenuation's unmatched-write default, executable pin pre
 descendant cancellation with sibling/service isolation, finite policy-lease expiry, and termination
 when a live service prevents mandatory narrowing. They are explicitly ignored in ordinary host tests;
 a successful host suite is not evidence that the kernel regressions ran.
+
+## Durable executor recovery
+
+From the repo root, with the same running VM prerequisites:
+
+```bash
+bash test/vm/durable.sh
+```
+
+This separately builds `durable_kernel` with `durable-sessions,enforce`, kills Bee
+while a detached descendant remains in its enforced cgroup, then reopens the session.
+A permitted replacement can run only after the exact old scope is empty. The test
+also checks that the unknown old attempt remains charged. It passed on kernel
+`6.8.0-147-generic` on 2026-10-30. It does not establish continuous enforcement while
+Bee is dead: Engine owns BPF links for its process lifetime. The script requires an
+already-running VM, removes its guest executable, and leaves VM lifecycle unchanged.
 
 ## Cases
 

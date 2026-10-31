@@ -16,10 +16,16 @@ pub mod ctf;
 pub mod exec;
 pub mod files;
 pub mod finish;
+#[cfg(feature = "source")]
+pub mod hunt;
 pub mod outcome;
 pub mod render;
+#[cfg(feature = "repro")]
+pub mod repro;
 pub mod search;
 pub mod skill;
+#[cfg(feature = "source")]
+pub mod source;
 
 // Security analysis tools (016-native-tools). Each is gated by its family's feature so a build that
 // selects none of them compiles none of them; `outcome` above is NOT gated, because the fail-closed
@@ -50,6 +56,8 @@ pub mod http_replay;
 pub mod http_send;
 #[cfg(feature = "intercept")]
 pub mod http_sitemap;
+#[cfg(feature = "findings")]
+pub mod receipt;
 #[cfg(feature = "scanners")]
 pub mod scanner;
 
@@ -98,6 +106,12 @@ pub const SEC_TOOLS: &[&str] = &[
     "record_finding",
     "list_findings",
     "git_log",
+    "receipt_get",
+    "source_pin",
+    "source_read",
+    "hunt_checkpoint",
+    "hunt_resume",
+    "repro_run",
 ];
 
 /// The external scanner tier (016-native-tools). Listing `scan` is necessary but **not sufficient**
@@ -147,9 +161,11 @@ pub fn sec_tool_family(name: &str) -> Option<&'static str> {
         "ast_grep" => Some("astgrep"),
         "git_log" => Some("gitlog"),
         "cvss" => Some("cvss"),
-        "record_finding" | "list_findings" => Some("findings"),
+        "record_finding" | "list_findings" | "receipt_get" => Some("findings"),
         "scan" => Some("scanners"),
         n if HTTP_TOOLS.contains(&n) => Some("intercept"),
+        "repro_run" => Some("repro"),
+        "source_pin" | "source_read" | "hunt_checkpoint" | "hunt_resume" => Some("source"),
         _ => None,
     }
 }
@@ -157,6 +173,9 @@ pub fn sec_tool_family(name: &str) -> Option<&'static str> {
 /// The outcome of one tool call.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
+    /// Durable harness-issued receipt, when evidence capture is enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_id: Option<String>,
     /// stdout (+ formatted stderr/exit for `bash`), or the file/dir payload, or an error message.
     pub content: String,
     /// Process exit code, for process-backed tools.
@@ -203,6 +222,7 @@ impl ToolResult {
     /// A successful, non-truncated text result.
     pub fn ok(content: impl Into<String>) -> Self {
         ToolResult {
+            receipt_id: None,
             content: content.into(),
             exit_code: None,
             is_error: false,
@@ -220,6 +240,7 @@ impl ToolResult {
     /// An error result (bad args, denial, missing file, …). `is_error = true`.
     pub fn error(content: impl Into<String>) -> Self {
         ToolResult {
+            receipt_id: None,
             content: content.into(),
             exit_code: None,
             is_error: true,
@@ -306,9 +327,31 @@ pub trait Tool: Send + Sync {
     fn mcp_server(&self) -> Option<&str> {
         None
     }
+    /// Trusted implementation contract. Mutations and unknown tools never replay by default.
+    fn durable_contract(&self) -> ToolContract {
+        ToolContract {
+            version: 1,
+            recovery: crate::session::durable::RecoveryPolicy::NeverReplay,
+        }
+    }
 
     /// Execute inside `sandbox`. MUST NOT panic on bad `arguments` — return an error result.
     async fn call(&self, arguments: serde_json::Value, sandbox: &Sandbox) -> ToolResult;
+    #[cfg(feature = "durable-sessions")]
+    fn supports_journal(&self) -> bool {
+        false
+    }
+    #[cfg(feature = "durable-sessions")]
+    async fn call_journaled(
+        &self,
+        _arguments: serde_json::Value,
+        _sandbox: &mut Sandbox,
+        _journal: &mut crate::session::driver::journal::Journal,
+    ) -> Result<ToolResult, crate::session::driver::DriverError> {
+        Err(crate::session::driver::DriverError::Refused(
+            "tool has no checkpoint executor".into(),
+        ))
+    }
 }
 
 /// The session dependencies a tool is built with (024 FR-013, research R4).
@@ -321,6 +364,10 @@ pub trait Tool: Send + Sync {
 pub struct ToolDeps {
     /// The planted CTF flag (US3). `submit_flag` is registered only when it is set.
     pub ctf_flag: Option<String>,
+    #[cfg(feature = "findings")]
+    pub evidence: Option<crate::evidence::EvidenceStore>,
+    #[cfg(feature = "repro")]
+    pub reproductions: std::collections::BTreeMap<String, crate::security::ReproductionProfile>,
     /// Discovered skills (006). `skill` is registered only when they are set.
     pub skills: Option<std::sync::Arc<crate::skills::SkillRegistry>>,
     /// The finding ledger the security tools write to (016). `None` is each tool's own default: the
@@ -361,7 +408,7 @@ impl ToolDeps {
     pub fn with_security(
         mut self,
         security: &crate::security::SecurityConfig,
-        policy: Option<&bee_core::Policy>,
+        #[allow(unused_variables)] policy: Option<&bee_core::Policy>,
         run_id: &str,
     ) -> ToolDeps {
         #[cfg(feature = "findings")]
@@ -370,11 +417,23 @@ impl ToolDeps {
                 security.findings_dir.as_deref(),
             ));
             self.run_id = Some(run_id.to_string());
+            if self.evidence.is_none() {
+                let root = security
+                    .findings_dir
+                    .as_ref()
+                    .map(|p| p.join("evidence"))
+                    .unwrap_or_else(|| ".bee/evidence".into());
+                self.evidence = Some(crate::evidence::EvidenceStore::new(root, run_id));
+            }
         }
         #[cfg(feature = "scanners")]
         {
             self.security = security.clone();
             self.scanner_grants = crate::scanners::grants_from_policy(policy, security);
+        }
+        #[cfg(feature = "repro")]
+        {
+            self.reproductions = security.reproductions.clone();
         }
         self
     }
@@ -433,6 +492,14 @@ pub struct SurfaceEntry {
     pub schema: ToolSchema,
     pub deps: DepsSummary,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolContract {
+    pub version: u32,
+    pub recovery: crate::session::durable::RecoveryPolicy,
+}
+
+#[cfg(feature = "findings")]
+pub mod durable;
 
 /// A name→tool map plus the schema list handed to the model each turn.
 #[derive(Default)]
@@ -445,6 +512,14 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
+    /// Enable receipts for calls through this registry, including subsequently added tools.
+    #[cfg(feature = "findings")]
+    pub fn enable_evidence(&mut self, store: crate::evidence::EvidenceStore) {
+        let mut deps = (*self.deps).clone();
+        deps.evidence = Some(store);
+        self.set_deps(std::sync::Arc::new(deps));
+        self.register("receipt_get").expect("known receipt tool");
+    }
     pub fn new() -> Self {
         ToolRegistry::default()
     }
@@ -551,6 +626,39 @@ impl ToolRegistry {
     /// Execute a model-requested call. An unknown tool name yields an error result (fed back to the
     /// model), never a panic (FR-016).
     pub async fn execute(&self, call: &ToolCall, sandbox: &Sandbox) -> ToolResult {
+        let result = self.execute_unrecorded(call, sandbox).await;
+        #[cfg(feature = "findings")]
+        if let Some(store) = self.deps.evidence.as_ref().filter(|_| {
+            [
+                "receipt_get",
+                "source_pin",
+                "source_read",
+                "hunt_checkpoint",
+                "hunt_resume",
+                "repro_run",
+            ]
+            .iter()
+            .any(|name| self.contains(name))
+        }) {
+            let store = store.clone();
+            let call = call.clone();
+            let observed = result.clone();
+            let saved = tokio::task::spawn_blocking(move || store.record(&call, &observed)).await;
+            let mut result = result;
+            match saved {
+                Ok(Ok(id)) => return result.with_receipt(id),
+                error => {
+                    // The effect may already have happened. Never imply it is safe to replay.
+                    result.is_error = true;
+                    result.content = format!("Evidence persistence failed after tool execution; do not automatically retry the effect: {error:?}\n{}", result.content);
+                }
+            }
+            return result;
+        }
+        result
+    }
+
+    async fn execute_unrecorded(&self, call: &ToolCall, sandbox: &Sandbox) -> ToolResult {
         if let Err(error) = sandbox.check_cleanup() {
             return ToolResult::error(error);
         }
@@ -558,6 +666,18 @@ impl ToolRegistry {
             Some(tool) => tool.call(call.arguments.clone(), sandbox).await,
             None => ToolResult::error(format!("unknown tool: {}", call.name)),
         }
+    }
+}
+
+#[cfg(feature = "findings")]
+impl ToolResult {
+    pub(crate) fn with_receipt(mut self, id: String) -> Self {
+        self.content = format!(
+            "[Bee receipt: {id}; records tool output, not verification]\n{}",
+            self.content
+        );
+        self.receipt_id = Some(id);
+        self
     }
 }
 
@@ -622,11 +742,37 @@ fn build(name: &str, deps: &ToolDeps) -> Result<Option<Box<dyn Tool>>, UnknownTo
         // and a pid-derived run id: a working tool, not a placeholder.
         #[cfg(feature = "findings")]
         "record_finding" => match (&deps.ledger, &deps.run_id) {
-            (Some(ledger), Some(run_id)) => {
-                Box::new(finding::RecordFinding::new(ledger.clone(), run_id.clone()))
-            }
-            _ => Box::<finding::RecordFinding>::default(),
+            (Some(ledger), Some(run_id)) => Box::new(
+                finding::RecordFinding::new(ledger.clone(), run_id.clone())
+                    .with_evidence(deps.evidence.clone()),
+            ),
+            _ => Box::new(finding::RecordFinding::default().with_evidence(deps.evidence.clone())),
         },
+        #[cfg(feature = "findings")]
+        "receipt_get" => Box::new(match &deps.evidence {
+            Some(store) => receipt::ReceiptGet::new(store.clone()),
+            None => receipt::ReceiptGet::unconfigured(),
+        }),
+        #[cfg(feature = "source")]
+        "source_pin" => Box::new(source::SourceTool::new("source_pin", deps.evidence.clone())),
+        #[cfg(feature = "source")]
+        "source_read" => Box::new(source::SourceTool::new(
+            "source_read",
+            deps.evidence.clone(),
+        )),
+        #[cfg(feature = "source")]
+        "hunt_checkpoint" => Box::new(hunt::HuntTool::new(
+            "hunt_checkpoint",
+            deps.evidence.clone(),
+        )),
+        #[cfg(feature = "source")]
+        "hunt_resume" => Box::new(hunt::HuntTool::new("hunt_resume", deps.evidence.clone())),
+        #[cfg(feature = "repro")]
+        "repro_run" => Box::new(repro::ReproRun {
+            profiles: deps.reproductions.clone(),
+            evidence: deps.evidence.clone(),
+            source_worker: None,
+        }),
         #[cfg(feature = "findings")]
         "list_findings" => match &deps.ledger {
             Some(ledger) => Box::new(finding::ListFindings::new(ledger.clone())),

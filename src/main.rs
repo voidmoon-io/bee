@@ -105,6 +105,9 @@ enum Cmd {
     #[cfg(feature = "gitlog")]
     #[command(hide = true)]
     GitlogWorker(bee::gitlog::GitLogArgs),
+    #[cfg(feature = "source")]
+    #[command(hide = true)]
+    SourceWorker(bee::source::WorkerArgs),
     /// Internal: read a scanner's SARIF report and print normalised findings as JSONL.
     ///
     /// The second child of the scanner pipeline, and the reason there are two: the report is
@@ -156,6 +159,22 @@ fn main() -> ExitCode {
         Cmd::AstgrepWorker(args) => cmd_astgrep_worker(&args),
         #[cfg(feature = "gitlog")]
         Cmd::GitlogWorker(args) => cmd_gitlog_worker(&args),
+        #[cfg(feature = "source")]
+        Cmd::SourceWorker(args) => {
+            let result = serde_json::from_str(&args.request)
+                .map_err(|e| e.to_string())
+                .and_then(bee::source::query);
+            match result {
+                Ok(value) => {
+                    println!("{value}");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("source worker: {error}");
+                    ExitCode::from(4)
+                }
+            }
+        }
         #[cfg(feature = "scanners")]
         Cmd::SarifWorker(args) => cmd_sarif_worker(&args),
         #[cfg(feature = "intercept")]

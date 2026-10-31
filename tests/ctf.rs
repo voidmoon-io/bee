@@ -229,6 +229,8 @@ fn score_report_counts_techniques() {
         audit_health: Default::default(),
         timing: Timing::default(),
         usage: None,
+        #[cfg(feature = "durable-sessions")]
+        durable_budget: None,
         score: None,
     };
 

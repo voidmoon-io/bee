@@ -397,6 +397,7 @@ mod tests {
             ("[provider]\npath = \"p.toml\"\n", "[provider]"),
             ("[policy]\nceiling = \"c.toml\"\n", "[policy] ceiling"),
             ("[mcp]\nconfig = \"m.toml\"\n", "[mcp]"),
+            ("[security.reproductions.fixture]\nprogram = \"/bin/sh\"\ntimeout_secs = 2\nmax_repetitions = 3\n", "[security]"),
         ] {
             let path = write(dir.path(), "config.toml", body);
             let err = load(&path, Origin::Project).unwrap_err();

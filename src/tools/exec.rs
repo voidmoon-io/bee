@@ -12,7 +12,7 @@ use tokio::process::{Child, Command};
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
 // 200 normalized findings at 4 KiB each fit comfortably. Raw reports need more space;
 // this is a protocol limit, independent of the small model-facing tool-result cap.
-#[cfg(feature = "scanners")]
+#[cfg(any(feature = "scanners", feature = "gitlog"))]
 const SCANNER_OUTPUT_CAP: usize = 8 * 1024 * 1024;
 
 struct ChildOwner<'a> {
@@ -149,10 +149,50 @@ async fn capture(
     cap: usize,
     protocol: bool,
 ) -> io::Result<(ExitStatus, Capture, Capture)> {
+    capture_with(
+        sandbox,
+        program,
+        args,
+        CaptureOptions {
+            input,
+            cap,
+            protocol,
+            cwd: None,
+        },
+    )
+    .await
+}
+
+struct CaptureOptions {
+    input: Option<Vec<u8>>,
+    cap: usize,
+    protocol: bool,
+    cwd: Option<PathBuf>,
+}
+
+async fn capture_with(
+    sandbox: &Sandbox,
+    program: &str,
+    args: &[String],
+    options: CaptureOptions,
+) -> io::Result<(ExitStatus, Capture, Capture)> {
+    let CaptureOptions {
+        input,
+        cap,
+        protocol,
+        cwd,
+    } = options;
     let (command, cgroup) = sandbox
         .invocation_command(program, args)
         .map_err(io::Error::other)?;
     let mut command = Command::from(command);
+    if let Some(cwd) = cwd {
+        command
+            .current_dir(&cwd)
+            .env("TMPDIR", &cwd)
+            .env("HOME", &cwd)
+            .env("PWD", &cwd);
+    }
     command
         .stdin(if input.is_some() {
             Stdio::piped()
@@ -244,7 +284,7 @@ pub async fn run_child(
     result.with_provenance(crate::provider::Provenance::Child)
 }
 
-#[cfg(feature = "scanners")]
+#[cfg(any(feature = "scanners", feature = "gitlog"))]
 pub struct ChildRun {
     pub stdout: String,
     pub stderr: String,
@@ -252,14 +292,14 @@ pub struct ChildRun {
     pub success: bool,
 }
 
-#[cfg(feature = "scanners")]
+#[cfg(any(feature = "scanners", feature = "gitlog", feature = "repro"))]
 pub enum ChildError {
     TimedOut(Duration),
     Spawn(String),
     OutputTooLarge,
 }
 
-#[cfg(feature = "scanners")]
+#[cfg(any(feature = "scanners", feature = "gitlog", feature = "repro"))]
 impl std::fmt::Display for ChildError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -270,7 +310,42 @@ impl std::fmt::Display for ChildError {
     }
 }
 
-#[cfg(feature = "scanners")]
+#[cfg(feature = "repro")]
+pub struct ProbeOutput {
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub code: Option<i32>,
+}
+
+/// A fresh scratch directory is supplied by the caller and retained until this future completes.
+#[cfg(feature = "repro")]
+pub async fn run_probe(
+    sandbox: &Sandbox,
+    program: &str,
+    args: &[String],
+    input: Vec<u8>,
+    cwd: PathBuf,
+    budget: Duration,
+) -> Result<ProbeOutput, ChildError> {
+    let options = CaptureOptions {
+        input: Some(input),
+        cap: 64 * 1024,
+        protocol: true,
+        cwd: Some(cwd),
+    };
+    match tokio::time::timeout(budget, capture_with(sandbox, program, args, options)).await {
+        Err(_) => Err(ChildError::TimedOut(budget)),
+        Ok(Err(e)) if e.kind() == io::ErrorKind::FileTooLarge => Err(ChildError::OutputTooLarge),
+        Ok(Err(e)) => Err(ChildError::Spawn(e.to_string())),
+        Ok(Ok((status, stdout, stderr))) => Ok(ProbeOutput {
+            code: status.code(),
+            stdout: stdout.bytes,
+            stderr: stderr.bytes,
+        }),
+    }
+}
+
+#[cfg(any(feature = "scanners", feature = "gitlog"))]
 pub async fn run_child_timed(
     sandbox: &Sandbox,
     program: &str,

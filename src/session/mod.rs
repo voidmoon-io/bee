@@ -18,6 +18,10 @@
 //! escalation — rather than the session itself; routing them through `Session` would rewrite both
 //! loops again for no change in behaviour.
 
+#[cfg(feature = "durable-sessions")]
+pub mod driver;
+/// Durable decision core used by the optional shared session driver.
+pub mod durable;
 pub mod parts;
 pub mod spec;
 

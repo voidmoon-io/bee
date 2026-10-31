@@ -30,6 +30,17 @@ use crate::tools::ToolResult;
 use crate::viz::theme::Role;
 use crate::viz::{animator, glyph, palette, sprite_render};
 
+#[cfg(feature = "durable-sessions")]
+pub(super) struct PipePrinter;
+#[cfg(feature = "durable-sessions")]
+impl ExternalPrinter for PipePrinter {
+    fn print(&mut self, msg: String) -> rustyline::Result<()> {
+        use std::io::Write;
+        std::io::stdout().lock().write_all(msg.as_bytes())?;
+        Ok(())
+    }
+}
+
 /// The kind of element occupying the single "active animated element" slot (FR-031).
 const KIND_NONE: u8 = 0;
 const KIND_SPINNER: u8 = 1;

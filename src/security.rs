@@ -42,6 +42,19 @@ pub struct SecurityConfig {
     /// Per-scanner configuration, keyed by adapter name (`opengrep`, `codeql`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub scanners: BTreeMap<String, ScannerConfig>,
+    /// Operator-fixed commands for controlled reproduction. No profile is enabled by default.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub reproductions: BTreeMap<String, ReproductionProfile>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ReproductionProfile {
+    pub program: PathBuf,
+    #[serde(default)]
+    pub args: Vec<String>,
+    pub timeout_secs: u64,
+    pub max_repetitions: u32,
 }
 
 impl SecurityConfig {

@@ -153,8 +153,35 @@ the model calls it; prose alone gets one reminder, then ends the run as `ended w
 the run. CTF runs and the REPL never see `finish`. `bee run` exits **0** only for
 `finish` with outcome `completed` (or a normal ending where finish was not offered) and **3** for a run
 that ended without completing its task — see `bee run --help`.
+## Durable sessions (opt-in)
+
+With `--features durable-sessions`, `run` and `repl` can share a persisted session
+using `--session-dir`, `--session-id`, and `--request-id` or `--resume`. Committed
+results retain their receipts on reopen; interrupted tools with unknown outcomes
+are not automatically repeated. Attempt budgets and retry deadlines survive restart;
+`--tool-call-limit` bounds tool attempts, and transcripts record unresolved usage.
+With `repro` enabled, completed reproduction probes survive crashes; a probe with
+unknown outcome remains unresolved and is never automatically repeated.
+See the [durable sessions plan](docs/durable-sessions-plan.md#stage-4-implementation)
+for commands, supported configurations, and recovery limits.
 
 ## Security analysis tooling (opt-in)
+
+For durable tool receipts and evidence-linked findings, see
+[native research tooling](docs/native-research-tooling.md). With the `findings` feature,
+adding `receipt_get` to the session tool list enables receipt capture in both `run` and `repl`.
+The `source` feature adds `source_pin` and `source_read` for commit-pinned source evidence;
+it is also included in `sec`.
+The same feature provides `hunt_checkpoint` and `hunt_resume` for durable hypotheses
+and source-grounded investigation history across sessions.
+The `repro` feature (also in `sec`) adds `repro_run`: operator-configured repeated
+behavior experiments with mandatory negative controls and durable result receipts.
+It can materialize pinned source for each attempt and compare the same probe against
+a second commit, with source provenance and comparison outcomes recorded separately.
+
+The proposed [reconnaissance workflow](docs/reconnaissance-workflows.md) maps ARTEX-style collection
+into Bee tools, skills, and durable evidence, with a staged plan for live web investigations.
+It distinguishes existing foundations from capabilities still to be implemented.
 
 Tools for using an agent to *review* code, rather than only to write it. All default-off: a build
 that selects none of them has the dependency graph it had before they existed.

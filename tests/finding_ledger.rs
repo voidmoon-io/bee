@@ -418,6 +418,19 @@ mod http_evidence {
             vec![format!("http:{first}")]
         );
 
+        let listed = bee::tools::finding::ListFindings::new(ledger.clone())
+            .call(json!({}), &sandbox)
+            .await;
+        assert!(!listed.is_error, "{}", listed.content);
+        assert!(
+            listed
+                .content
+                .contains(&format!("HTTP evidence: http:{first}")),
+            "{}",
+            listed.content
+        );
+        assert!(!listed.content.contains("prose-only"), "{}", listed.content);
+
         let review = || {
             let out = std::process::Command::new(env!("CARGO_BIN_EXE_bee"))
                 .args(["findings", "--dir"])

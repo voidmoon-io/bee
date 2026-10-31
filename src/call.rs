@@ -389,7 +389,7 @@ async fn attempt(
 }
 
 /// The first denial in a drained tool-scope audit, as `(op, target)`.
-fn first_denial(audit: &[AuditEvent]) -> Option<(String, String)> {
+pub(crate) fn first_denial(audit: &[AuditEvent]) -> Option<(String, String)> {
     audit
         .iter()
         .find(|e| e.decision == "denied")
@@ -421,7 +421,7 @@ async fn widen(
 }
 
 /// What the hooks decided before a call.
-enum Before {
+pub(crate) enum Before {
     /// Run it — after the proactive widen cycle, if a hook proposed one.
     Run(Option<EscalationRecord>),
     /// Do not run it.
@@ -431,7 +431,7 @@ enum Before {
 
 /// Dispatch `BeforeToolCall`: a refusal stops the call (FR-031, and outranks any proposed grant —
 /// FR-034); a proposed grant runs the proactive widen cycle (007 US2).
-async fn before_call(
+pub(crate) async fn before_call(
     e: &mut Escalation<'_>,
     tc: &ToolCall,
     sandbox: &mut Sandbox,
@@ -481,7 +481,7 @@ async fn before_call(
 
 /// The reactive step (007 US1): dispatch `KernelDenial` for the first denial; on a proposed grant
 /// scoped to the denied resource, widen.
-async fn reactive(
+pub(crate) async fn reactive(
     e: &mut Escalation<'_>,
     op: &str,
     target: &str,

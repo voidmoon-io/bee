@@ -105,6 +105,28 @@ pub async fn run(
     ));
 
     let mut events = EventStream::new();
+    #[cfg(feature = "durable-sessions")]
+    if config
+        .durable
+        .as_ref()
+        .is_some_and(|s| s.resume_request().is_some())
+    {
+        run_turn(
+            &mut app,
+            &mut terminal,
+            &mut events,
+            "",
+            model,
+            &mut conversation,
+            registry,
+            sandbox,
+            config,
+            &steering,
+            recorder.as_ref(),
+            &mut consent,
+        )
+        .await?;
+    }
 
     // The Elm loop: draw, then wait for the next thing that changes the model.
     while !app.should_quit {
@@ -258,6 +280,8 @@ async fn run_turn(
     // "working…" indicator's redraws and idles completely between turns. While effects are running
     // it tightens to the scheduler's 16ms so animations advance smoothly mid-turn (FR-002).
     let mut turn_done = false;
+    #[cfg(feature = "durable-sessions")]
+    let mut cancel_sent = false;
 
     loop {
         settle_consent(app, &mut asking);
@@ -269,8 +293,20 @@ async fn run_turn(
         refresh_http_pane(app, config);
         terminal.draw(|f| view::view(app, f))?;
         let period = tick_interval(app).unwrap_or(SPINNER_TICK).min(SPINNER_TICK);
-        // A mid-turn quit (Ctrl-C / q from chat focus) drops `exchange`, cancelling the call.
+        // Durable quit waits for committed cancellation and cleanup before dropping the exchange.
         if app.should_quit {
+            #[cfg(feature = "durable-sessions")]
+            if let Some(session) = &config.durable {
+                if !cancel_sent && !turn_done {
+                    cancel_sent = session.cancel().is_ok();
+                }
+                if turn_done {
+                    return Ok(());
+                }
+            } else {
+                return Ok(());
+            }
+            #[cfg(not(feature = "durable-sessions"))]
             return Ok(());
         }
 
@@ -297,8 +333,17 @@ async fn run_turn(
                     if drain_intents(app, terminal) {
                         terminal.clear()?;
                     }
+                    if let Some(text) = app.take_outbox() {
+                        #[cfg(feature = "durable-sessions")]
+                        if let Some(session) = &config.durable {
+                            let queued = if text == "/cancel" { session.cancel() } else { session.steer(text) };
+                            if let Err(error) = queued { crate::repl::ReplOutput::error(&sink, &error.to_string()); }
+                        } else { steering.lock().expect("steering queue").push_back(text); }
+                        #[cfg(not(feature = "durable-sessions"))]
+                        steering.lock().expect("steering queue").push_back(text);
+                    }
                 }
-                Some(Err(_)) | None => app.should_quit = true,
+                Some(Err(_)) | None => return Ok(()),
             },
             _ = tokio::time::sleep(period) => app.periodic_redraws += 1,
         }

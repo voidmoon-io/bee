@@ -606,6 +606,15 @@ impl Sandbox {
         self.child_env_mut().call = call;
     }
 
+    #[cfg(feature = "durable-sessions")]
+    pub(crate) fn durable_compatible(&self) -> bool {
+        let env = self.child_env();
+        env.hooks.is_none()
+            && env.provider.is_none()
+            && env.http_scope.is_none()
+            && env.mcp.servers.is_empty()
+    }
+
     /// The tool call currently executing, if any.
     pub fn call_context(&self) -> Option<&CallContext> {
         self.child_env().call.as_ref()

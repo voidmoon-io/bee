@@ -97,6 +97,19 @@ jobs:
             --test intercept_rules --test intercept_leads --test intercept_escalation \
             --test intercept_har --test intercept_tls --test intercept_ops
 
+  durable:
+    name: durable investigation recovery
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        if: ${{ !env.ACT }}
+      - run: cargo fetch --locked
+      - run: bash test/durable-investigation.sh
+
   enforce-check:
     name: enforce and concurrency type-check
     runs-on: ubuntu-latest

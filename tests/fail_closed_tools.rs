@@ -226,6 +226,8 @@ fn a_compiled_out_family_refuses_rather_than_returning_nothing() {
         "cvss" => cfg!(feature = "cvss"),
         "findings" => cfg!(feature = "findings"),
         "scanners" => cfg!(feature = "scanners"),
+        "source" => cfg!(feature = "source"),
+        "repro" => cfg!(feature = "repro"),
         _ => unreachable!("unknown family"),
     };
 

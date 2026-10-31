@@ -54,6 +54,8 @@ struct RecordArgs {
     title: String,
     evidence: String,
     #[serde(default)]
+    evidence_refs: Vec<String>,
+    #[serde(default)]
     line: Option<u32>,
     #[serde(default)]
     end_line: Option<u32>,
@@ -62,10 +64,6 @@ struct RecordArgs {
     /// A CVSS vector to score. Deliberately a *vector*, not a score.
     #[serde(default)]
     severity_vector: Option<String>,
-    /// Recorded HTTP exchanges this finding cites, `http:<exchange-id>` (019 US8). Each must exist
-    /// in this project's exchange store when the finding is recorded.
-    #[serde(default)]
-    evidence_refs: Option<Vec<String>>,
     /// Present only so a caller that supplies it gets an explicit refusal (FR-005) rather than
     /// having it silently ignored — which would leave them believing bee accepted their number.
     #[serde(default)]
@@ -77,9 +75,15 @@ struct RecordArgs {
 pub struct RecordFinding {
     ledger: Ledger,
     run_id: String,
+    evidence: Option<crate::evidence::EvidenceStore>,
 }
 
 impl RecordFinding {
+    pub fn with_evidence(mut self, store: Option<crate::evidence::EvidenceStore>) -> Self {
+        self.evidence = store;
+        self
+    }
+
     fn run(&self, arguments: serde_json::Value) -> ToolResult {
         let args: RecordArgs = match serde_json::from_value(arguments) {
             Ok(a) => a,
@@ -96,10 +100,32 @@ impl RecordFinding {
             );
         }
 
-        let refs = match validate_refs(&self.ledger, args.evidence_refs.unwrap_or_default()) {
-            Ok(r) => r,
+        if args.evidence_refs.len() > crate::findings::MAX_EVIDENCE_REFS {
+            return ToolResult::invalid_args("record_finding", "too many evidence references");
+        }
+        let (http_refs, receipt_refs): (Vec<_>, Vec<_>) = args
+            .evidence_refs
+            .into_iter()
+            .partition(|r| r.starts_with("http:"));
+        let refs = match validate_refs(&self.ledger, http_refs) {
+            Ok(refs) => refs,
             Err(e) => return ToolResult::invalid_args("record_finding", e),
         };
+        if !receipt_refs.is_empty() {
+            let Some(store) = &self.evidence else {
+                return failed(
+                    "record_finding",
+                    "evidence capture is not enabled; enable receipt_get",
+                );
+            };
+            if let Err(error) = store.validate_citations(&receipt_refs) {
+                return failed(
+                    "record_finding",
+                    format!("invalid evidence citation: {error}"),
+                );
+            }
+        }
+        let corroborated = !receipt_refs.is_empty() || !refs.is_empty();
         let mut finding = Finding::new(
             args.path,
             args.class,
@@ -108,6 +134,7 @@ impl RecordFinding {
             FindingSource::Tool("model".to_string()),
         );
         finding.reidentify();
+        finding.evidence_refs = receipt_refs;
 
         let sighting = Sighting {
             evidence_refs: refs,
@@ -124,6 +151,9 @@ impl RecordFinding {
         };
 
         let mut body = format!("recorded finding {id}");
+        if !corroborated {
+            body.push_str("\nprose-only evidence: uncorroborated by a harness receipt");
+        }
         if let Some(vector) = args.severity_vector {
             body.push_str(&score_and_attach(&self.ledger, &id, &vector));
         }
@@ -153,6 +183,7 @@ impl RecordFinding {
         RecordFinding {
             ledger,
             run_id: run_id.into(),
+            evidence: None,
         }
     }
 }
@@ -199,15 +230,13 @@ impl Tool for RecordFinding {
                         "type": "string",
                         "description": "What makes this real: the code, the reachable path, the reason it matters."
                     },
+                    "evidence_refs": {
+                        "type": "array", "items": {"type": "string"}, "maxItems": 16,
+                        "description": "Optional harness-issued receipt ids from this session or recorded http:<exchange id> references. Provenance only, not execution verification. Unknown, corrupt, or foreign-session receipts are refused."
+                    },
                     "line": { "type": "integer", "description": "1-indexed line, when the finding has one." },
                     "end_line": { "type": "integer", "description": "1-indexed end line, when the finding spans a range." },
                     "rule_id": { "type": "string", "description": "The rule identifier that fired, when one did." },
-                    "evidence_refs": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "maxItems": 16,
-                        "description": "Recorded HTTP exchanges that demonstrate it, as \"http:<exchange id>\" (from http_send, http_history, …)."
-                    },
                     "severity_vector": {
                         "type": "string",
                         "description": "A CVSS vector (e.g. \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H\"). \
@@ -403,6 +432,23 @@ fn render_list(findings: &[&Finding], view: &View) -> String {
             f.source
         ));
         out.push('\n');
+        let http_refs: std::collections::BTreeSet<_> = f
+            .sightings
+            .iter()
+            .flat_map(|s| s.evidence_refs.iter())
+            .collect();
+        if f.evidence_refs.is_empty() && http_refs.is_empty() {
+            out.push_str("  evidence: prose-only; uncorroborated by a harness receipt\n");
+        }
+        if !f.evidence_refs.is_empty() {
+            out.push_str(&format!(
+                "  evidence receipts: {}\n",
+                f.evidence_refs.join(", ")
+            ));
+        }
+        for reference in http_refs {
+            out.push_str(&format!("  HTTP evidence: {reference}\n"));
+        }
     }
     if view.skipped > 0 {
         out.push_str(&format!(

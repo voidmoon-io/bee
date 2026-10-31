@@ -103,7 +103,7 @@ impl Tool for Mutation {
             .unwrap();
         f.write_all(b"effect\n").unwrap();
         f.sync_all().unwrap();
-        if std::env::var("BEE_DRIVER_CRASH_MODE").as_deref() == Ok("after-effect") {
+        if std::env::var("BEE_DRIVER_CRASH_MODE").is_ok_and(|m| m.starts_with("after-effect")) {
             pause();
         }
         ToolResult::ok("exact observation")
@@ -659,7 +659,7 @@ async fn crash_child() {
     let mut registry = registry(&root, &session);
     let mode = std::env::var("BEE_DRIVER_CRASH_MODE").unwrap();
     let mut limits = limits();
-    if mode == "backoff-expired" {
+    if mode == "backoff-expired" || mode == "after-effect-deadline" {
         limits.timeout_ms = 1500;
     }
     if mode == "before-provider-budget" {
@@ -793,6 +793,62 @@ async fn sigkill_unknown_effect_stays_unresolved_and_partial_stream_never_dispat
             );
         }
     }
+}
+
+#[tokio::test]
+async fn a_deadline_passing_over_an_unknown_effect_keeps_it_unresolved() {
+    use bee::session::durable::{Phase, UnresolvedReason};
+    let root = tempfile::tempdir().unwrap();
+    let mut child = child(root.path(), "after-effect-deadline");
+    child.0.kill().unwrap();
+    child.0.wait().unwrap();
+    let resume = |root: PathBuf| async move {
+        let running = session(&root, None).await;
+        let mut registry = registry(&root, &running);
+        running
+            .run(
+                "request",
+                None,
+                "system",
+                limits(),
+                &model(),
+                &mut registry,
+                &mut Sandbox::host(vec![]),
+                &Output::default(),
+                None,
+            )
+            .await
+    };
+    // Host mode cannot prove the old executor stopped, so cleanup may still be pending; either
+    // way the phase must keep saying the outcome is unknown.
+    let unresolved = |root: &Path| {
+        let snap = snapshot(root);
+        snap.operations()
+            .values()
+            .find_map(|op| match &op.phase {
+                Phase::Unresolved { reason, .. } => Some((*reason, op.spec.deadline_ms)),
+                Phase::Cancelling {
+                    unresolved: Some(reason),
+                    ..
+                } => Some((*reason, op.spec.deadline_ms)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{:?}", snap.operations()))
+    };
+    for _ in 0..2 {
+        assert!(matches!(
+            resume(root.path().into()).await,
+            Err(DriverError::Unresolved(_))
+        ));
+        let (reason, deadline) = unresolved(root.path());
+        assert_eq!(reason, UnresolvedReason::UnknownOutcome);
+        // Past the deadline, expiry neither turns it into a stop nor reruns the effect.
+        wait_past_wall_deadline(deadline).await;
+    }
+    assert_eq!(
+        std::fs::read(root.path().join("effects")).unwrap(),
+        b"effect\n"
+    );
 }
 
 struct CancelProbe(PathBuf);
@@ -1558,4 +1614,127 @@ async fn library_entrypoints_refuse_unsupported_settings_before_admitting_work()
         matches!(result.outcome, ExchangeOutcome::Terminated(ref detail) if detail.contains("context/stuck"))
     );
     assert!(!root.path().join("effects").exists());
+}
+
+/// One tool call per submission: call while the newest message is the user's, then answer.
+fn per_request_model() -> MockModel {
+    MockModel::from_fn(|convo| {
+        if matches!(convo.messages.last(), Some(Message::User { .. })) {
+            Turn::calls(vec![ToolCall {
+                id: "call".into(),
+                name: "mutation".into(),
+                arguments: json!({}),
+            }])
+        } else {
+            Turn::text("finished")
+        }
+    })
+    .with_id("fixture-model")
+}
+
+#[tokio::test]
+async fn pruning_retires_old_submissions_and_survives_reopen() {
+    prune_fixture(30).await;
+}
+
+#[tokio::test]
+#[ignore = "slow (minutes): every commit reserializes the ever-growing conversation"]
+async fn pruning_lets_a_session_run_past_its_operation_bound() {
+    let snap = prune_fixture(bee::session::durable::MAX_OPERATIONS / 3 + 10).await;
+    let allocated = snap.driver().unwrap()["next_operation"].as_u64().unwrap();
+    assert!(
+        allocated > bee::session::durable::MAX_OPERATIONS as u64 + 1,
+        "{allocated}"
+    );
+}
+
+/// Runs `submissions` one-tool submissions, pruning aggressively; returns the final snapshot.
+async fn prune_fixture(submissions: usize) -> Snapshot {
+    use bee::session::driver::Retention;
+    // Over a thousand synchronous commits: use memory-backed storage when the host has it.
+    let root = tempfile::tempdir_in("/dev/shm")
+        .or_else(|_| tempfile::tempdir())
+        .unwrap();
+    let mut running = session(root.path(), None).await;
+    let retention = Retention {
+        trigger: 12,
+        keep: 3,
+        journal_bytes: 16 * 1024 * 1024,
+    };
+    running.set_retention(retention).await.unwrap();
+    let run = |session: Arc<Session>, request: String, text: &'static str| {
+        let mut registry = registry(root.path(), &session);
+        async move {
+            session
+                .run(
+                    &request,
+                    Some(text),
+                    "system",
+                    limits(),
+                    &per_request_model(),
+                    &mut registry,
+                    &mut Sandbox::host(vec![]),
+                    &Output::default(),
+                    None,
+                )
+                .await
+        }
+    };
+    // Each submission is a tool call between two provider calls: three operations.
+    for i in 0..submissions {
+        let (report, _) = run(running.clone(), format!("r{i}"), "investigate")
+            .await
+            .unwrap();
+        assert!(
+            matches!(report.status, bee::EpisodeStatus::Completed),
+            "{i}: {:?}",
+            report.status
+        );
+        if i == submissions / 2 {
+            // Reopen midway: the pruned snapshot and its tombstones load and keep working.
+            drop(running);
+            running = session(root.path(), None).await;
+            running.set_retention(retention).await.unwrap();
+        }
+    }
+    let snap = snapshot(root.path());
+    assert!(snap.operations().len() < retention.trigger + 6);
+    assert!(snap.horizon().0 > 3 * (submissions as u64 - 2 * retention.trigger as u64));
+    assert!(snap.entries().last().unwrap().sequence >= submissions as u64);
+    // Every tool ran exactly once and every receipt file is still on disk.
+    let effects = std::fs::read_to_string(root.path().join("effects")).unwrap();
+    assert_eq!(effects.lines().count(), submissions);
+    let receipts = std::fs::read_dir(root.path().join("session/evidence"))
+        .unwrap()
+        .count();
+    assert!(receipts >= submissions, "{receipts}");
+    // A pruned request is refused, never rerun, whatever text it carries.
+    for text in ["investigate", "changed"] {
+        let pruned = run(running.clone(), "r0".into(), text).await;
+        assert!(
+            matches!(
+                pruned,
+                Err(DriverError::Store(
+                    bee::session::durable::store::StoreError::Retired
+                ))
+            ),
+            "{pruned:?}"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("effects"))
+            .unwrap()
+            .lines()
+            .count(),
+        submissions
+    );
+    // A recent request still replays its saved report.
+    let last = format!("r{}", submissions - 1);
+    let (replayed, _) = run(running.clone(), last, "investigate").await.unwrap();
+    assert!(matches!(replayed.status, bee::EpisodeStatus::Completed));
+    drop(running);
+    let reopened = session(root.path(), None).await;
+    let (report, _) = run(reopened, "after".into(), "investigate").await.unwrap();
+    assert!(matches!(report.status, bee::EpisodeStatus::Completed));
+    snapshot(root.path())
 }

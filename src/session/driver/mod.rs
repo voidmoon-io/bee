@@ -6,11 +6,13 @@ mod executor;
 pub mod journal;
 mod presentation;
 mod recovery;
+mod retention;
 mod storage;
 mod types;
 mod wake;
 pub use budget::{Budget, Charge, Reservation};
 pub use presentation::{exchange, run_episode, RunBinding};
+pub use retention::Retention;
 pub use types::{Limits, Report};
 
 /// Optional diagnostics/fault-injection observer. Called on the storage owner thread;
@@ -184,6 +186,7 @@ impl Session {
             interrupted: false,
             clock_epoch_ms,
             clock_start: std::time::Instant::now(),
+            retention: Retention::default(),
         };
         driver.apply(Event::Activate { now_ms: now_ms() }).await?;
         Ok(Arc::new(Self {
@@ -196,6 +199,14 @@ impl Session {
     }
     pub fn evidence(&self) -> EvidenceStore {
         self.evidence.clone()
+    }
+    /// Replace when finished submissions are pruned. The default suits real sessions.
+    pub async fn set_retention(&self, retention: Retention) -> Result<(), DriverError> {
+        if retention.keep >= retention.trigger || retention.trigger > MAX_OPERATIONS {
+            return Err(DriverError::Refused("invalid retention".into()));
+        }
+        self.driver.lock().await.retention = retention;
+        Ok(())
     }
     pub fn resume_request(&self) -> Option<&str> {
         self.resume.as_deref()
@@ -280,8 +291,13 @@ impl Session {
                 request, text, system, limits, model, registry, sandbox, output, hooks,
             )
             .await;
-        // Failed storage or a dropped future cannot be resumed in memory.
-        driver.interrupted = result.is_err();
+        // Failed storage or a dropped future cannot be resumed in memory. A retired request is
+        // refused before anything is admitted, so it leaves the session usable.
+        driver.interrupted = result.is_err()
+            && !matches!(
+                result,
+                Err(DriverError::Store(core::store::StoreError::Retired))
+            );
         *self.current.lock().expect("current submission") = None;
         while driver.controls.try_recv().is_ok() {
             output.error("input was not admitted: its submission already ended; submit it again");
@@ -344,6 +360,7 @@ struct Driver {
     interrupted: bool,
     clock_epoch_ms: u64,
     clock_start: std::time::Instant,
+    retention: Retention,
 }
 impl Driver {
     fn journal(&self) -> &Journal {
@@ -368,11 +385,11 @@ impl Driver {
             _ => None,
         };
         let Some(id) = published else {
-            return self.apply_event(event).await;
+            return self.apply_retiring(event, Vec::new()).await;
         };
         let before = self.journal().receipts.clone();
         let evicted = self.journal_mut().commit_receipt(&id);
-        match self.apply_event(event).await {
+        match self.apply_retiring(event, Vec::new()).await {
             Ok(effects) => {
                 self.evidence.admit_committed([&id]);
                 if let Some(evicted) = evicted {
@@ -386,14 +403,18 @@ impl Driver {
             }
         }
     }
-    async fn apply_event(&mut self, event: Event) -> Result<Vec<Effect>, DriverError> {
+    async fn apply_retiring(
+        &mut self,
+        event: Event,
+        retire: Vec<String>,
+    ) -> Result<Vec<Effect>, DriverError> {
         let effects = if let Some(journal) = &self.journal {
             core::on_event_with_checkpoint(&mut self.state, event, serde_json::to_value(journal)?)?
         } else {
             on_event(&mut self.state, event)?
         };
         if let [Effect::Persist(commit)] = effects.as_slice() {
-            match self.storage.commit(*commit.clone()).await {
+            match self.storage.commit(*commit.clone(), retire).await {
                 Ok(id) => Ok(on_event(&mut self.state, Event::Committed(id))?),
                 Err(error) => {
                     on_event(&mut self.state, Event::CommitFailed(commit.id.clone()))?;
@@ -495,6 +516,7 @@ impl Driver {
         } else {
             let text =
                 text.ok_or_else(|| DriverError::Refused("resume request not found".into()))?;
+            self.prune().await?;
             let started_ms = self.time();
             self.admit(
                 request.into(),

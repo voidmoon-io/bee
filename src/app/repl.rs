@@ -204,7 +204,16 @@ async fn repl(args: ReplArgs) -> ExitCode {
     }
 
     #[cfg(feature = "durable-sessions")]
-    let durable = match args.durable.open(&cfg, &cfg.tools, &cfg.security).await {
+    let durable = match args
+        .durable
+        .open(
+            &cfg,
+            &cfg.tools,
+            &cfg.security,
+            &cfg.policy.iter().chain(&cfg.ceiling).collect::<Vec<_>>(),
+        )
+        .await
+    {
         Ok(value) => value,
         Err(error) => {
             eprintln!("{CMD}: {error}");

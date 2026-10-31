@@ -38,10 +38,27 @@ impl DurableArgs {
         cfg: &super::config::EffectiveConfig,
         tools: &[String],
         security: &bee::security::SecurityConfig,
+        policies: &[&bee_core::Policy],
     ) -> Result<Option<std::sync::Arc<bee::session::driver::Session>>, String> {
         let Some(path) = &self.session_dir else {
             return Ok(None);
         };
+        // Every policy the tools may run under: the active one and the ceiling a mid-session grant
+        // could widen to. With none the operator chose `--host`: tools are unscoped by request, and
+        // planted receipts are refused anyway because citations must name committed receipt IDs.
+        let resolver = bee_userspace::SystemResolver::current();
+        for policy in policies {
+            if let Some(reachable) =
+                bee::session::driver::tool_writable_path(policy, path, &resolver)?
+            {
+                return Err(format!(
+                    "--session-dir must not be writable by sandboxed tools, but a configured \
+                     policy or ceiling lets them write {}; move it outside every write grant or \
+                     under a deny rule",
+                    reachable.display()
+                ));
+            }
+        }
         if cfg.context != Default::default() || cfg.stuck != Default::default() {
             return Err(
                 "durable sessions do not yet support explicit context or stuck-detection settings"

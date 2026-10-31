@@ -112,26 +112,7 @@ impl Policy {
     /// irreducible authoring patterns or unresolvable names. Target: < 50ms for ≤100 path + ≤50 net
     /// rules (SC-006).
     pub fn compile(&self, r: &dyn Resolver) -> Result<CompiledPolicy, CompileError> {
-        let mut fs = Vec::new();
-
-        // Inject FR-008 protected defaults first, then explicit rules; explicit rules that name the
-        // same resolved path override (a later duplicate prefix with the same length wins at load).
-        // That override is the *author's* prerogative: for a derived policy, attenuation has already
-        // refused any child grant reaching into a protected region that the parent did not name
-        // explicitly, so nothing untrusted gets here (see [`crate::attenuation`]).
-        for (raw, access) in PROTECTED_DEFAULTS {
-            fs.push(FsPrimitive::Prefix {
-                path: resolve_tokens(raw, r).into_bytes(),
-                subtree: true,
-                mode: *access,
-            });
-        }
-
-        for (raw, access) in &self.filesystem {
-            let resolved = resolve_tokens(raw, r);
-            let prim = lower_pattern(&resolved, access.to_bits())?;
-            fs.push(prim);
-        }
+        let fs = self.compile_filesystem(r)?;
 
         let mut exec = Vec::new();
         for entry in &self.exec.allow {
@@ -179,6 +160,32 @@ impl Policy {
             fs_write_default_deny: self.denies_unmatched_writes(),
             proxy_loopback_required: self.http.as_ref().is_some_and(|h| h.is_active()),
         })
+    }
+
+    /// The filesystem rules alone, in the order [`Policy::compile`] emits them. Needs only path
+    /// tokens from `r` — no executable or DNS resolution — so a caller can ask what the kernel would
+    /// allow at a path without compiling the rest of the policy.
+    pub fn compile_filesystem(&self, r: &dyn Resolver) -> Result<Vec<FsPrimitive>, CompileError> {
+        let mut fs = Vec::new();
+        // Inject FR-008 protected defaults first, then explicit rules; explicit rules that name the
+        // same resolved path override (a later duplicate prefix with the same length wins at load).
+        // That override is the *author's* prerogative: for a derived policy, attenuation has already
+        // refused any child grant reaching into a protected region that the parent did not name
+        // explicitly, so nothing untrusted gets here (see [`crate::attenuation`]).
+        for (raw, access) in PROTECTED_DEFAULTS {
+            fs.push(FsPrimitive::Prefix {
+                path: resolve_tokens(raw, r).into_bytes(),
+                subtree: true,
+                mode: *access,
+            });
+        }
+
+        for (raw, access) in &self.filesystem {
+            let resolved = resolve_tokens(raw, r);
+            let prim = lower_pattern(&resolved, access.to_bits())?;
+            fs.push(prim);
+        }
+        Ok(fs)
     }
 
     /// Compile `[policy.http]` into the proxy scope (kernel) and the HTTP scope (worker) — 019,

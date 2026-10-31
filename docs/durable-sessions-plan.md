@@ -157,6 +157,26 @@ schema-1 receipts stay readable and are never rewritten. Durable observations us
 receipt schema 2 with the exact session, activation, operation, and attempt number;
 its sequence field is the operation ID, with retries distinguished by attempt.
 
+A receipt file is not provenance: a tool that can write the evidence directory can
+plant one. A durable session therefore cites only receipt IDs its store committed.
+Publishing a receipt records its ID in the driver checkpoint in the same commit;
+reopen restores that list and adds IDs still held by committed entries. Because an
+ID is the digest of the receipt bytes, a committed ID pins the exact observation.
+`validate_citations` refuses any other ID, and any schema-1 receipt, even one that
+names this session. The list keeps the newest 1,024 IDs, independent of the operation
+log, so pruning operations does not make recent receipts uncitable; an evicted ID
+can no longer be cited. Non-durable runs keep schema-1 receipts and their checks.
+
+`bee run` and `bee repl` refuse a `--session-dir` that the active policy, or the
+ceiling a grant could widen it to, lets a sandboxed tool write. The check uses the
+kernel's own deny list and matcher on the directory, its SQLite files, and the
+evidence directory and receipt names, so a write grant on the directory, an
+ancestor, a descendant, or a matching suffix is refused, as is an observe-mode
+policy or one with no write rule (unmatched writes stay allowed). Under `--host`
+there is no policy and no check: the operator chose unscoped tools, and planted
+receipts are still uncitable. Tampering with the SQLite store itself is outside
+this protection, as with any same-user process.
+
 The adapter protocol extends stage 2:
 
 1. Construct and submit the trusted spec, commit admission, recheck current authority,

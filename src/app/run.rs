@@ -300,10 +300,34 @@ async fn run(args: RunArgs) -> ExitCode {
         },
         stuck: cfg.stuck,
     };
+    // The policies the tools will run under: the scenario's, and the ceiling a grant may widen it
+    // to. `--host` runs them unscoped whatever the scenario says.
+    #[cfg(feature = "durable-sessions")]
+    let durable_policies =
+        if args.host || !scenario_has_policy || args.durable.session_dir.is_none() {
+            vec![]
+        } else {
+            let paths = std::iter::once(&scenario.policy_path).chain(&scenario.ceiling_policy_path);
+            match paths
+                .map(|p| bee_core::Policy::from_path(p))
+                .collect::<Result<Vec<_>, _>>()
+            {
+                Ok(policies) => policies,
+                Err(error) => {
+                    eprintln!("{CMD}: {error}");
+                    return ExitCode::from(EX_USAGE);
+                }
+            }
+        };
     #[cfg(feature = "durable-sessions")]
     let durable = match args
         .durable
-        .open(&cfg, &scenario.tools, &scenario.security)
+        .open(
+            &cfg,
+            &scenario.tools,
+            &scenario.security,
+            &durable_policies.iter().collect::<Vec<_>>(),
+        )
         .await
     {
         Ok(value) => value,

@@ -139,6 +139,15 @@ impl Session {
         if let Some(active) = journal.as_mut().and_then(|j| j.active.as_mut()) {
             active.budget.interrupt();
         }
+        if let Some(journal) = journal.as_mut() {
+            // Sessions from before the journal kept receipt IDs still have them in their entries.
+            for entry in snapshot.entries() {
+                if let Some(receipt) = &entry.result.receipt {
+                    journal.commit_receipt(&receipt.id);
+                }
+            }
+            evidence.admit_committed(&journal.receipts);
+        }
         let resume = resume
             .or_else(|| {
                 journal
@@ -281,6 +290,48 @@ impl Session {
     }
 }
 
+/// The first path in a session directory that a tool under `policy` could write, if any. A session
+/// directory a tool can write is not a record of what tools did. Decided with the kernel's own
+/// matcher; `resolver` supplies `:project_root` and `~`. An observe-mode policy blocks nothing.
+pub fn tool_writable_path(
+    policy: &bee_core::Policy,
+    dir: &std::path::Path,
+    resolver: &dyn bee_core::Resolver,
+) -> Result<Option<PathBuf>, String> {
+    use std::os::unix::ffi::OsStrExt;
+    if policy.mode == bee_core::Mode::Observe {
+        return Ok(Some(dir.to_path_buf()));
+    }
+    let rules = policy
+        .compile_filesystem(resolver)
+        .map_err(|e| e.to_string())?;
+    let default_deny = policy.denies_unmatched_writes();
+    let evidence = dir.join("evidence");
+    // Receipt names are digests; both extremes stand in for any suffix rule over hex.
+    let candidates = [
+        dir.to_path_buf(),
+        dir.join("session.sqlite3"),
+        dir.join("session.sqlite3-wal"),
+        dir.join("session.sqlite3-shm"),
+        dir.join("session.sqlite3-journal"),
+        evidence.join(format!("{}.json", "0".repeat(64))),
+        evidence.join(format!("{}.json", "f".repeat(64))),
+        evidence,
+    ];
+    for path in candidates {
+        let writable = bee_userspace::filesystem_allows_write(
+            &rules,
+            default_deny,
+            path.as_os_str().as_bytes(),
+        )
+        .map_err(|e| e.to_string())?;
+        if writable {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
 struct Driver {
     storage: storage::Storage,
     state: State,
@@ -311,6 +362,31 @@ impl Driver {
             .expect("active submission")
     }
     async fn apply(&mut self, event: Event) -> Result<Vec<Effect>, DriverError> {
+        // A publication commits its receipt ID atomically with the journal checkpoint below.
+        let published = match (&event, &self.journal) {
+            (Event::Published { receipt_id, .. }, Some(_)) => Some(receipt_id.clone()),
+            _ => None,
+        };
+        let Some(id) = published else {
+            return self.apply_event(event).await;
+        };
+        let before = self.journal().receipts.clone();
+        let evicted = self.journal_mut().commit_receipt(&id);
+        match self.apply_event(event).await {
+            Ok(effects) => {
+                self.evidence.admit_committed([&id]);
+                if let Some(evicted) = evicted {
+                    self.evidence.forget_committed(&evicted);
+                }
+                Ok(effects)
+            }
+            Err(error) => {
+                self.journal_mut().receipts = before;
+                Err(error)
+            }
+        }
+    }
+    async fn apply_event(&mut self, event: Event) -> Result<Vec<Effect>, DriverError> {
         let effects = if let Some(journal) = &self.journal {
             core::on_event_with_checkpoint(&mut self.state, event, serde_json::to_value(journal)?)?
         } else {
@@ -388,6 +464,7 @@ impl Driver {
                 observed_ms: now_ms(),
                 active: None,
                 finished: BTreeMap::new(),
+                receipts: Default::default(),
             });
         }
         if self.journal().conversation.system != system || self.journal().runtime != runtime {

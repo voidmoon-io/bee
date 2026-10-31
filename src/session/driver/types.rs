@@ -3,7 +3,7 @@ use crate::provider::{Conversation, Usage};
 use crate::session::durable::OperationId;
 use crate::transcript::{EpisodeStatus, TranscriptTurn};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Limits {
@@ -91,9 +91,37 @@ pub(super) struct Journal {
     pub observed_ms: u64,
     pub active: Option<Active>,
     pub finished: BTreeMap<String, Report>,
+    /// Receipt IDs this session committed, oldest first. The only citable evidence; a receipt
+    /// file alone proves nothing. Bounded: the oldest ID is evicted (and becomes uncitable) first.
+    #[serde(default)]
+    pub receipts: VecDeque<String>,
+}
+
+/// Receipts a durable session can cite. Independent of the operation log, which may be pruned.
+pub(super) const MAX_COMMITTED_RECEIPTS: usize = 1024;
+
+fn is_receipt_id(id: &str) -> bool {
+    id.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
 }
 
 impl Journal {
+    /// Record a committed receipt, returning the ID evicted to stay within the bound.
+    pub(super) fn commit_receipt(&mut self, id: &str) -> Option<String> {
+        if self.receipts.iter().any(|known| known == id) {
+            return None;
+        }
+        self.receipts.push_back(id.to_string());
+        if self.receipts.len() > MAX_COMMITTED_RECEIPTS {
+            return self.receipts.pop_front();
+        }
+        None
+    }
+
     pub(super) fn validate(
         &self,
         snapshot: &crate::session::durable::Snapshot,
@@ -108,6 +136,8 @@ impl Journal {
                 .keys()
                 .any(|id| id.0 >= self.next_operation)
             || self.finished.len() > 1024
+            || self.receipts.len() > MAX_COMMITTED_RECEIPTS
+            || self.receipts.iter().any(|id| !is_receipt_id(id))
         {
             return Err(Error::InvalidSnapshot.into());
         }
@@ -246,5 +276,45 @@ impl Journal {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn journal() -> Journal {
+        Journal {
+            version: 2,
+            compatibility: String::new(),
+            runtime: String::new(),
+            conversation: Conversation {
+                system: String::new(),
+                messages: vec![],
+            },
+            next_operation: 1,
+            next_wake_generation: 1,
+            observed_ms: 0,
+            active: None,
+            finished: BTreeMap::new(),
+            receipts: VecDeque::new(),
+        }
+    }
+
+    #[test]
+    fn committed_receipts_stay_bounded_and_evict_the_oldest_first() {
+        let mut journal = journal();
+        let id = |n: usize| format!("sha256:{n:064x}");
+        for n in 0..MAX_COMMITTED_RECEIPTS {
+            assert_eq!(journal.commit_receipt(&id(n)), None);
+        }
+        assert_eq!(journal.commit_receipt(&id(0)), None, "already known");
+        assert_eq!(
+            journal.commit_receipt(&id(MAX_COMMITTED_RECEIPTS)),
+            Some(id(0))
+        );
+        assert_eq!(journal.receipts.len(), MAX_COMMITTED_RECEIPTS);
+        assert!(journal.receipts.iter().all(|r| is_receipt_id(r)));
+        assert!(!is_receipt_id("sha256:../../etc/passwd"));
     }
 }

@@ -68,6 +68,7 @@ impl EvidenceStore {
     }
 
     /// Durable only: an ID evicted from the bounded committed set is no longer citable.
+    #[cfg(feature = "durable-sessions")]
     pub(crate) fn forget_committed(&self, id: &str) {
         if let Some(committed) = &self.committed {
             committed

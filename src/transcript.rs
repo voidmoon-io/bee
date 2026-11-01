@@ -80,6 +80,10 @@ pub enum EpisodeStatus {
 /// emitted for it (FR-008 correlation).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecordedCall {
+    /// The enclosing codemode call when this call ran inside a script (023); `None` for a call
+    /// the model made directly. Nested scripts point at their immediate parent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_call_id: Option<String>,
     pub call: ToolCall,
     pub result: ToolResult,
     /// Kernel audit events this call produced — the tool scope's, plus the proxy scope's tagged

@@ -680,6 +680,71 @@ fn handle_session(app: &mut App, ev: SessionEvent) {
                 }
             }
         }
+        // A grouped call (023): rows are keyed by their presentation identity, so a completion or
+        // a replay updates its row in place and a nested call sits under its enclosing script.
+        SessionEvent::ToolPresentation(event) => {
+            match &event.outcome {
+                crate::repl::presentation::CallOutcome::Running => {
+                    app.mascot_pending_tools = app.mascot_pending_tools.saturating_add(1);
+                    app.set_mascot_mood(Mood::Working);
+                }
+                outcome => {
+                    app.mascot_pending_tools = app.mascot_pending_tools.saturating_sub(1);
+                    let failed = match outcome {
+                        crate::repl::presentation::CallOutcome::Completed { result, audit } => {
+                            result.is_error || audit.iter().any(|e| e.decision == "denied")
+                        }
+                        _ => true,
+                    };
+                    app.mascot_had_error |= failed;
+                    app.set_mascot_mood(if failed {
+                        Mood::Concerned
+                    } else if app.mascot_pending_tools > 0 {
+                        Mood::Working
+                    } else {
+                        Mood::Thinking
+                    });
+                }
+            }
+            let id = &event.context.invocation;
+            if let Some(parent) = &event.context.parent {
+                if !app
+                    .chat
+                    .iter()
+                    .any(|row| row.invocation.as_ref() == Some(parent))
+                {
+                    let mut row = ChatMessage::text(
+                        Role::Tool,
+                        format!("codemode {} [running]", safe_line(&parent.call)),
+                    );
+                    row.invocation = Some(parent.clone());
+                    app.chat.push(row);
+                }
+            }
+            let mut row = ChatMessage::text(Role::Tool, safe_block(&event.text()).into_owned());
+            row.invocation = Some(id.clone());
+            row.parent = event.context.parent.clone();
+            if let Some(index) = app
+                .chat
+                .iter()
+                .position(|row| row.invocation.as_ref() == Some(id))
+            {
+                app.chat[index] = row;
+            } else if let Some(parent) = &event.context.parent {
+                let index = app
+                    .chat
+                    .iter()
+                    .rposition(|row| {
+                        row.invocation.as_ref() == Some(parent)
+                            || row.parent.as_ref() == Some(parent)
+                    })
+                    .map_or(app.chat.len(), |i| i + 1);
+                app.chat.insert(index, row);
+            } else {
+                app.chat.push(row);
+            }
+            app.autoscroll();
+        }
         SessionEvent::ToolCall { name, arguments } => {
             app.mascot_pending_tools = app.mascot_pending_tools.saturating_add(1);
             app.set_mascot_mood(Mood::Working);
@@ -782,6 +847,38 @@ fn compact_args(v: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grouped_rows_upsert_replay_and_scope_repeated_ids() {
+        use crate::repl::presentation::{CallContext, CallEvent, CallOutcome};
+        let mut app = App::new(120, 40);
+        let event = |turn, replay| CallEvent {
+            context: CallContext::new("request", turn, "child", Some("outer"), replay),
+            call: crate::provider::ToolCall {
+                id: "child".into(),
+                name: "write_file".into(),
+                arguments: serde_json::json!({"path":"file"}),
+            },
+            outcome: CallOutcome::Completed {
+                result: Box::new(crate::tools::ToolResult::ok("written")),
+                audit: vec![],
+            },
+        };
+        handle_session(&mut app, SessionEvent::ToolPresentation(event(0, false)));
+        handle_session(&mut app, SessionEvent::ToolPresentation(event(0, true)));
+        assert_eq!(
+            app.chat.iter().filter(|r| r.invocation.is_some()).count(),
+            2
+        );
+        handle_session(&mut app, SessionEvent::ToolPresentation(event(1, false)));
+        assert_eq!(
+            app.chat.iter().filter(|r| r.invocation.is_some()).count(),
+            4
+        );
+        let rows: Vec<_> = app.chat.iter().filter(|r| r.invocation.is_some()).collect();
+        assert_eq!(rows[1].parent, rows[0].invocation);
+        assert_eq!(rows[3].parent, rows[2].invocation);
+    }
 
     fn app() -> App {
         App::new(120, 40)

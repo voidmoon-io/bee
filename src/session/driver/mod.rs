@@ -1,10 +1,12 @@
 //! Opt-in shared durable conversation driver. SQLite and the core have one serialized owner.
 //! UI callbacks are observations of committed state; admission IDs survive process restarts.
 mod budget;
+mod codemode;
 mod conversation;
 mod execution;
 mod executor;
 pub mod journal;
+mod parallel;
 mod presentation;
 mod recovery;
 mod retention;
@@ -128,6 +130,10 @@ impl Session {
             .cloned()
             .map(serde_json::from_value)
             .transpose()?;
+        // Version 2 predates codemode: it carries no script stack, which deserializes empty.
+        if let Some(journal) = journal.as_mut().filter(|j| j.version == 2) {
+            journal.version = types::JOURNAL_VERSION;
+        }
         match &mut journal {
             Some(journal) => journal.conversation.restore(archived)?,
             None if !archived.is_empty() => return Err(core::Error::InvalidSnapshot.into()),
@@ -138,10 +144,9 @@ impl Session {
         } else if !snapshot.operations().is_empty() {
             return Err(DriverError::Incompatible);
         }
-        if journal
-            .as_ref()
-            .is_some_and(|j| j.version != 2 || j.compatibility != compatibility)
-        {
+        if journal.as_ref().is_some_and(|j| {
+            j.version != types::JOURNAL_VERSION || j.compatibility != compatibility
+        }) {
             return Err(DriverError::Incompatible);
         }
         if let Some(active) = journal.as_mut().and_then(|j| j.active.as_mut()) {
@@ -241,6 +246,43 @@ impl Session {
         }
         Ok(budget)
     }
+    /// The committed record of a finished or interrupted submission, with every receipted call
+    /// validated against its committed entry. Interrupted reports carry an infrastructure status.
+    pub async fn partial_report(
+        &self,
+        request: &str,
+        registry: &ToolRegistry,
+    ) -> Result<Option<Report>, DriverError> {
+        let driver = self.driver.lock().await;
+        let snapshot = driver.state.committed();
+        let Some(value) = snapshot.driver() else {
+            return Ok(None);
+        };
+        let journal: Journal = serde_json::from_value(value.clone())?;
+        let mut report = if let Some(report) = journal.finished.get(request) {
+            report.clone()
+        } else if let Some(active) = journal.active.filter(|a| a.request_id == request) {
+            Report {
+                request_id: active.request_id,
+                status: EpisodeStatus::InfraError {
+                    detail: "interrupted submission; partial committed results".into(),
+                },
+                turns: active.turns,
+                usage: active.usage,
+                started_ms: active.started_ms,
+                ended_ms: snapshot.observed_ms(),
+                model_calls: active.model_calls,
+                budget: active.budget,
+            }
+        } else {
+            return Ok(None);
+        };
+        driver.validate_receipts(&report, registry)?;
+        if driver.interrupted {
+            report.budget.interrupt();
+        }
+        Ok(Some(report))
+    }
     pub fn steer(&self, text: String) -> Result<(), DriverError> {
         if text.len() > 16 * 1024 {
             return Err(DriverError::Refused("steering input exceeds 16 KiB".into()));
@@ -297,6 +339,9 @@ impl Session {
                 request, text, system, limits, model, registry, sandbox, output, hooks,
             )
             .await;
+        if let Err(error @ DriverError::Unresolved(_)) = &result {
+            driver.report_unresolved_scripts(error, output);
+        }
         // Failed storage or a dropped future cannot be resumed in memory. A retired request is
         // refused before anything is admitted, so it leaves the session usable.
         driver.interrupted = result.is_err()
@@ -593,6 +638,7 @@ impl Driver {
                 timed_out: false,
                 budget: Budget::default(),
                 wake: None,
+                scripts: vec![],
             });
             self.save().await?;
         }
@@ -625,6 +671,7 @@ impl Driver {
         self.active_mut().budget.interrupt();
         self.active_mut().wake = None;
         self.save().await?;
+        self.cancel_script().await?;
         if let Some(id) = self.active().step.operation() {
             if self.state.committed().operation(id).is_some() {
                 // A stop the deadline forced is recorded as one, not as an operator cancel.
@@ -907,6 +954,10 @@ impl Driver {
                 }) = self.state.committed().operation(model_operation)
                 {
                     let turn: Turn = serde_json::from_value(result.output.clone())?;
+                    self.record_stopped_scripts()?;
+                    let root_audit = self.active().scripts.first().map(|script| {
+                        (script.parent().to_string(), script.worker_audit().to_vec())
+                    });
                     for call in turn.tool_calls.into_iter().skip(next) {
                         let result = ToolResult::error("submission stopped; no committed tool result is available and its external outcome may be unknown");
                         self.journal_mut().conversation.push(Message::ToolResult {
@@ -916,8 +967,14 @@ impl Driver {
                             content: result.content.clone(),
                             is_error: true,
                         });
+                        let audit = root_audit
+                            .as_ref()
+                            .filter(|(id, _)| *id == call.id)
+                            .map(|(_, audit)| audit.clone())
+                            .unwrap_or_default();
                         if let Some(turn) = self.active_mut().turns.last_mut() {
                             turn.calls.push(RecordedCall {
+                                parent_call_id: None,
                                 proxy_events: vec![],
                                 denied_attempt_audit: vec![],
                                 denied_attempt_proxy_events: vec![],
@@ -928,7 +985,7 @@ impl Driver {
                                 refused_by_hook: None,
                                 call,
                                 result,
-                                audit: vec![],
+                                audit,
                             });
                         }
                     }
@@ -954,6 +1011,7 @@ impl Driver {
         Ok(report)
     }
     async fn cleanup_cancelled(&mut self, sandbox: &Sandbox) -> Result<(), DriverError> {
+        self.cleanup_script_siblings(sandbox).await?;
         let Some(id) = self.active().step.operation() else {
             return Ok(());
         };

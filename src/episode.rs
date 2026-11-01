@@ -759,6 +759,7 @@ pub const FINISH_REMINDER: &str = "[bee] This run ends only when you call finish
 /// The record of a call that came after a terminal one in the same turn: it was never run.
 fn not_run(call: &crate::provider::ToolCall) -> RecordedCall {
     RecordedCall {
+        parent_call_id: None,
         call: call.clone(),
         result: crate::tools::ToolResult::error("not run: the run had already finished"),
         audit: Vec::new(),

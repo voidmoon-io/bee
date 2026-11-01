@@ -14,6 +14,15 @@ pub(super) struct Storage {
     owner: Option<std::thread::JoinHandle<()>>,
 }
 pub(super) enum Request {
+    CheckpointPut(
+        ActivationId,
+        Vec<u8>,
+        oneshot::Sender<Result<crate::session::durable::composition::CheckpointRef, DriverError>>,
+    ),
+    CheckpointLoad(
+        crate::session::durable::composition::CheckpointRef,
+        oneshot::Sender<Result<Vec<u8>, DriverError>>,
+    ),
     Commit(
         Box<Commit>,
         Vec<String>,
@@ -72,6 +81,14 @@ impl Storage {
                 }
                 while let Some(request) = rx.blocking_recv() {
                     match request {
+                        Request::CheckpointPut(activation, bytes, reply) => {
+                            let _ = reply
+                                .send(store.put_checkpoint(activation, &bytes).map_err(Into::into));
+                        }
+                        Request::CheckpointLoad(reference, reply) => {
+                            let _ =
+                                reply.send(store.load_checkpoint(&reference).map_err(Into::into));
+                        }
                         Request::Commit(commit, retire, appends, reply) => {
                             if let Some(observer) = &observer {
                                 observer.before_commit(&commit);
@@ -104,18 +121,42 @@ impl Storage {
                     }
                 }
             })?;
+        // Own the join handle before the first suspension: cancellation and
+        // startup errors must close and join the owner just like normal teardown.
+        let storage = Self {
+            tx: Some(tx),
+            owner: Some(owner),
+        };
         let (snapshot, activation, inbox, conversation) =
             ready.await.map_err(|_| DriverError::StorageClosed)??;
-        Ok((
-            Self {
-                tx: Some(tx),
-                owner: Some(owner),
-            },
-            snapshot,
-            activation,
-            inbox,
-            conversation,
-        ))
+        Ok((storage, snapshot, activation, inbox, conversation))
+    }
+    pub async fn put_checkpoint(
+        &self,
+        activation: ActivationId,
+        bytes: Vec<u8>,
+    ) -> Result<crate::session::durable::composition::CheckpointRef, DriverError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .as_ref()
+            .expect("live storage")
+            .send(Request::CheckpointPut(activation, bytes, tx))
+            .await
+            .map_err(|_| DriverError::StorageClosed)?;
+        rx.await.map_err(|_| DriverError::StorageClosed)?
+    }
+    pub async fn load_checkpoint(
+        &self,
+        reference: crate::session::durable::composition::CheckpointRef,
+    ) -> Result<Vec<u8>, DriverError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .as_ref()
+            .expect("live storage")
+            .send(Request::CheckpointLoad(reference, tx))
+            .await
+            .map_err(|_| DriverError::StorageClosed)?;
+        rx.await.map_err(|_| DriverError::StorageClosed)?
     }
     /// `retire` names admissions whose reports this commit prunes and `appends` the conversation
     /// messages it archives; all of it lands or none of it does.

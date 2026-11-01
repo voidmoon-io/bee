@@ -55,6 +55,9 @@ impl ReplOutput for SessionSink {
             arguments: arguments.clone(),
         });
     }
+    fn tool_event(&self, event: &crate::repl::presentation::CallEvent) {
+        self.emit(SessionEvent::ToolPresentation(event.clone()));
+    }
     fn tool_result(&self, result: &ToolResult, audit: &[bee_core::AuditEvent]) {
         self.emit(SessionEvent::ToolResult {
             result: result.clone(),

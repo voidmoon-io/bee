@@ -136,6 +136,7 @@ impl CallOutcome {
     /// events together, the proxy's tagged `scope_id = "proxy"` — so existing readers are unaffected.
     pub fn to_recorded(&self, call: &ToolCall) -> RecordedCall {
         RecordedCall {
+            parent_call_id: None,
             call: call.clone(),
             result: self.result.clone(),
             audit: self

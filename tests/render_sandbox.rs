@@ -1,4 +1,4 @@
-//! The `render` tool's fail-closed Rhai boundary (003-visual-render, US6, FR-020/FR-021): resource
+//! The `render` tool's fail-closed Python boundary (003-visual-render, US6, FR-020/FR-021): resource
 //! limits and deny-by-default (SC-009/SC-010) plus the no-render / multiple-render edge cases. These
 //! validate the sandbox *before* trusting it — Constitution I.
 
@@ -18,18 +18,18 @@ async fn run(script: &str) -> bee::tools::ToolResult {
 }
 
 #[tokio::test]
-async fn loop_hits_operation_limit() {
-    // SC-009: an infinite loop is terminated by the engine's op budget, fast.
+async fn loop_hits_execution_deadline() {
+    // SC-009: an infinite loop is terminated by the interpreter's time budget, fast.
     let start = std::time::Instant::now();
-    let r = run("loop {}").await;
+    let r = run(r#"while True: pass"#).await;
     assert!(
-        start.elapsed().as_millis() < 500,
+        start.elapsed().as_millis() < 3000,
         "should terminate quickly"
     );
     assert!(r.is_error, "expected error result");
     assert!(
-        r.content.to_lowercase().contains("operation limit"),
-        "message should mention the op limit: {}",
+        r.content.to_lowercase().contains("time limit"),
+        "message should mention the time limit: {}",
         r.content
     );
     assert!(r.render_spec.is_none());
@@ -56,17 +56,15 @@ async fn no_io_module_available() {
 
 #[tokio::test]
 async fn script_with_no_render_is_an_error() {
-    let r = run("let x = 1 + 2;").await;
+    let r = run(r#"x = 1 + 2;"#).await;
     assert!(r.is_error);
     assert!(r.content.contains("no visualization"), "got: {}", r.content);
 }
 
 #[tokio::test]
 async fn last_render_wins_with_discard_note() {
-    let script = r#"
-        let a = bar_chart("first"); a.bar("x", 1); render(a);
-        let b = bar_chart("second"); b.bar("y", 2); render(b);
-    "#;
+    let script = r#"a = bar_chart("first"); a.bar("x", 1); render(a);
+b = bar_chart("second"); b.bar("y", 2); render(b);"#;
     let r = run(script).await;
     assert!(!r.is_error, "got: {}", r.content);
     match r.render_spec {
@@ -82,11 +80,9 @@ async fn last_render_wins_with_discard_note() {
 
 #[tokio::test]
 async fn bar_chart_builds_expected_spec() {
-    let script = r#"
-        let c = bar_chart("Sizes");
-        c.bar("a", 10); c.bar("b", 20); c.bar("c", 30);
-        render(c);
-    "#;
+    let script = r#"c = bar_chart("Sizes");
+c.bar("a", 10); c.bar("b", 20); c.bar("c", 30);
+render(c);"#;
     let r = run(script).await;
     assert!(!r.is_error, "got: {}", r.content);
     assert!(!r.content.contains('\u{1b}'), "summary must be ANSI-free");
@@ -105,7 +101,7 @@ async fn bar_chart_builds_expected_spec() {
 
 #[tokio::test]
 async fn sprite_over_32_is_rejected() {
-    let r = run(r#"let p = palette(); let s = sprite(40, 40, p); render(s);"#).await;
+    let r = run(r#"p = palette(); s = sprite(40, 40, p); render(s);"#).await;
     assert!(r.is_error, "40×40 must be rejected: {}", r.content);
     assert!(r.content.contains("dimensions"), "got: {}", r.content);
 }
@@ -113,13 +109,11 @@ async fn sprite_over_32_is_rejected() {
 #[tokio::test]
 async fn oversized_palette_is_rejected() {
     // 33 distinct entries exceeds the 32-entry cap.
-    let script = r##"
-        let p = palette();
-        let keys = ["a","b","c","d","e","f","g","h","i","j","k","l","m","n","o","p","q",
-                    "r","s","t","u","v","w","x","y","z","A","B","C","D","E","F","G"];  // 33 distinct
-        for k in keys { p.set(k, "#010203"); }
-        let s = sprite(2, 2, p); render(s);
-    "##;
+    let script = r##"p = palette();
+keys = ["a","b","c","d","e","f","g","h","i","j","k","l","m","n","o","p","q",
+            "r","s","t","u","v","w","x","y","z","A","B","C","D","E","F","G"];  # 33 distinct
+for k in keys: p.set(k, "#010203");
+s = sprite(2, 2, p); render(s);"##;
     let r = run(script).await;
     assert!(
         r.is_error,
@@ -131,8 +125,7 @@ async fn oversized_palette_is_rejected() {
 
 #[tokio::test]
 async fn bad_hex_color_is_rejected() {
-    let r = run(r##"let p = palette(); p.set("K", "#zzzz"); let s = sprite(2, 2, p); render(s);"##)
-        .await;
+    let r = run(r##"p = palette(); p.set("K", "#zzzz"); s = sprite(2, 2, p); render(s);"##).await;
     assert!(r.is_error, "bad hex must be rejected: {}", r.content);
     assert!(
         r.content.to_lowercase().contains("color"),
@@ -143,12 +136,13 @@ async fn bad_hex_color_is_rejected() {
 
 #[tokio::test]
 async fn too_many_frames_is_rejected() {
-    let script = r##"
-        let p = palette(); p.set("K", "#101010");
-        let a = animation(150);
-        for i in 0..17 { let s = sprite(2, 2, p); a.add(s); }
-        render(a);
-    "##;
+    let script = r##"p = palette(); p.set("K", "#101010");
+a = animation(150);
+
+for i in range(0, 17):
+    s = sprite(2, 2, p); a.add(s);
+
+render(a);"##;
     let r = run(script).await;
     assert!(r.is_error, "17 frames must be rejected: {}", r.content);
     assert!(r.content.contains("16 frames"), "got: {}", r.content);
@@ -156,13 +150,11 @@ async fn too_many_frames_is_rejected() {
 
 #[tokio::test]
 async fn mismatched_frame_dims_is_rejected() {
-    let script = r#"
-        let p = palette();
-        let a = animation(150);
-        a.add(sprite(4, 4, p));
-        a.add(sprite(8, 8, p));
-        render(a);
-    "#;
+    let script = r#"p = palette();
+a = animation(150);
+a.add(sprite(4, 4, p));
+a.add(sprite(8, 8, p));
+render(a);"#;
     let r = run(script).await;
     assert!(
         r.is_error,
@@ -175,12 +167,10 @@ async fn mismatched_frame_dims_is_rejected() {
 #[tokio::test]
 async fn interval_is_clamped_not_an_error() {
     // A too-fast interval is clamped to 50ms, not rejected.
-    let script = r##"
-        let p = palette(); p.set("K", "#101010");
-        let a = animation(5);     // below the 50ms floor
-        a.add(sprite(2, 2, p));
-        render(a);
-    "##;
+    let script = r##"p = palette(); p.set("K", "#101010");
+a = animation(5);     # below the 50ms floor
+a.add(sprite(2, 2, p));
+render(a);"##;
     let r = run(script).await;
     assert!(!r.is_error, "clamped interval must succeed: {}", r.content);
     match r.render_spec {
@@ -193,12 +183,18 @@ async fn interval_is_clamped_not_an_error() {
 
 #[tokio::test]
 async fn bee_functions_are_callable() {
-    // SC-018: bee_sprite() and bee_animation() build valid specs from a Rhai script.
+    // SC-018: bee_sprite() and bee_animation() build valid specs from a Python script.
     let s = run("render(bee_sprite());").await;
     assert!(!s.is_error, "bee_sprite: {}", s.content);
     match s.render_spec {
         Some(RenderSpec::Sprite { spec }) => {
-            assert_eq!((spec.width, spec.height), (24, 24));
+            assert_eq!(
+                (spec.width, spec.height),
+                (
+                    bee::viz::bee::sprite().width,
+                    bee::viz::bee::sprite().height
+                )
+            );
             assert!(!spec.is_fully_transparent(), "the bee has pixels");
         }
         other => panic!("expected Sprite, got {other:?}"),
@@ -206,7 +202,9 @@ async fn bee_functions_are_callable() {
     let a = run("render(bee_animation());").await;
     assert!(!a.is_error, "bee_animation: {}", a.content);
     match a.render_spec {
-        Some(RenderSpec::Animation { spec }) => assert_eq!(spec.frames.len(), 6),
+        Some(RenderSpec::Animation { spec }) => {
+            assert_eq!(spec.frames.len(), bee::viz::bee::animation().frames.len())
+        }
         other => panic!("expected Animation, got {other:?}"),
     }
 }
@@ -214,7 +212,7 @@ async fn bee_functions_are_callable() {
 #[tokio::test]
 async fn transparent_sprite_summary_notes_it() {
     // M1: a fully-transparent sprite's summary says so.
-    let r = run(r#"let p = palette(); let s = sprite(4, 4, p); render(s);"#).await;
+    let r = run(r#"p = palette(); s = sprite(4, 4, p); render(s);"#).await;
     assert!(!r.is_error, "got: {}", r.content);
     assert!(
         r.content.contains("fully transparent"),
@@ -227,11 +225,9 @@ async fn transparent_sprite_summary_notes_it() {
 async fn nesting_over_four_is_rejected() {
     // 5 levels of vsplit exceeds the depth-4 structural cap (grid-tui raised it from 3 to make a
     // grid-of-splits legal; contracts/rhai-api.md).
-    let script = r#"
-        let l1 = vsplit(); let l2 = vsplit(); let l3 = vsplit(); let l4 = vsplit(); let l5 = vsplit();
-        l5.add(text("x")); l4.add(l5); l3.add(l4); l2.add(l3); l1.add(l2);
-        render(l1);
-    "#;
+    let script = r#"l1 = vsplit(); l2 = vsplit(); l3 = vsplit(); l4 = vsplit(); l5 = vsplit();
+l5.add(text("x")); l4.add(l5); l3.add(l4); l2.add(l3); l1.add(l2);
+render(l1);"#;
     let r = run(script).await;
     assert!(r.is_error, "deep nesting must be rejected: {}", r.content);
     assert!(r.content.contains("nesting"), "got: {}", r.content);

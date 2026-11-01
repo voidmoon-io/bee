@@ -93,6 +93,10 @@ cargo build --release --features tui
 ./target/release/bee repl --provider <provider.toml> --tui        # --no-tui forces inline
 ```
 
+Durable sessions expose `codemode`: bounded Python composes registered tools with `call_tool`, admits up to four calls together with `call_tools`, and can nest scripts four levels deep. Every call keeps the normal consent, budget, receipt and recovery rules. See [implementation and limits](specs/023-codemode/implementation.md).
+
+Visual scripts use **Python via Monty**, with bounded execution in a disposable Bee worker. Rhai is no longer supported; see the [Python drawing API and migration guide](docs/python-visuals.md).
+
 The agent can address a rendered widget to a named side panel with `render_to("metrics", widget)`
 (and `render_to_ttl` / `remove_panel` / `clear_panels` to manage them); an untargeted `render(widget)`
 still flows inline. `--tui` degrades honestly — piped output, `TERM=dumb`, or a terminal below 40×10

@@ -1,4 +1,4 @@
-//! The N×M grid (grid-tui, M1): the `RenderSpec::Grid` renderer and the Rhai `grid()` surface.
+//! The N×M grid (grid-tui, M1): the `RenderSpec::Grid` renderer and the Python `grid()` surface.
 //! Covers cell placement, spanning (a cell's Rect is the union of its base tracks), the structural
 //! counts (element/nesting), and the fail-closed validation (overlap, out-of-bounds, dimension cap).
 
@@ -136,7 +136,7 @@ fn sprite_rasterizes_into_a_buffer_cell() {
     assert_eq!(right.fg, Color::Rgb(0, 255, 0)); // top-right = green
 }
 
-// --- Rhai surface (through the real sandboxed RenderTool) ------------------------------------------
+// --- Python surface (through the real sandboxed RenderTool) ------------------------------------------
 
 async fn run(script: &str) -> bee::tools::ToolResult {
     RenderTool::new()
@@ -149,12 +149,10 @@ async fn run(script: &str) -> bee::tools::ToolResult {
 
 #[tokio::test]
 async fn grid_script_commits_a_grid_spec() {
-    let r = run(r#"
-        let g = grid(2, 2);
-        g.cell(0, 0, text("hi"));
-        g.cell(1, 1, gauge("m", 0.5));
-        render(g);
-    "#)
+    let r = run(r#"g = grid(2, 2);
+g.cell(0, 0, text("hi"));
+g.cell(1, 1, gauge("m", 0.5));
+render(g);"#)
     .await;
     assert!(!r.is_error, "unexpected error: {}", r.content);
     match r.render_spec {
@@ -170,11 +168,9 @@ async fn grid_script_commits_a_grid_spec() {
 
 #[tokio::test]
 async fn grid_spanning_cell_is_accepted() {
-    let r = run(r#"
-        let g = grid(2, 3);
-        g.span(0, 0, 1, 3, line_chart("throughput"));
-        render(g);
-    "#)
+    let r = run(r#"g = grid(2, 3);
+g.span(0, 0, 1, 3, line_chart("throughput"));
+render(g);"#)
     .await;
     assert!(!r.is_error, "span should be legal: {}", r.content);
     assert!(matches!(r.render_spec, Some(RenderSpec::Grid { .. })));
@@ -182,12 +178,10 @@ async fn grid_spanning_cell_is_accepted() {
 
 #[tokio::test]
 async fn overlapping_cells_are_rejected() {
-    let r = run(r#"
-        let g = grid(2, 2);
-        g.span(0, 0, 2, 2, text("big"));
-        g.cell(1, 1, text("clash"));
-        render(g);
-    "#)
+    let r = run(r#"g = grid(2, 2);
+g.span(0, 0, 2, 2, text("big"));
+g.cell(1, 1, text("clash"));
+render(g);"#)
     .await;
     assert!(r.is_error, "overlap must fail");
     assert!(
@@ -199,11 +193,9 @@ async fn overlapping_cells_are_rejected() {
 
 #[tokio::test]
 async fn out_of_bounds_cell_is_rejected() {
-    let r = run(r#"
-        let g = grid(2, 2);
-        g.cell(5, 5, text("nope"));
-        render(g);
-    "#)
+    let r = run(r#"g = grid(2, 2);
+g.cell(5, 5, text("nope"));
+render(g);"#)
     .await;
     assert!(r.is_error, "out-of-bounds must fail");
     assert!(
@@ -215,7 +207,7 @@ async fn out_of_bounds_cell_is_rejected() {
 
 #[tokio::test]
 async fn oversized_grid_is_rejected() {
-    let r = run("let g = grid(20, 20); render(g);").await;
+    let r = run(r#"g = grid(20, 20); render(g);"#).await;
     assert!(r.is_error, "20×20 exceeds the 12×12 cap");
     assert!(
         r.content.contains("1..=12"),
@@ -227,7 +219,7 @@ async fn oversized_grid_is_rejected() {
 #[tokio::test]
 async fn shipped_example_script_runs() {
     // Guard the documented example against rot: it must commit a grid without error.
-    let script = include_str!("../specs/003-visual-render/examples/grid-dashboard.rhai");
+    let script = include_str!("../specs/003-visual-render/examples/grid-dashboard.py");
     let r = run(script).await;
     assert!(!r.is_error, "example must run cleanly: {}", r.content);
     match r.render_spec {

@@ -128,3 +128,5 @@ pub use tools::{Tool, ToolRegistry, ToolResult};
 pub use transcript::{
     enforcement_trace, EnforcementEntry, EpisodeStatus, EpisodeTranscript, ScoreReport,
 };
+
+pub mod python;

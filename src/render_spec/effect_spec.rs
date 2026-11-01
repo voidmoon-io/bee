@@ -1,7 +1,7 @@
 //! [`EffectSpec`] (009-tachyonfx-effects) — the declarative description of a terminal effect.
 //!
 //! **This type deliberately contains NO tachyonfx or ratatui types** (contracts/effect-spec.md),
-//! for the same reason [`crate::render_spec::RenderSpec`] contains no ratatui or rhai types: it is a
+//! for the same reason [`crate::render_spec::RenderSpec`] contains no ratatui or Monty types: it is a
 //! pure serde value recorded verbatim in the episode transcript, so `tachyonfx` never leaks toward
 //! `bee-core` through the transcript (SC-009, Constitution V). It compiles in the headless build;
 //! resolution to a live `tachyonfx::Effect` happens only in `tui::effects`, behind the `tui` feature.
@@ -40,7 +40,7 @@ pub enum EffectDirection {
 }
 
 impl EffectDirection {
-    /// Parse a Rhai direction string, falling back to [`EffectDirection::Left`] for anything
+    /// Parse a Python direction string, falling back to [`EffectDirection::Left`] for anything
     /// unrecognized (contracts/rhai-effect-api.md). Canonicalized at *construction*, so the recorded
     /// transcript never contains a bogus direction.
     pub fn parse(s: &str) -> Self {
@@ -54,7 +54,7 @@ impl EffectDirection {
     }
 }
 
-/// A declarative effect description, produced by the Rhai render API and resolved to a live
+/// A declarative effect description, produced by the Python render API and resolved to a live
 /// tachyonfx effect by `tui::effects` (contracts/effect-spec.md).
 ///
 /// Variants split into two categories that behave differently under `NO_COLOR` (FR-006):

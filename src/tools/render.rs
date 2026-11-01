@@ -1,100 +1,11 @@
-//! The `render` tool (003-visual-render, US6, FR-019…FR-024): evaluates a Rhai script against the
-//! registered drawing API and returns a [`ToolResult`] whose `content` is a **text summary** and
-//! whose `render_spec` carries the widget for the REPL to draw. It runs Rhai **in-process** and
-//! **ignores the `Sandbox`** (FR-022) — the tool does no I/O, so there is nothing for the kernel to
-//! enforce; Rhai's own sandbox (bounded ops/memory, drawing-only API) is its confinement.
-
-use std::sync::Mutex;
-
-use rhai::{Engine, EvalAltResult};
-use serde_json::json;
-
+//! Python visual scripting through the bounded Monty worker.
 use crate::config::VisualLevel;
 use crate::provider::ToolSchema;
-use crate::render_api::{register, RenderContext};
 use crate::sandbox::Sandbox;
 use crate::tools::{Tool, ToolResult};
 use crate::visual_gate;
-
-/// Max Rhai operations before the engine terminates a script (FR-020). ~50ms worst case (NFR-001).
-const MAX_OPERATIONS: u64 = 10_000;
-
-/// The Rhai primer + function list embedded in the tool's schema so the model has the API surface in
-/// its tool definition (spec Assumption).
-const SCHEMA_DESC: &str = "\
-Render a visualization by writing a short Rhai script that ends with render(widget).\n\
-\n\
-LANGUAGE: Rhai (JavaScript-like). `let x = 5;`, `for i in 0..n {}`, `[1,2,3]` arrays. \
-Integers are i64, floats f64. No I/O or network.\n\
-\n\
-== CHARTS ==\n\
-  bar_chart(title) -> c;  c.bar(label, value);  c.color(name);  c.x_label(s);  c.y_label(s)\n\
-  line_chart(title) -> c;  let s = c.series(label);  s.point(x, y)\n\
-  scatter(title) -> c;     let s = c.series(label);  s.point(x, y)\n\
-  area_chart(title) -> c;  let s = c.series(label);  s.point(x, y);  c.color(name)\n\
-  heatmap(title) -> h;     h.row(label, [floats]);  h.color(name)\n\
-  sparkline(title, [ints])\n\
-\n\
-== DATA ==\n\
-  table(title) -> t;  t.header([col1, col2, ...]);  t.row([val1, val2, ...])\n\
-  gauge(title, 0.0..1.0) -> g;  g.label(s);  g.color(name)\n\
-  dots(title) -> d;  d.pass(label);  d.fail(label);  d.skip(label)\n\
-  log_tail(title) -> l;  l.line(text);  l.line(text, level);  l.max_rows(n)   // newest lines win; level: error|warn|info|debug\n\
-\n\
-== TEXT & LAYOUT ==\n\
-  text(content) -> t;  t.color(name);  t.bold();  t.dim()\n\
-  markdown(source)\n\
-  ascii_art([line1, line2, ...]);  separator()\n\
-  vsplit() / hsplit() -> layout;  layout.add(widget)   (max nesting 3)\n\
-\n\
-== PIXEL ART ==\n\
-  palette() -> p;  p.set(\"K\", \"#1A1A1A\");  p.set(\".\", \"transparent\")\n\
-  sprite(w, h, palette) -> s;  s.paint([\"..KK..\", ...]);  s.set(x, y, color);  s.fill(color)   (max 32x32)\n\
-  animation(ms) -> a;  a.add(sprite);  a.bounce(true);  a.cycles(n)   (max 16 frames, 50-1000ms)\n\
-  bee_sprite();  bee_animation()\n\
-\n\
-== RENDERING ==\n\
-  render(widget)                           // inline in chat\n\
-  render_to(panel_id, widget)              // persistent side panel (id: 1-32 chars [a-z0-9_-])\n\
-  render_to_ttl(panel_id, widget, ttl_ms)  // side panel that auto-expires\n\
-  remove_panel(panel_id);  clear_panels()\n\
-  render_fullscreen(widget);  render_fullscreen_ttl(widget, ttl_ms)\n\
-\n\
-== TRANSITIONS (optional) ==\n\
-  widget.effect(fade_in(ms))  // attach before render()\n\
-  fade_in(ms) / fade_out(ms);  dissolve_in(ms) / dissolve_out(ms);  evolve_in(ms) / evolve_out(ms)\n\
-  slide_in(dir, ms) / slide_out(dir, ms);  sweep_in(dir, ms) / sweep_out(dir, ms)\n\
-  pulse(color, ms);  glow(ms)          // dir: left/right/top/bottom; ms: 100-2000\n\
-\n\
-== EXAMPLES ==\n\
-Bar chart:\n\
-  let c = bar_chart(\"Sales\"); c.bar(\"Q1\", 100); c.bar(\"Q2\", 150); c.bar(\"Q3\", 80); render(c);\n\
-\n\
-Line chart with effect:\n\
-  let c = line_chart(\"CPU\"); let s = c.series(\"load\");\n\
-  s.point(0, 10); s.point(1, 45); s.point(2, 30); s.point(3, 70);\n\
-  c.effect(fade_in(300)); render(c);\n\
-\n\
-Table:\n\
-  let t = table(\"Results\"); t.header([\"Name\", \"Score\", \"Status\"]);\n\
-  t.row([\"Alice\", \"95\", \"pass\"]); t.row([\"Bob\", \"72\", \"pass\"]); render(t);\n\
-\n\
-Heatmap:\n\
-  let h = heatmap(\"Activity\"); h.row(\"Mon\", [0.1, 0.5, 0.9, 0.3]);\n\
-  h.row(\"Tue\", [0.8, 0.2, 0.4, 0.7]); render(h);\n\
-\n\
-Scatter plot:\n\
-  let c = scatter(\"Clusters\"); let s = c.series(\"A\");\n\
-  s.point(1, 2); s.point(3, 4); s.point(2, 5); render(c);\n\
-\n\
-Gauge:\n\
-  let g = gauge(\"Disk\", 0.73); g.label(\"73%\"); g.color(\"accent\"); render(g);\n\
-\n\
-Side panel (reuse id to update in place):\n\
-  let g = gauge(\"Progress\", 0.5); render_to(\"status\", g);\n\
-\n\
-Colors: accent, success, error, info, honey, pollen, sting, smoke, royal (or ANSI names). \
-Caps: <=500 total elements. You receive a text summary of what was drawn, not the pixels.";
+use serde_json::json;
+const SCHEMA_DESC: &str = include_str!("../python/visual-api.txt");
 
 /// The text summary the model gets back: what was drawn and where it went. Never pixels (FR-023).
 fn summarize(outcome: &crate::render_api::RenderOutcome) -> String {
@@ -157,7 +68,7 @@ fn summarize(outcome: &crate::render_api::RenderOutcome) -> String {
 /// At `visual_level = none` the agent owns no regions at all, so panel upserts route inline. Inline
 /// holds one widget, so the last upsert wins — the same last-writer-wins rule `render()` has always
 /// had. Removes and clears simply drop: there are no panels for them to act on.
-fn apply_visual_gate(
+pub fn apply_visual_gate(
     mut outcome: crate::render_api::RenderOutcome,
     level: VisualLevel,
 ) -> (crate::render_api::RenderOutcome, Vec<&'static str>) {
@@ -213,50 +124,11 @@ fn apply_visual_gate(
     (outcome, notes)
 }
 
-/// Test-only handle on the gate, so `render_api`'s tests can assert the whole path from a Rhai
-/// script through the downgrade without standing up a `Tool` and a `Sandbox`.
-#[cfg(test)]
-pub(crate) fn gate_for_test(
-    outcome: crate::render_api::RenderOutcome,
-    level: VisualLevel,
-) -> (crate::render_api::RenderOutcome, Vec<&'static str>) {
-    apply_visual_gate(outcome, level)
-}
-
-/// The render tool. The Rhai [`Engine`] is built **once** (per registry/session) with hard resource
-/// limits (research D2); per-call cost is just `run`. `eval_guard` serializes concurrent calls so the
-/// shared [`RenderContext`] is never raced.
-pub struct RenderTool {
-    engine: Engine,
-    ctx: RenderContext,
-    eval_guard: Mutex<()>,
-}
-
-impl Default for RenderTool {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
+#[derive(Default)]
+pub struct RenderTool;
 impl RenderTool {
-    /// Build the sandboxed rendering engine: hard limits (FR-020), `eval` disabled, and only the
-    /// drawing API registered (FR-021).
     pub fn new() -> Self {
-        let ctx = RenderContext::default();
-        let mut engine = Engine::new();
-        engine.set_max_operations(MAX_OPERATIONS);
-        engine.set_max_call_levels(16);
-        engine.set_max_expr_depths(32, 16);
-        engine.set_max_string_size(64 * 1024);
-        engine.set_max_array_size(1_000);
-        engine.set_max_map_size(100);
-        engine.disable_symbol("eval");
-        register(&mut engine, ctx.clone());
-        RenderTool {
-            engine,
-            ctx,
-            eval_guard: Mutex::new(()),
-        }
+        Self
     }
 }
 
@@ -273,26 +145,21 @@ impl Tool for RenderTool {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "script": { "type": "string", "description": "A Rhai script that builds one visualization and ends with render(widget)." }
+                    "script": { "type": "string", "description": "A Python script that builds one visualization and ends with render(widget)." }
                 },
                 "required": ["script"]
             }),
         }
     }
 
-    async fn call(&self, arguments: serde_json::Value, _sandbox: &Sandbox) -> ToolResult {
-        // Serialize concurrent calls: the shared RenderContext is reset+read across the eval.
-        let _guard = self.eval_guard.lock().expect("render eval guard");
-
+    async fn call(&self, arguments: serde_json::Value, sandbox: &Sandbox) -> ToolResult {
         let script = match arguments.get("script").and_then(|v| v.as_str()) {
             Some(s) => s.to_string(),
             None => return ToolResult::invalid_args("render", "missing string field 'script'"),
         };
 
-        self.ctx.reset();
-        match self.engine.run(&script) {
-            Ok(()) => {
-                let outcome = self.ctx.take();
+        match crate::render_api::evaluate(&script, sandbox).await {
+            Ok(outcome) => {
                 if outcome.is_empty() {
                     return ToolResult::error("render: script produced no visualization");
                 }
@@ -327,15 +194,7 @@ impl Tool for RenderTool {
                     ),
                 }
             }
-            Err(e) => {
-                let msg = match &*e {
-                    EvalAltResult::ErrorTooManyOperations(_) => format!(
-                        "render: script exceeded the operation limit ({MAX_OPERATIONS} ops)"
-                    ),
-                    other => format!("render: {other}"),
-                };
-                ToolResult::error(msg)
-            }
+            Err(e) => ToolResult::error(format!("render: {e}")),
         }
     }
 }

@@ -11,6 +11,7 @@ pattern in `agentcontainers/test/vm/`.
 |------|------|
 | `matrix.sh` | **Host-side orchestrator**: builds `bee --features enforce`, ships it + the runner into the VM over the `virtctl` tunnel, runs the matrix as root, and gates on the results. |
 | `remote-matrix.sh` | **VM-side runner**: exercises the enforcement matrix against the real kernel and emits `RESULT\|<case>\|<PASS\|FAIL>\|<note>` lines. Exits non-zero on any failure. |
+| `codemode.sh` / `remote-codemode.sh` | Build and run the 17 required Python codemode enforcement cases in `codemode-cases.txt`. |
 | `durable.sh` | Builds and runs the durable executor SIGKILL/reopen gate in the real VM. |
 | `cases.txt` | Shared manifest of the required case names, shipped with the runner. |
 | `validate_results.py` | Validates guest exit status, complete unique results, and one consistent summary. Missing, duplicate, skipped, or failed cases fail the gate. |
@@ -72,6 +73,31 @@ expired-tool cleanup before submission expiry. Unknown attempts remain charged.
 All four passed on kernel `6.8.0-147-generic` on 2026-10-30. It does not establish continuous enforcement while
 Bee is dead: Engine owns BPF links for its process lifetime. The script requires an
 already-running VM, removes its guest executable, and leaves VM lifecycle unchanged.
+
+## Python codemode enforcement
+
+```bash
+bash test/vm/codemode.sh
+```
+
+This gate builds the shipping Bee worker and `codemode_kernel` test harness with
+`durable-sessions,enforce`, then runs 17 mandatory ignored tests as root in the
+BPF-LSM VM. It requires the existing VM to be running, creates a unique guest
+staging directory, removes its artifacts on exit, and leaves VM lifecycle unchanged.
+`NS`, `VM` and `KEY` work as with the main matrix. The runner checks each test exists,
+executes exactly one test per case, applies a per-case watchdog, and validates the
+complete result manifest (`codemode-cases.txt`) and guest exit status. A missing test
+or skip fails the gate.
+
+The cases cover allowed and denied files and writes with receipts and correlated
+audits; worker and inner-tool executable denials; worker timeout and memory cleanup;
+cancellation with sibling-scope isolation; committed-result recovery after SIGKILL;
+parent death with a stopped worker; an unknown inner execution that must remain
+charged and cannot replay; shell allow/deny; per-call audit attribution in a batch;
+nested effects and nested-batch cancellation; and batch SIGKILL recovery. The harness
+lives under a guest `deps/` directory so the same executable lookup used by Cargo
+tests resolves the shipped Bee binary.
+See [verification details](../../specs/023-codemode/enforcement-verification.md).
 
 ## Cases
 

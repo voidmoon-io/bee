@@ -27,7 +27,7 @@ use crate::viz::buffer_render::theme_to_ratatui_color;
 use crate::viz::palette;
 use crate::viz::theme::{self, Role};
 
-/// How wide the leading gradient is on slide/sweep effects, in cells. Not agent-tunable: the Rhai
+/// How wide the leading gradient is on slide/sweep effects, in cells. Not agent-tunable: the Python
 /// surface exposes direction and duration only, and this is a house value chosen so the wave reads
 /// as a wave at typical panel widths (contracts/rhai-effect-api.md).
 const GRADIENT_LEN: u16 = 8;

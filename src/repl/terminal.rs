@@ -295,6 +295,12 @@ impl ReplOutput for TerminalOutput {
         st.started = false;
     }
 
+    fn tool_event(&self, event: &crate::repl::presentation::CallEvent) {
+        for line in safe_block(&event.text()).lines() {
+            self.emit(line);
+        }
+    }
+
     fn tool_call(&self, name: &str, arguments: &serde_json::Value) {
         let args = clip(&safe_line(&arguments.to_string()), MAX_ARG_CHARS);
         let name = safe_line(name);

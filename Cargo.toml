@@ -74,11 +74,10 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 # NOT `rust-version.workspace = true` (which is 1.85, kept for the embeddable core crates).
-# `ast-grep-core` 0.45 — behind the default-off `astgrep` feature — declares 1.88, and Cargo cannot
-# express a per-feature floor. Splitting the promise by audience is the honest encoding: embedders
-# of bee-core/bee-common/bee-userspace keep 1.85; operators building this binary need 1.88
-# (016-native-tools research R3).
-rust-version = "1.88"
+# Monty 1.4 (the bounded Python interpreter) requires Rust 1.96, above ast-grep's 1.88. Cargo cannot
+# express a per-feature floor, so embedders of bee-core/bee-common/bee-userspace keep 1.85 while
+# operators building this binary need 1.96.
+rust-version = "1.96"
 description = "Kernel-enforced, capability-scoped sandboxing for AI coding agents."
 
 # The application package: the `bee` executable and the harness library it drives. They are one
@@ -139,7 +138,7 @@ tui = [
 # cannot read back).
 findings = ["dep:sha2", "time/parsing", "time/serde-well-known"]
 # Structural, syntax-aware code search. Compiles NO grammar on its own: pick languages below.
-# Requires Rust 1.88 (see the `rust-version` note on `[package]`).
+# Requires Rust 1.88; the package floor is higher (see the `rust-version` note on `[package]`).
 astgrep = ["dep:ast-grep-core", "dep:ast-grep-language"]
 # One feature per grammar. Each is a compiled C tree-sitter parser, which is why they are opt-in one
 # at a time rather than arriving as a block.
@@ -234,10 +233,13 @@ bstr = "1"
 rustyline = "19"
 
 # Visual rendering (003-visual-render, application package only — MUST NOT propagate to bee-core/bee-common,
-# NFR-002/SC-019). `rhai` sync => Engine is Send+Sync so RenderTool can own it; only_i64 trims size;
-# NO `unchecked` (that would disable the resource limits, FR-020). `ratatui` with no default features
-# gives headless Buffer/widgets/layout without crossterm or any terminal backend (research D2/D3).
-rhai = { version = "1", default-features = false, features = ["only_i64", "sync"] }
+# NFR-002/SC-019). One bounded Python interpreter (Monty) runs visual scripts and durable codemode
+# workers in a separate `bee python-worker` process. `ratatui` with no default features gives headless
+# Buffer/widgets/layout without crossterm or any terminal backend (research D2/D3).
+monty = "=1.4.0"
+monty-types = "=1.4.0"
+monty-alloc = { version = "=1.4.0", features = ["exit-code"] }
+postcard = { version = "1", features = ["alloc"] }
 ratatui = { version = "0.30", default-features = false }
 
 # Full-screen TUI backend (008-grid-tui). All optional + gated by the `tui` feature above so the

@@ -79,7 +79,13 @@ pub(super) struct Active {
     pub timed_out: bool,
     pub budget: super::Budget,
     pub wake: Option<super::wake::Wake>,
+    /// Root-to-innermost codemode scripts for the current tool call (023).
+    #[serde(default)]
+    pub scripts: Vec<super::codemode::Cursor>,
 }
+/// Version 3 adds the codemode script stack; version-2 journals carry none.
+pub(super) const JOURNAL_VERSION: u32 = 3;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct Journal {
     pub version: u32,
@@ -129,7 +135,7 @@ impl Journal {
         inbox: &[crate::session::durable::store::Submission],
     ) -> Result<(), super::DriverError> {
         use crate::session::durable::{Error, Phase, WorkKind};
-        if self.version != 2
+        if self.version != JOURNAL_VERSION
             || self.next_operation == 0
             || self.next_wake_generation == 0
             || snapshot
@@ -182,6 +188,12 @@ impl Journal {
             }
         }
         if let Some(active) = &self.active {
+            super::codemode::Cursor::validate_stack(
+                &active.scripts,
+                active,
+                snapshot,
+                self.next_operation,
+            )?;
             active
                 .budget
                 .validate(snapshot, active.limits.turns, active.limits.tool_calls)?;
@@ -286,7 +298,7 @@ mod tests {
 
     fn journal() -> Journal {
         Journal {
-            version: 2,
+            version: JOURNAL_VERSION,
             compatibility: String::new(),
             runtime: String::new(),
             conversation: super::super::conversation::StoredConversation::new(String::new()),

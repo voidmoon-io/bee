@@ -1,0 +1,19 @@
+[package]
+name = "bee-monty-spike"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+publish = false
+
+[workspace]
+
+[dependencies]
+monty = "=1.4.0"
+monty-types = "=1.4.0"
+monty-alloc = { version = "=1.4.0", features = ["exit-code"] }
+postcard = { version = "1", features = ["alloc"] }
+
+[dev-dependencies]
+serde_json = "1"
+tempfile = "3"
+bee = { path = "../../..", default-features = false, features = ["durable-store"] }

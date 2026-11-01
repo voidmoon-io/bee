@@ -160,3 +160,14 @@ impl Directory {
         self.check_sidecars()
     }
 }
+
+impl Drop for Directory {
+    fn drop(&mut self) {
+        // Store drops SQLite before this guard. Explicitly release the shared
+        // open-description lock: a concurrent fork can retain this descriptor
+        // until exec, even with O_CLOEXEC. Such children never use the store.
+        // SAFETY: dir is still owned here; unlocking cannot release a lock on
+        // another open description. Closing below remains the fallback.
+        unsafe { libc::flock(self.dir.as_raw_fd(), libc::LOCK_UN) };
+    }
+}

@@ -30,7 +30,14 @@ impl Driver {
         } else {
             None
         };
-        let runtime = fingerprint(&(system, model.id(), registry.schemas(), enforced, policy))?;
+        let runtime = fingerprint(&(
+            system,
+            model.id(),
+            codemode::schemas(registry),
+            crate::python::RUNTIME_ID,
+            enforced,
+            policy,
+        ))?;
         if let Some(report) = self.begin(request, text, system, limits, runtime).await? {
             self.replay_report(&report, registry, output)?;
             return Ok((report, self.journal().conversation.conversation().clone()));
@@ -122,13 +129,12 @@ impl Driver {
         let report = result?;
         Ok((report, self.journal().conversation.conversation().clone()))
     }
-    fn replay_report(
+    /// Validate every evidence-dependent entry before presenting any recovered observation.
+    pub(super) fn validate_receipts(
         &self,
         report: &Report,
         registry: &ToolRegistry,
-        output: &dyn ReplOutput,
     ) -> Result<(), DriverError> {
-        // Validate every evidence-dependent entry before presenting any recovered observation.
         for turn in &report.turns {
             for call in &turn.calls {
                 if call.result.receipt_id.is_none() {
@@ -153,6 +159,15 @@ impl Driver {
                 registry.deliver_durable(&self.state, entry)?;
             }
         }
+        Ok(())
+    }
+    fn replay_report(
+        &self,
+        report: &Report,
+        registry: &ToolRegistry,
+        output: &dyn ReplOutput,
+    ) -> Result<(), DriverError> {
+        self.validate_receipts(report, registry)?;
         if report.budget.unreported_model_usage() > 0 {
             output.info(&format!("usage is incomplete for {} charged provider attempt(s); {} attempt(s) have unresolved outcomes",
                 report.budget.unreported_model_usage(), report.budget.unresolved()));
@@ -162,9 +177,41 @@ impl Driver {
                 output.assistant_delta(text);
                 output.assistant_end();
             }
+            let mut parents = std::collections::BTreeSet::new();
             for call in &turn.calls {
-                output.tool_call(&call.call.name, &call.call.arguments);
-                presentation::tool(output, &call.result, &call.audit);
+                if call.parent_call_id.is_none() && call.call.name != "codemode" {
+                    output.tool_call(&call.call.name, &call.call.arguments);
+                    presentation::tool(output, &call.result, &call.audit);
+                    continue;
+                }
+                // Script calls replay grouped. A nested script is recorded after its children,
+                // so its row is opened from its own record before the first child arrives.
+                let context = |id: &str, parent: Option<&str>| {
+                    crate::repl::presentation::CallContext::new(
+                        &report.request_id,
+                        turn.index,
+                        id,
+                        parent,
+                        true,
+                    )
+                };
+                if let Some(parent) = &call.parent_call_id {
+                    if let Some(outer) = turn
+                        .calls
+                        .iter()
+                        .find(|c| c.call.id == *parent)
+                        .filter(|_| parents.insert(parent.clone()))
+                    {
+                        presentation::start(
+                            output,
+                            context(parent, outer.parent_call_id.as_deref()),
+                            &outer.call,
+                        );
+                    }
+                }
+                let ctx = context(&call.call.id, call.parent_call_id.as_deref());
+                presentation::start(output, ctx.clone(), &call.call);
+                presentation::grouped(output, ctx, &call.call, &call.result, &call.audit);
             }
         }
         Ok(())
@@ -248,7 +295,7 @@ impl Driver {
                             return Err(DriverError::Refused(reason));
                         }
                     }
-                    let schemas = registry.schemas();
+                    let schemas = codemode::schemas(registry);
                     let conversation = self.journal().conversation.conversation().clone();
                     if let (true, Some(h), Some(active)) = (ready, hooks, active_policy.as_mut()) {
                         let future = crate::grants::escalate::lifecycle_step(
@@ -380,7 +427,6 @@ impl Driver {
                 Step::Tools {
                     model_operation,
                     next,
-                    operation,
                     ..
                 } => {
                     if self
@@ -388,7 +434,7 @@ impl Driver {
                         .turns
                         .last()
                         .and_then(|t| t.calls.last())
-                        .is_some_and(|c| c.result.terminal)
+                        .is_some_and(|c| c.result.terminal && c.parent_call_id.is_none())
                     {
                         return Ok(EpisodeStatus::Completed);
                     }
@@ -424,6 +470,30 @@ impl Driver {
                         .get(next)
                         .ok_or(core::Error::InvalidSnapshot)?
                         .clone();
+                    // A codemode call runs as a script; its leaves come back here one at a time.
+                    let call = if call.name == "codemode" {
+                        // Boxed: the script and overlap futures would otherwise inflate this
+                        // already large state machine past a test thread's stack.
+                        match Box::pin(self.script_next(call, registry, sandbox, output)).await? {
+                            Some(child) => {
+                                Box::pin(self.overlap_batch(
+                                    registry,
+                                    sandbox,
+                                    output,
+                                    hooks,
+                                    active_policy,
+                                ))
+                                .await?;
+                                child
+                            }
+                            None => continue,
+                        }
+                    } else {
+                        call
+                    };
+                    let operation = self.active().step.operation();
+                    let parent_call_id =
+                        self.active().scripts.last().map(|s| s.parent().to_string());
                     let deadline = self
                         .time()
                         .saturating_add(self.active().limits.tool_timeout_ms)
@@ -474,7 +544,14 @@ impl Driver {
                             &self.compatibility,
                         )?;
                         let attempt = self.authorize(id).await?;
-                        output.tool_call(&call.name, &call.arguments);
+                        match &parent_call_id {
+                            Some(parent) => presentation::start(
+                                output,
+                                self.call_context(&call.id, Some(parent)),
+                                &call,
+                            ),
+                            None => output.tool_call(&call.name, &call.arguments),
+                        }
                         let started = std::time::Instant::now();
                         let journaled = registry.supports_journal(&call) && refusal.is_none();
                         let mut result = if let Some(refusal) = refusal {
@@ -545,20 +622,24 @@ impl Driver {
                     let duration_ms = entry.result.duration_ms;
                     let audit = entry.result.audit.clone();
                     let result = registry.deliver_durable(&self.state, entry)?;
-                    let terminal = result.terminal;
-                    self.journal_mut().conversation.push(Message::ToolResult {
-                        provenance: result.provenance.clone(),
-                        call_id: call.id.clone(),
-                        name: call.name.clone(),
-                        content: result.content.clone(),
-                        is_error: result.is_error,
-                    });
+                    // A script's call result goes to the script, not the model.
+                    let terminal = result.terminal && parent_call_id.is_none();
+                    if parent_call_id.is_none() {
+                        self.journal_mut().conversation.push(Message::ToolResult {
+                            provenance: result.provenance.clone(),
+                            call_id: call.id.clone(),
+                            name: call.name.clone(),
+                            content: result.content.clone(),
+                            is_error: result.is_error,
+                        });
+                    }
                     self.active_mut()
                         .turns
                         .last_mut()
                         .ok_or(core::Error::InvalidSnapshot)?
                         .calls
                         .push(RecordedCall {
+                            parent_call_id: parent_call_id.clone(),
                             proxy_events: vec![],
                             denied_attempt_audit: vec![],
                             denied_attempt_proxy_events: vec![],
@@ -580,13 +661,30 @@ impl Driver {
                         recorded_turn.duration_ms.saturating_add(duration_ms);
                     self.active_mut().step = Step::Tools {
                         model_operation,
-                        next: next + 1,
+                        // A script's call leaves the model's call cursor where it is.
+                        next: if parent_call_id.is_some() {
+                            next
+                        } else {
+                            next + 1
+                        },
                         operation: None,
                         executor: None,
                         executor_activation: None,
                     };
+                    if let Some(script) = self.active_mut().scripts.last_mut() {
+                        script.child_delivered();
+                    }
                     self.save().await?;
-                    presentation::tool(output, &result, &audit);
+                    match &parent_call_id {
+                        Some(parent) => presentation::grouped(
+                            output,
+                            self.call_context(&call.id, Some(parent)),
+                            &call,
+                            &result,
+                            &audit,
+                        ),
+                        None => presentation::tool(output, &result, &audit),
+                    }
                     if let (Some(h), Some(active)) = (hooks, active_policy.as_mut()) {
                         if let Some((op, target)) = crate::call::first_denial(&audit) {
                             let mut escalation = crate::call::Escalation {

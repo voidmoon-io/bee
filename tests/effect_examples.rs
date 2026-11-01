@@ -2,10 +2,9 @@
 //!
 //! Examples in a spec directory rot silently: the API moves, the script stops parsing, and nobody
 //! notices until someone copies it. Running them here makes them executable documentation — if the
-//! Rhai surface changes shape, this fails before the docs mislead anyone.
+//! Python surface changes shape, this fails before the docs mislead anyone.
 
-use bee::render_api::{register, RenderContext, RenderOutcome};
-use rhai::Engine;
+use bee::render_api::RenderOutcome;
 
 /// Run one example against a fresh engine, returning what it drew.
 fn run_example(name: &str) -> RenderOutcome {
@@ -16,19 +15,21 @@ fn run_example(name: &str) -> RenderOutcome {
     let script = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
 
-    let ctx = RenderContext::default();
-    let mut engine = Engine::new();
-    register(&mut engine, ctx.clone());
-    engine
-        .run(&script)
-        .unwrap_or_else(|e| panic!("{name} failed to run: {e}"));
-    ctx.take()
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(bee::render_api::evaluate(
+            &script,
+            &bee::Sandbox::host(vec![]),
+        ))
+        .unwrap_or_else(|e| panic!("{name}: {e}"))
 }
 
 #[test]
 fn panel_fade_in_draws_a_panel_and_requests_no_effect() {
     // The default case: the entrance is the harness's job, so the script asks for nothing.
-    let out = run_example("panel-fade-in.rhai");
+    let out = run_example("panel-fade-in.py");
     assert_eq!(out.panel_ops.len(), 1);
     assert!(
         matches!(
@@ -42,7 +43,7 @@ fn panel_fade_in_draws_a_panel_and_requests_no_effect() {
 #[test]
 fn slide_dashboard_attaches_a_distinct_effect_to_each_panel() {
     use bee::render_spec::{EffectSpec, PanelOp};
-    let out = run_example("slide-dashboard.rhai");
+    let out = run_example("slide-dashboard.py");
     assert_eq!(out.panel_ops.len(), 3, "three panels");
 
     let effects: Vec<Option<EffectSpec>> = out
@@ -72,7 +73,7 @@ fn slide_dashboard_attaches_a_distinct_effect_to_each_panel() {
 #[test]
 fn status_pulse_flashes_a_theme_role() {
     use bee::render_spec::{EffectSpec, PanelOp};
-    let out = run_example("status-pulse.rhai");
+    let out = run_example("status-pulse.py");
     let PanelOp::Upsert { effect, .. } = &out.panel_ops[0] else {
         panic!("expected an upsert");
     };
@@ -84,7 +85,7 @@ fn status_pulse_flashes_a_theme_role() {
 
 #[test]
 fn fullscreen_chart_requests_a_takeover_with_its_own_lifetime() {
-    let out = run_example("fullscreen-chart.rhai");
+    let out = run_example("fullscreen-chart.py");
     let (_, ttl, effect) = out.overlay.expect("a takeover was requested");
     assert_eq!(ttl, Some(15_000), "the script's own lifetime, pre-clamp");
     assert!(effect.is_some(), "and its entrance");
@@ -103,16 +104,16 @@ fn every_example_in_the_directory_is_covered() {
         .expect("examples directory")
         .filter_map(|e| e.ok())
         .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| n.ends_with(".rhai"))
+        .filter(|n| n.ends_with(".py"))
         .collect();
     found.sort();
     assert_eq!(
         found,
         [
-            "fullscreen-chart.rhai",
-            "panel-fade-in.rhai",
-            "slide-dashboard.rhai",
-            "status-pulse.rhai",
+            "fullscreen-chart.py",
+            "panel-fade-in.py",
+            "slide-dashboard.py",
+            "status-pulse.py",
         ],
         "add a test above for any new example, then update this list"
     );

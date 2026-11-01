@@ -2,6 +2,7 @@
 //! One Store owns one private session directory for its entire lifetime. All methods are
 //! blocking; asynchronous callers must use a dedicated blocking owner, not hold runtime threads.
 
+mod checkpoints;
 mod files;
 pub mod journal;
 #[cfg(test)]
@@ -18,7 +19,8 @@ use sha2::{Digest, Sha256};
 use std::path::Path;
 
 const APPLICATION_ID: i64 = 0x42454553;
-const STORE_VERSION: i64 = 6;
+/// Version 6 added the conversation archive; version 7 adds checkpoint blobs (023-codemode).
+const STORE_VERSION: i64 = 7;
 const MAX_SNAPSHOT_BYTES: usize = 256 * 1024 * 1024;
 const MAX_SUBMISSIONS: i64 = 1024;
 /// Pruned admissions keep their request ID and digest so a repeat is refused, never rerun.
@@ -100,6 +102,7 @@ pub struct Store {
     session: SessionId,
     activation: ActivationId,
     suspended: bool,
+    staged_checkpoints: std::collections::BTreeSet<String>,
 }
 
 impl Store {
@@ -126,8 +129,8 @@ impl Store {
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         let app: i64 = conn.query_row("PRAGMA application_id", [], |r| r.get(0))?;
         let fresh = app == 0 && version == 0;
-        // Version 5 lacks only the conversation table; it is added when this open claims the store.
-        let migrate = app == APPLICATION_ID && version == 5;
+        // Older versions lack only tables; they are added when this open claims the store.
+        let migrate = app == APPLICATION_ID && matches!(version, 5 | 6);
         if (!fresh && !migrate && (app != APPLICATION_ID || version != STORE_VERSION))
             || (fresh
                 && conn.query_row("SELECT count(*) FROM sqlite_schema", [], |r| {
@@ -149,6 +152,7 @@ impl Store {
             if fresh {
                 tx.execute_batch(SCHEMA_V1)?;
                 tx.execute_batch(SCHEMA_V6)?;
+                tx.execute_batch(checkpoints::SCHEMA)?;
                 tx.execute(
                     "INSERT INTO session VALUES(1, ?1, 0, ?2, ?3)",
                     params![
@@ -169,11 +173,16 @@ impl Store {
                     return Err(StoreError::WrongSession);
                 }
                 // Validate before claiming this activation; unsupported/corrupt snapshots never advance.
-                read_snapshot(&tx, &session)?;
+                let snapshot = read_snapshot(&tx, &session)?;
                 if migrate {
-                    tx.execute_batch(SCHEMA_V6)?;
+                    // One transaction: a failure leaves the old tables and version untouched.
+                    if version == 5 {
+                        tx.execute_batch(SCHEMA_V6)?;
+                    }
+                    tx.execute_batch(checkpoints::SCHEMA)?;
                     tx.pragma_update(None, "user_version", STORE_VERSION)?;
                 }
+                checkpoints::reclaim(&tx, &snapshot, &Default::default())?;
                 tx.execute(
                     "UPDATE session SET owner=?1 WHERE singleton=1",
                     [activation.0.to_string()],
@@ -189,6 +198,7 @@ impl Store {
             session,
             activation,
             suspended: false,
+            staged_checkpoints: Default::default(),
         })
     }
 
@@ -320,6 +330,7 @@ impl Store {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        checkpoints::validate_references(&tx, &commit.snapshot)?;
         let (current, previous, owner): (i64, Vec<u8>, String) = tx.query_row(
             "SELECT revision, snapshot, owner FROM session WHERE singleton=1",
             [],
@@ -404,7 +415,20 @@ impl Store {
                 }
             }
         }
+        let previous_snapshot: Snapshot = serde_json::from_slice(&previous)?;
+        let mut staged = self.staged_checkpoints.clone();
+        for (id, script) in commit.snapshot.scripts() {
+            let prior = previous_snapshot
+                .scripts()
+                .get(id)
+                .map_or(0, |s| s.suspensions.len());
+            for suspension in script.suspensions.iter().skip(prior) {
+                staged.remove(&suspension.checkpoint.sha256);
+            }
+        }
+        checkpoints::reclaim(&tx, &commit.snapshot, &staged)?;
         tx.commit()?;
+        self.staged_checkpoints = staged;
         self.directory.verify()?;
         Ok(commit.id.clone())
     }
@@ -530,5 +554,6 @@ fn read_snapshot(conn: &Connection, session: &SessionId) -> Result<Snapshot, Sto
     if &snapshot.session != session || u64::try_from(revision).ok() != Some(snapshot.revision) {
         return Err(StoreError::Corrupt);
     }
+    checkpoints::validate_references(conn, &snapshot)?;
     Ok(snapshot)
 }

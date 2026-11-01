@@ -453,6 +453,10 @@ fn crash_child() {
     let path = std::env::var_os("BEE_STORE_CRASH_PATH").expect("fixture path");
     let path = Path::new(&path);
     let mode = std::env::var("BEE_STORE_CRASH_MODE").unwrap();
+    if mode.starts_with("gc-") {
+        composition::crash_reclamation(path, &mode);
+        return;
+    }
     // SAFETY: isolated test subprocess; proves permissions do not depend on a restrictive umask.
     unsafe {
         libc::umask(0);
@@ -832,7 +836,7 @@ fn a_version_5_store_gains_the_conversation_table_on_open() {
     store.admit("kept", &json!("saved")).unwrap();
     drop(store);
     let db = Connection::open(dir.path().join("session.sqlite3")).unwrap();
-    db.execute_batch("DROP TABLE conversation; PRAGMA user_version=5;")
+    db.execute_batch("DROP TABLE conversation; DROP TABLE checkpoints; PRAGMA user_version=5;")
         .unwrap();
     drop(db);
     let mut store = Store::open(dir.path(), session()).unwrap();
@@ -845,3 +849,57 @@ fn a_version_5_store_gains_the_conversation_table_on_open() {
         .unwrap();
     assert_eq!(version, STORE_VERSION);
 }
+
+#[test]
+fn immediate_reopen_while_fork_child_holds_inherited_descriptors() {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session");
+    let session = SessionId("fork-lock".into());
+    let store = Store::open(&path, session.clone()).unwrap();
+    let mut pipe = [0; 2];
+    // SAFETY: writable two-descriptor buffer.
+    assert_eq!(
+        unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) },
+        0
+    );
+    // SAFETY: both descriptors were freshly allocated by pipe2.
+    let (reader, writer) = unsafe {
+        (
+            std::fs::File::from_raw_fd(pipe[0]),
+            std::fs::File::from_raw_fd(pipe[1]),
+        )
+    };
+    // SAFETY: the child executes only async-signal-safe syscalls and never
+    // returns to Rust, touches SQLite, or runs inherited destructors.
+    let pid = unsafe { libc::fork() };
+    assert!(pid >= 0);
+    if pid == 0 {
+        unsafe {
+            libc::close(writer.as_raw_fd());
+            let mut byte = 0u8;
+            libc::read(reader.as_raw_fd(), (&mut byte as *mut u8).cast(), 1);
+            libc::_exit(0);
+        }
+    }
+    drop(reader);
+    assert!(matches!(
+        Store::open(&path, session.clone()),
+        Err(StoreError::Locked)
+    ));
+    drop(store);
+    let reopened = Store::open(&path, session.clone());
+    // Release and reap even when the regression assertion below fails.
+    drop(writer);
+    let mut status = 0;
+    // SAFETY: pid is our child and status is writable.
+    assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+    let reopened = reopened.expect("a pre-exec child must not retain the closed writer's lock");
+    assert!(matches!(
+        Store::open(&path, session),
+        Err(StoreError::Locked)
+    ));
+    drop(reopened);
+}
+
+mod composition;

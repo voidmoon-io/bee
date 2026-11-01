@@ -2,7 +2,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-pub const SCHEMA_VERSION: u32 = 6;
+/// Version 7 adds persisted script compositions (023-codemode).
+pub const SCHEMA_VERSION: u32 = 7;
+/// Snapshots written before composition load unchanged with no scripts.
+pub const PRECOMPOSITION_SCHEMA_VERSION: u32 = 6;
 /// Snapshots written before pruning load unchanged: no entry or operation was ever removed.
 pub const PRUNELESS_SCHEMA_VERSION: u32 = 5;
 pub const MAX_OPERATIONS: usize = 1024;
@@ -160,6 +163,8 @@ pub struct Snapshot {
     /// Every operation ID below this was either pruned or is still listed; none is reusable.
     pub(super) horizon: OperationId,
     pub(super) driver: Option<Value>,
+    #[serde(default)]
+    pub(super) scripts: BTreeMap<String, super::composition::Script>,
 }
 
 /// A snapshot as stored: a completed operation's result is written only in its entry, not twice.
@@ -178,6 +183,8 @@ struct StoredSnapshot {
     #[serde(default)]
     horizon: Option<OperationId>,
     driver: Option<Value>,
+    #[serde(default)]
+    scripts: BTreeMap<String, super::composition::Script>,
 }
 
 impl TryFrom<StoredSnapshot> for Snapshot {
@@ -198,9 +205,14 @@ impl TryFrom<StoredSnapshot> for Snapshot {
         // A version-5 snapshot never pruned, so its counters follow from what it lists.
         let (sequence, horizon) = match (stored.schema_version, stored.sequence, stored.horizon) {
             (PRUNELESS_SCHEMA_VERSION, None, None) => (stored.entries.len() as u64, OperationId(0)),
-            (SCHEMA_VERSION, Some(sequence), Some(horizon)) => (sequence, horizon),
+            (PRECOMPOSITION_SCHEMA_VERSION | SCHEMA_VERSION, Some(sequence), Some(horizon)) => {
+                (sequence, horizon)
+            }
             _ => return Err("unsupported snapshot version"),
         };
+        if stored.schema_version != SCHEMA_VERSION && !stored.scripts.is_empty() {
+            return Err("scripts in a pre-composition snapshot");
+        }
         Ok(Self {
             schema_version: SCHEMA_VERSION,
             session: stored.session,
@@ -212,6 +224,7 @@ impl TryFrom<StoredSnapshot> for Snapshot {
             sequence,
             horizon,
             driver: stored.driver,
+            scripts: stored.scripts,
         })
     }
 }
@@ -229,6 +242,7 @@ impl Snapshot {
             sequence: 0,
             horizon: OperationId(0),
             driver: None,
+            scripts: BTreeMap::new(),
         }
     }
 
@@ -285,6 +299,11 @@ pub enum RecoveryOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
+    Script {
+        activation: ActivationId,
+        now_ms: u64,
+        event: super::composition::ScriptEvent,
+    },
     /// Trusted checkpoint executor resumes only never-started subwork, not an uncertain effect.
     ResumeReconciliation {
         token: RecoveryToken,

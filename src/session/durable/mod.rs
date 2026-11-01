@@ -10,6 +10,7 @@
 //! Results are bounded opaque JSON. `Inspect`/`Stop` acknowledgements
 //! are trusted executor assertions, not evidence inferred from process IDs or timeouts.
 
+pub mod composition;
 mod types;
 pub use types::*;
 #[cfg(feature = "durable-store")]
@@ -174,6 +175,17 @@ pub fn on_event(state: &mut State, event: Event) -> Result<Vec<Effect>, Error> {
     let mut next = state.committed.clone();
     let mut release = Vec::new();
     match event {
+        Event::Script {
+            activation,
+            now_ms,
+            event,
+        } => {
+            if activation != state.activation {
+                return Err(Error::Stale);
+            }
+            next.observed_ms = next.observed_ms.max(now_ms);
+            release.extend(composition::apply(state, &mut next, event)?);
+        }
         Event::ResumeReconciliation { token, now_ms } => {
             state.check_token(&token)?;
             let operation = next
@@ -420,6 +432,7 @@ pub fn on_event(state: &mut State, event: Event) -> Result<Vec<Effect>, Error> {
             next.operations.retain(|id, _| !forget.contains(id));
             next.entries
                 .retain(|entry| !forget.contains(&entry.attempt.operation));
+            composition::forget_pruned(&mut next);
             let last = *forget.last().expect("nonempty prune");
             next.horizon = next
                 .horizon
@@ -646,6 +659,7 @@ pub(crate) fn validate_completion(result: &Completion) -> Result<(), Error> {
 }
 
 fn validate_snapshot(snapshot: &Snapshot) -> Result<(), Error> {
+    composition::validate(snapshot).map_err(|_| Error::InvalidSnapshot)?;
     if let Some(driver) = &snapshot.driver {
         validate_driver(driver).map_err(|_| Error::InvalidSnapshot)?;
     }

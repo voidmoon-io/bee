@@ -560,6 +560,7 @@ mod tests {
                 ts: "2026-07-25T00:00:00Z".into(),
                 scope_id: None,
                 cgroup_id: 0,
+                executor_cgroup_id: None,
                 pid: None,
                 tgid: None,
                 op: "open".into(),

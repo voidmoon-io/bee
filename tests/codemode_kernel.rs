@@ -148,7 +148,7 @@ fn source(root: &Path, mode: &str) -> String {
         },
         "cpu"=>"while True: pass".into(),
         "blocked"=>format!("call_tool('read_file', {{'path': {}}})\ncall_tool('read_file', {{'path': {allowed}}})",json!(root.join("fifo").to_str().unwrap())),
-        "batch"=>format!("r = call_tools([{{'name': 'read_file', 'arguments': {{'path': {allowed}}}}}, {{'name': 'read_file', 'arguments': {{'path': {allowed}}}}}])\n[x['content'] for x in r]"),
+        "batch"=>format!("r = call_tools([{{'name': 'read_file', 'arguments': {{'path': {allowed}}}}}, {{'name': 'read_file', 'arguments': {{'path': {}}}}}])\n[x['content'] for x in r]", json!(root.join("fifo"))),
         "two"=>format!("a = call_tool('read_file', {{'path': {allowed}}})\nb = call_tool('read_file', {{'path': {allowed}}})\n[a['content'], b['content']]"),
         _=>panic!("unknown fixture"),
     }
@@ -417,7 +417,9 @@ impl Observer for Pause {
     fn committed(&self, commit: &Commit) {
         if commit.snapshot.operations().values().any(|o| {
             matches!(o.spec.name.as_str(), "read_file" | "write_file")
-                && matches!(o.phase, Phase::Completed { .. })
+                && (matches!(o.phase, Phase::Completed { .. })
+                    || (std::env::var("BEE_CODEMODE_MODE").as_deref() == Ok("batch")
+                        && matches!(o.phase, Phase::Publishing { .. })))
         }) {
             std::fs::write(self.0.join("ready"), "committed").unwrap();
             loop {
@@ -974,13 +976,14 @@ async fn kernel_codemode_nested_cancel() {
         report.status,
         bee::EpisodeStatus::Terminated { .. }
     ));
-    // Enforced batches run one leaf at a time: only the blocked read was attempted.
-    assert_eq!(report.budget.charged(WorkKind::Tool), 3);
+    // Both leaves are admitted before dispatch; the next parent call never runs.
+    assert_eq!(report.budget.charged(WorkKind::Tool), 4);
     assert!(!root.path().join("second").exists());
     assert_eq!(
         ids(&report),
         owned(&[
             ("outer/1/1", Some("outer/1")),
+            ("outer/1/2", Some("outer/1")),
             ("outer/1", Some("outer")),
             ("outer", None),
         ])
@@ -1007,18 +1010,100 @@ async fn kernel_codemode_batch_kill_recovery() {
     wait_for(|| root.path().join("ready").exists()).await;
     child.0.kill().unwrap();
     child.0.wait().unwrap();
-    empty(&old);
+    assert!(
+        named_process(&old, "cat").is_some(),
+        "running sibling must survive until recovery"
+    );
     std::fs::write(root.path().join("allowed"), "AFTER").unwrap();
     let mut sb = sandbox(root.path(), true, true);
     let session = session(root.path(), None).await;
-    let (report, _) = session
+    let mut registry = registry(&session);
+    let result = session
         .run(
             "request",
             None,
             "system",
             limits(),
             &model(&source(root.path(), "batch")),
-            &mut registry(&session),
+            &mut registry,
+            &mut sb,
+            &Output,
+            None,
+        )
+        .await;
+    assert!(
+        matches!(result, Err(DriverError::Unresolved(_))),
+        "{result:?}"
+    );
+    let report = session
+        .partial_report("request", &registry)
+        .await
+        .unwrap()
+        .unwrap();
+    let calls = &report.turns[0].calls;
+    assert_eq!(calls.len(), 1);
+    assert!(calls[0].result.content.ends_with("BEFORE"));
+    assert_eq!(report.budget.charged(WorkKind::Tool), 3);
+    // Every old executor was reconciled, including the committed sibling's slot.
+    removed_invocations(&old);
+    removed_invocations(&scope(&sb));
+    sb.teardown().unwrap();
+    remove_empty(&old);
+}
+
+struct BarrierRead {
+    barrier: tokio::sync::Barrier,
+    order: Arc<std::sync::Mutex<Vec<u64>>>,
+}
+#[async_trait::async_trait]
+impl Tool for BarrierRead {
+    fn name(&self) -> &'static str {
+        "read_file"
+    }
+    fn schema(&self) -> bee::provider::ToolSchema {
+        bee::tools::files::ReadFile.schema()
+    }
+    async fn call(&self, args: serde_json::Value, sandbox: &Sandbox) -> bee::ToolResult {
+        if tokio::time::timeout(Duration::from_secs(3), self.barrier.wait())
+            .await
+            .is_err()
+        {
+            return bee::ToolResult::error("batch did not overlap");
+        }
+        let n = args["n"].as_u64().unwrap();
+        if n == 1 {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+        let result = bee::tools::files::ReadFile.call(args, sandbox).await;
+        self.order.lock().unwrap().push(n);
+        result
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires root and BPF-LSM kernel"]
+async fn kernel_codemode_overlap_barrier() {
+    let root = tempfile::tempdir().unwrap();
+    prepare(root.path());
+    let mut sb = sandbox(root.path(), true, true);
+    let session = session(root.path(), None).await;
+    let mut registry = registry(&session);
+    let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+    registry.insert(Box::new(BarrierRead {
+        barrier: tokio::sync::Barrier::new(2),
+        order: order.clone(),
+    }));
+    let code = format!(
+        "call_tools([{{'name': 'read_file', 'arguments': {{'path': {}, 'n': 1}}}}, {{'name': 'read_file', 'arguments': {{'path': {}, 'n': 2}}}}])",
+        json!(root.path().join("allowed")), json!(root.path().join("denied/secret")));
+    let (report, _) = session
+        .run(
+            "request",
+            Some("go"),
+            "system",
+            limits(),
+            &model(&code),
+            &mut registry,
             &mut sb,
             &Output,
             None,
@@ -1027,12 +1112,92 @@ async fn kernel_codemode_batch_kill_recovery() {
         .unwrap();
     let calls = &report.turns[0].calls;
     assert_eq!(calls.len(), 3);
-    // The committed sibling is not repeated; only the unstarted one runs after reopen.
     assert!(calls[0].result.content.ends_with("BEFORE"));
-    assert!(calls[1].result.content.ends_with("AFTER"));
-    assert_eq!(report.budget.charged(WorkKind::Tool), 3);
-    assert_eq!(report.budget.unresolved(), 0);
+    assert!(calls[1].result.is_error);
+    assert!(calls[0].audit.is_empty());
+    assert!(denied(&calls[1].audit, "file_open"));
+    assert!(calls[1]
+        .audit
+        .iter()
+        .all(|e| e.executor_cgroup_id.is_some_and(|id| id != e.cgroup_id)));
+    assert!(calls[2].audit.is_empty());
+    assert_eq!(*order.lock().unwrap(), [2, 1]);
+    assert_eq!(calls[0].call.id, "outer/1");
+    assert_eq!(calls[1].call.id, "outer/2");
     removed_invocations(&scope(&sb));
     sb.teardown().unwrap();
-    remove_empty(&old);
+}
+
+#[tokio::test]
+#[ignore = "requires root and BPF-LSM kernel"]
+async fn kernel_codemode_overlap_cancel() {
+    overlap_stop(false).await;
+}
+
+#[tokio::test]
+#[ignore = "requires root and BPF-LSM kernel"]
+async fn kernel_codemode_overlap_deadline() {
+    overlap_stop(true).await;
+}
+
+async fn overlap_stop(deadline: bool) {
+    let root = tempfile::tempdir().unwrap();
+    prepare(root.path());
+    let mut sb = sandbox(root.path(), true, true);
+    let path = scope(&sb);
+    let sibling = sandbox(root.path(), true, true);
+    let mut command =
+        tokio::process::Command::from(sibling.tool_command("sleep", &["30".into()]).unwrap());
+    command.kill_on_drop(true);
+    let mut sibling_child = command.spawn().unwrap();
+    let session = session(root.path(), None).await;
+    let mut registry = registry(&session);
+    let calls = vec![json!({"name":"read_file", "arguments":{"path":root.path().join("fifo")}}); 4];
+    let model = model(&format!("call_tools({})", json!(calls)));
+    let mut limits = limits();
+    if deadline {
+        limits.tool_timeout_ms = 2_000;
+    }
+    let future = session.run(
+        "request",
+        Some("go"),
+        "system",
+        limits,
+        &model,
+        &mut registry,
+        &mut sb,
+        &Output,
+        None,
+    );
+    tokio::pin!(future);
+    let mut cancelled = false;
+    let started = Instant::now();
+    let (report, _) = loop {
+        tokio::select! {
+            result = &mut future => break result.unwrap(),
+            _ = tokio::time::sleep(Duration::from_millis(5)) => {
+                assert!(started.elapsed() < Duration::from_secs(10), "four slots never ran together");
+                if !cancelled && processes(&path).len() == 4 {
+                    assert_eq!(std::fs::read_dir(&path).unwrap().flatten()
+                        .filter(|e| e.file_type().unwrap().is_dir()).count(), 4);
+                    if !deadline { session.cancel().unwrap(); }
+                    cancelled = true;
+                }
+            }
+        }
+    };
+    assert!(cancelled);
+    if deadline {
+        assert_eq!(report.status, bee::EpisodeStatus::Timeout);
+    } else {
+        assert!(matches!(
+            report.status,
+            bee::EpisodeStatus::Terminated { .. }
+        ));
+    }
+    assert_eq!(report.budget.charged(WorkKind::Tool), 5);
+    removed_invocations(&path);
+    assert!(sibling_child.try_wait().unwrap().is_none());
+    sibling.teardown().unwrap();
+    sibling_child.wait().await.unwrap();
 }

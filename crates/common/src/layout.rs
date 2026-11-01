@@ -113,6 +113,8 @@ pub struct AuditRecord {
     /// Kernel monotonic time (`bpf_ktime_get_ns`).
     pub ts_ns: u64,
     pub cgroup_id: u64,
+    /// Immediate child of the policy scope, or the scope itself for direct children.
+    pub executor_cgroup_id: u64,
     pub pid: u32,
     pub tgid: u32,
     /// `Op` as `u8`.

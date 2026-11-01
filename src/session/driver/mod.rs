@@ -130,8 +130,8 @@ impl Session {
             .cloned()
             .map(serde_json::from_value)
             .transpose()?;
-        // Version 2 predates codemode: it carries no script stack, which deserializes empty.
-        if let Some(journal) = journal.as_mut().filter(|j| j.version == 2) {
+        // v2 has no script stack; v2/v3 have no batch executors. Both default empty.
+        if let Some(journal) = journal.as_mut().filter(|j| matches!(j.version, 2 | 3)) {
             journal.version = types::JOURNAL_VERSION;
         }
         match &mut journal {
@@ -639,6 +639,7 @@ impl Driver {
                 budget: Budget::default(),
                 wake: None,
                 scripts: vec![],
+                batch_executors: Default::default(),
             });
             self.save().await?;
         }
@@ -1011,6 +1012,7 @@ impl Driver {
         Ok(report)
     }
     async fn cleanup_cancelled(&mut self, sandbox: &Sandbox) -> Result<(), DriverError> {
+        self.reconcile_batch_executors().await?;
         self.cleanup_script_siblings(sandbox).await?;
         let Some(id) = self.active().step.operation() else {
             return Ok(());

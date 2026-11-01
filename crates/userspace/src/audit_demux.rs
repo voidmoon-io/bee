@@ -182,6 +182,7 @@ mod tests {
             ts: "1970-01-01T00:00:00Z".into(),
             scope_id: None,
             cgroup_id,
+            executor_cgroup_id: None,
             pid: None,
             tgid: None,
             op: "file_open".into(),

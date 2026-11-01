@@ -19,7 +19,12 @@
     "cgroup_id": {
       "type": "integer",
       "minimum": 0,
-      "description": "cgroup v2 inode id of the scope (map key; from bpf_get_current_cgroup_id)."
+      "description": "cgroup v2 inode id of the governing policy scope (map key)."
+    },
+    "executor_cgroup_id": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Immediate child cgroup of the policy scope at event time, or the scope itself. Identifies a durable batch executor across its subprocess cgroups."
     },
     "pid": { "type": "integer", "minimum": 0 },
     "tgid": { "type": "integer", "minimum": 0 },

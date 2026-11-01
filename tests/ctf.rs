@@ -173,6 +173,7 @@ fn score_report_counts_techniques() {
             ts: "1970-01-01T00:00:00Z".into(),
             scope_id: None,
             cgroup_id: 1,
+            executor_cgroup_id: None,
             pid: None,
             tgid: None,
             op: "file_open".into(),

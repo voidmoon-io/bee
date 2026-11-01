@@ -4,9 +4,8 @@
 //! order; only tool execution overlaps, at most `MAX_BATCH` at once. Delivery to the script
 //! remains the ordinary sequential path, which finds these operations already completed.
 //!
-//! Overlap requires that no leaf owns per-call durable state the driver tracks in a single
-//! slot: no kernel executor scope (its identity and audit stream are per-scope), no worker
-//! journal, and no nested script. Otherwise the batch executes one leaf at a time.
+//! Each kernel leaf owns a persisted executor slot. The parent alone drains and partitions
+//! audit. Journal-aware tools and nested scripts remain sequential.
 use super::core::composition::MAX_BATCH;
 use super::*;
 use crate::provider::ToolCall;
@@ -21,13 +20,14 @@ impl Driver {
         hooks: Option<&crate::grants::escalate::LoopEscalation>,
         active_policy: &mut Option<crate::grants::ActivePolicy>,
     ) -> Result<(), DriverError> {
-        let ready = self.overlap_candidates(registry, sandbox)?;
+        let ready = self.overlap_candidates(registry)?;
         if ready.len() < 2 {
             return Ok(());
         }
         // Serialized consent and authorization. Each authorization is committed before any
         // dispatch, so a crash leaves every admitted leaf under its own recovery policy.
         let mut admitted = Vec::with_capacity(ready.len());
+        let mut slots = Vec::with_capacity(ready.len());
         for (id, call) in ready {
             let mut refusal = None;
             if let (Some(h), Some(active)) = (hooks, active_policy.as_mut()) {
@@ -69,6 +69,12 @@ impl Driver {
                 self.apply(Event::Completed { attempt, result }).await?;
                 continue;
             }
+            let slot = sandbox.batch_slot()?;
+            if let Some(executor) = executor::Executor::capture(&slot)? {
+                self.active_mut().batch_executors.insert(id, executor);
+                self.save().await?;
+            }
+            slots.push(slot);
             admitted.push((attempt, spec.deadline_ms));
         }
         if admitted.is_empty() {
@@ -80,35 +86,60 @@ impl Driver {
             .min()
             .unwrap_or(0);
         let now = self.time();
-        let shared: &Sandbox = sandbox;
-        let futures = admitted.iter().map(|(attempt, _)| {
+        use futures_util::StreamExt;
+        let futures = admitted.iter().zip(&slots).map(|((attempt, _), slot)| {
             let started = std::time::Instant::now();
             let future =
-                registry.execute_durable(&self.state, attempt, &self.compatibility, now, shared);
+                registry.execute_durable(&self.state, attempt, &self.compatibility, now, slot);
             async move { (future.await, elapsed_ms(started)) }
         });
-        let results = self
-            .wait(futures_util::future::join_all(futures), limit, output)
-            .await?;
-        sandbox.settle().await;
-        // No kernel scope means no audit stream; drain only to keep the buffer bounded.
-        let _ = sandbox.drain_audit(None);
-        // Commit every completed sibling before reporting any adapter failure.
+        // Poll every leaf concurrently, but publish completions in input order. A completed
+        // prefix is durable even if a later sibling is interrupted.
+        let mut futures: futures_util::stream::FuturesOrdered<_> = futures.collect();
+        let mut audits: std::collections::BTreeMap<u64, Vec<bee_core::AuditEvent>> =
+            Default::default();
         let mut failure = None;
-        for ((attempt, _), (result, duration_ms)) in admitted.into_iter().zip(results) {
+        for (attempt, _) in &admitted {
+            let (result, duration_ms) = self
+                .wait(futures.next(), limit, output)
+                .await?
+                .ok_or(core::Error::InvalidSnapshot)?;
+            if let Some(executor) = self.active().batch_executors.get(&attempt.operation) {
+                if !executor.stop().await.unwrap_or(false) {
+                    return Err(DriverError::Unresolved(attempt.operation.0));
+                }
+            }
+            sandbox.settle().await;
+            for event in sandbox.drain_audit(None) {
+                audits
+                    .entry(event.executor_cgroup_id.unwrap_or(0))
+                    .or_default()
+                    .push(event);
+            }
             match result {
                 Ok(mut result) => {
+                    if let Some(executor) = self.active().batch_executors.get(&attempt.operation) {
+                        result
+                            .audit
+                            .extend(audits.remove(&executor.cgroup_id()).unwrap_or_default());
+                    }
                     result.duration_ms = duration_ms;
                     self.active_mut()
                         .budget
-                        .settle(&attempt, None, result.duration_ms)?;
-                    self.apply(Event::Completed { attempt, result }).await?;
+                        .settle(attempt, None, duration_ms)?;
+                    self.apply(Event::Completed {
+                        attempt: attempt.clone(),
+                        result,
+                    })
+                    .await?;
                 }
                 Err(error) => {
                     failure.get_or_insert(error);
                 }
             }
         }
+        drop(futures);
+        self.reconcile_batch_executors().await?;
         match failure {
             Some(error) => Err(error.into()),
             None => Ok(()),
@@ -123,7 +154,6 @@ impl Driver {
     fn overlap_candidates(
         &self,
         registry: &ToolRegistry,
-        sandbox: &Sandbox,
     ) -> Result<Vec<(OperationId, ToolCall)>, DriverError> {
         let Some(cursor) = self.active().scripts.last() else {
             return Ok(vec![]);
@@ -137,10 +167,7 @@ impl Driver {
             return Ok(vec![]);
         };
         let start = cursor.delivered();
-        if !last.batch
-            || last.children.len() != cursor.pending.len()
-            || executor::Executor::capture(sandbox)?.is_some()
-        {
+        if !last.batch || last.children.len() != cursor.pending.len() {
             return Ok(vec![]);
         }
         let mut ready = Vec::with_capacity(MAX_BATCH);

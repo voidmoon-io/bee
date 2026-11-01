@@ -34,6 +34,7 @@ pub fn ev(op: &str, target: &str, decision: &str, scope_id: Option<&str>) -> Aud
         ts: "1970-01-01T00:00:00Z".into(),
         scope_id: scope_id.map(str::to_string),
         cgroup_id: 0,
+        executor_cgroup_id: None,
         pid: None,
         tgid: None,
         op: op.into(),

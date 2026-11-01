@@ -853,7 +853,7 @@ mod tests {
         use crate::repl::presentation::{CallContext, CallEvent, CallOutcome};
         let mut app = App::new(120, 40);
         let event = |turn, replay| CallEvent {
-            context: CallContext::new("request", turn, "child", Some("outer"), replay),
+            context: CallContext::new("request", turn, "child", Some("outer"), replay, 1),
             call: crate::provider::ToolCall {
                 id: "child".into(),
                 name: "write_file".into(),
@@ -878,6 +878,52 @@ mod tests {
         let rows: Vec<_> = app.chat.iter().filter(|r| r.invocation.is_some()).collect();
         assert_eq!(rows[1].parent, rows[0].invocation);
         assert_eq!(rows[3].parent, rows[2].invocation);
+    }
+
+    #[test]
+    fn grouped_rows_indent_three_levels_identically_on_replay() {
+        use crate::repl::presentation::{CallContext, CallEvent, CallOutcome};
+        let mut app = App::new(120, 40);
+        // IDs deliberately carry no path or depth information.
+        let ids = ["root", "alpha", "beta", "leaf"];
+        for replay in [false, true] {
+            for (depth, id) in ids.iter().enumerate() {
+                let event = CallEvent {
+                    context: CallContext::new(
+                        "request",
+                        0,
+                        id,
+                        depth.checked_sub(1).map(|i| ids[i]),
+                        replay,
+                        depth,
+                    ),
+                    call: crate::provider::ToolCall {
+                        id: (*id).into(),
+                        name: "codemode".into(),
+                        arguments: serde_json::json!({"source": "1\n2"}),
+                    },
+                    outcome: CallOutcome::Unresolved {
+                        detail: "pending".into(),
+                    },
+                };
+                let terminal = event.text();
+                handle_session(&mut app, SessionEvent::ToolPresentation(event));
+                let row = app
+                    .chat
+                    .iter()
+                    .find(|r| r.invocation.as_ref().is_some_and(|i| i.call == *id))
+                    .unwrap();
+                let crate::tui::chat::Body::Text(text) = &row.body else {
+                    panic!("text row")
+                };
+                assert_eq!(text, &terminal);
+                assert_eq!(text.len() - text.trim_start().len(), depth * 4);
+            }
+            assert_eq!(
+                app.chat.iter().filter(|r| r.invocation.is_some()).count(),
+                4
+            );
+        }
     }
 
     fn app() -> App {
@@ -984,6 +1030,7 @@ mod tests {
             ts: "2026-10-31T00:00:00Z".into(),
             scope_id: None,
             cgroup_id: 0,
+            executor_cgroup_id: None,
             pid: None,
             tgid: None,
             op: "file_open".into(),

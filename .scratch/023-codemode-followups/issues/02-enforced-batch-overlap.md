@@ -1,6 +1,6 @@
 # Overlap batch calls under kernel enforcement
 
-Status: ready-for-agent
+Status: done
 
 Depends on: 01. Plan step 5 in `specs/023-codemode/parallel-nesting-plan.md`.
 
@@ -44,3 +44,25 @@ Depends on: 01. Plan step 5 in `specs/023-codemode/parallel-nesting-plan.md`.
 - `test/vm/codemode-cases.txt` and `test_results.py`'s case count updated; the full
   17+N gate passes. VM returned to Stopped.
 - Update `implementation.md` and the plan's "Current evidence".
+
+## Resolution
+
+Implemented up to four per-leaf executor cgroups for Enforced/Concurrent batches.
+Journal v4 persists a bounded `OperationId → Executor` map before dispatch; v2/v3
+upgrade with an empty map. The existing sequential executor remains for direct and
+journal-aware calls. Journal-aware tools and nested scripts stay sequential.
+
+Kernel audit records retain their policy scope and add an executor cgroup identity.
+The parent alone drains and partitions audit. Results commit in input order while
+later leaves run. Activation, cancellation and deadlines stop every recorded slot
+using boot/device/inode identity, then remove empty slots after the cleanup commit.
+
+Verification: 932 host tests; 62 bee-core tests; three audit-demux tests; Clippy with
+`durable-sessions,enforce,concurrent` and `-D warnings`; headless check; formatting.
+The full BPF-LSM gate passes 20/20, including reversed-order barrier execution,
+per-call denial attribution, four-slot cancellation/deadline cleanup with a surviving
+sibling session, and SIGKILL recovery preserving a committed result while leaving
+its running sibling unresolved. See `specs/023-codemode/enforcement-verification.md`.
+Implemented on the PR branch.
+
+The VM was returned to its original `Stopped` state and verified with kubectl.

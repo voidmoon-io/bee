@@ -37,4 +37,4 @@ class CodemodeManifestTest(unittest.TestCase):
         cases = re.findall(r"async fn (kernel_codemode_\w+)\(", source)
         self.assertEqual(len(manifest), len(set(manifest)))
         self.assertEqual(set(manifest), set(cases))
-        self.assertEqual(len(cases), 17)
+        self.assertEqual(len(cases), 20)

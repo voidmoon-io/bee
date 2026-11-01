@@ -1,5 +1,7 @@
 # Feature Specification: bee Visual Rendering & Design Language
 
+> Runtime update: Rhai has been replaced by Monty Python. The original syntax below is historical; use [the Python API](../../docs/python-visuals.md) and the `.py` examples in this directory.
+
 **Feature Branch**: `003-visual-render`
 
 **Created**: 2026-07-20

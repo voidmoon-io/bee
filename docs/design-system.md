@@ -41,9 +41,9 @@ These are non-negotiable and already hold across the codebase — keep them hold
 
 | Element | What | Where |
 |---|---|---|
-| **Honey yellow** | `#E5A100` — the one brand color; info, banners, the bee | `palette::HONEY` / `Role::Info` |
+| **Honey yellow** | `#E5A100` — the chrome's brand color; info and banners | `palette::HONEY` / `Role::Info` |
 | **`⬡` hexagon** | the inline identity glyph (honeycomb cell) | `glyph::HEX` |
-| **The bee** | the 16×16 mascot + wing-flap, on the startup banner | `viz::bee` |
+| **The bee** | the 24×24 mascot, greeting, and session expressions | `viz::bee` |
 
 The name is the whole metaphor: a **bee** in a **honeycomb**, working the cells. Yellow-and-black is
 the identity — which is exactly why the mascot must *read* as a bee (see below).
@@ -52,59 +52,64 @@ the identity — which is exactly why the mascot must *read* as a bee (see below
 
 ## Mascot & sprite system
 
-The mascot is a **16×16 pixel sprite** rendered with vertical half-blocks — two stacked pixels per
-terminal cell (`▀▄█`), so 16 rows of pixels become **8 rows of text**, 16 columns wide. Truecolor
+The mascot is a **24×24 pixel sprite** rendered with vertical half-blocks — two stacked pixels per
+terminal cell (`▀▄█`), so 24 rows of pixels become **12 rows of text**, 24 columns wide. Truecolor
 when available, quantized to 256/16 colors otherwise, block silhouette under `NO_COLOR`. Pipeline:
 `viz::bee` (bitmap) → `viz::sprite_render::render_frame_with` → ANSI. No image protocol, no new crate.
 
 ### Authoring a sprite
 
-A sprite is 16 rows of 16 characters. Each character is a **palette letter**:
+The resting bitmap in `src/viz/bee/art.rs` has 24 rows of exactly 24 characters. The terminal and
+WASM visual fixtures share this artwork and palette. These are artwork colors, separate from the
+semantic roles used by chrome. Each character is a **palette letter**:
 
 | Letter | Color | Role in the bee |
 |---|---|---|
-| `K` | `#1A1A1A` near-black | outline, head, **stripes** |
-| `Y` | `#E5A100` honey | body / abdomen fill |
-| `W` | `#FFFFFF` white | wings, eyes |
-| `B` | `#4A90D9` blue | wing tint (optional) |
-| `R` | `#D75F5F` sting-red | stinger |
+| `K` | `#423029` dark brown | outline, eyes, stripes |
+| `H` | `#FFD766` light honey | face |
+| `Y` | `#EFAD32` honey gold | body and shading |
+| `W` | `#EFFAF7` off-white | wings, eyes |
+| `B` | `#91C8CC` pale blue | wing edges |
+| `R` | `#E58450` warm orange | cheeks |
 | `.` | transparent | background (emits no escape) |
 
-Rows shorter than 16 are padded with transparent; anything not in the palette is transparent.
+Unknown palette letters are transparent. Tests check the bitmap dimensions; rows are not padded.
 
 ### What makes it read as a bee
 
-The mascot is a **side-view flying bee**, facing right and tilted up as if in flight. It replaced the
-original "yellow blob" by turning on the silhouette cues that a bee is recognized by — its outline and
-its stripes read long before its color. Left → right the anatomy is legible:
-
-1. **A stinger** (`R`) at the tail, then
-2. **A striped abdomen** — alternating `Y` and `K` **vertical** bands (side view, so the stripes run
-   across the body). *This is the defining feature;* a solid yellow body reads as a duck. If you draw
-   one thing, draw the stripes.
-3. **Wings over the thorax** (`W`, upper-center) — attached to the middle of the back, not stacked on
-   the head. This is the "it's flying" cue.
-4. **A head with an eye and an antenna** (`K` head, `W` eye glint, `K` antenna) at the front — the
-   "this is a bug, not a bird" cue. Three little legs (`K`) dangle below.
+The mascot faces the operator with crooked antennae, a sidelong glance, and a small grin.
+Paired wings flank the face; dark horizontal stripes cross the abdomen, with short legs below.
+Expressions change the eyes, mouth, antenna, or head tilt while keeping the same canvas, so the
+chat layout stays stable between poses.
 
 Verify the silhouette in monochrome first — if the black-and-white block outline doesn't say "bee,"
 color won't save it.
 
 ### Animation
 
-Three frames — `FRAME_UP` / `FRAME_MID` / `FRAME_DOWN` — that differ **only in the wing region**
-(rows 3–6, columns 4–10); the body, head, antenna, and legs are byte-identical across all three, so
-the bee holds still while its wings flap. The animator bounces `up → mid → down → mid` at 150 ms/frame
-for one cycle beside the banner, then reclaims its rows. `sprite()` (the static/Rhai surface) returns
-the level-wing `FRAME_MID` resting pose. Deterministic: built once via `OnceLock`, no clock or RNG.
+`sprite()` returns the resting pose. `animation()` exposes a six-frame greeting at 120 ms/frame:
+flutter, wink, and settle, for one cycle without bouncing. Both are deterministic and cached with
+`OnceLock`; callers supply elapsed time for playback.
+
+The full-screen REPL repeats the greeting every 4.8 seconds while the mascot is idle and visible.
+Its clock pauses offscreen, under help/panel/takeover overlays, and below the terminal's minimum
+size. Held poses sleep until the next visible change, including across loop boundaries. The inline
+REPL uses a static banner to avoid interfering with readline.
+
+Typed exchange and tool events select thinking, working, finished, waiting, or concerned expressions.
+Completion nods once and settles into an attentive pose; concern also settles without ongoing ticks.
+Errors and kernel denials suppress the completion celebration. Motion-off sessions show a static
+expression, and the header retains a text activity label even when the mascot scrolls out of view.
+See the [sprite contract](../specs/003-visual-render/contracts/sprite-api.md) for the state semantics.
 
 ### Preview
 
 ```sh
-cargo run -p bee-harness --example bee_preview      # static sprite, real pipeline
-./target/debug/bee repl --provider <cfg>           # full banner + wing-flap
-BEE_MASCOT=0 ./target/debug/bee repl ...           # or --no-bee to suppress
-NO_COLOR=1 cargo run -p bee-harness --example bee_preview   # check the monochrome floor
+cargo run --example bee_preview                    # static sprite, real pipeline
+cargo run --example bee_preview -- --animate       # idle greeting loop
+cargo run --example bee_preview -- --animate --mood working
+BEE_MASCOT=0 ./target/debug/bee repl ...            # or --no-bee to suppress
+NO_COLOR=1 cargo run --example bee_preview          # check the monochrome floor
 ```
 
 ---
@@ -123,8 +128,8 @@ The reusable chrome pieces, all built from the tokens + glyphs above:
 | **Rules / splits** | `─` `│`, `vsplit`/`hsplit` (max depth 4) | layout separators |
 | **Grid** | `grid(rows, cols)` → cells hold any widget; spans union tracks | model-defined N×M dashboards ([plan](./grid-tui-plan.md)) |
 
-Render widgets — charts, gauges, tables, dot grids, sprites, grids — are authored in Rhai
-(`viz::render_api`) and validated into a pure-serde `RenderSpec`. The full component pipeline and the
+Render widgets — charts, gauges, tables, dot grids, sprites, grids — are authored in Python
+([Python drawing API](./python-visuals.md), `render_api`) and validated into a pure-serde `RenderSpec`. The full component pipeline and the
 grid system live in [the grid TUI plan](./grid-tui-plan.md).
 
 ### Full-screen surface (008-grid-tui)

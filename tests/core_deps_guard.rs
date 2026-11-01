@@ -27,6 +27,9 @@ const FORBIDDEN: &[&str] = &[
     "futures-util",
     // Scripting / rendering brought in by the harness
     "rhai",
+    "monty",
+    "monty-types",
+    "monty-alloc",
     // Terminal effects (009-tachyonfx-effects, SC-009)
     "tachyonfx",
     // Markdown → ratatui `Text` (010): a chat-pane concern, never a policy-core one. Both the

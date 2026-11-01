@@ -1,7 +1,7 @@
 //! Configurable themes (005-themes), end-to-end through the process-wide active theme. This test
 //! binary installs `catppuccin-mocha` once (the `OnceLock` active theme is per-process, so a single
 //! binary pins a single theme) and exercises the global render paths: the `palette` role functions
-//! (US11.1 / SC-029) and the Rhai-driven chart color resolution through the headless buffer pipeline
+//! (US11.1 / SC-029) and the Python-driven chart color resolution through the headless buffer pipeline
 //! (SC-033). Per-theme *resolution* and *rendering* logic is unit-tested in `viz::theme` / `viz::palette`
 //! without the global, so those SCs don't need a binary each.
 

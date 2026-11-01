@@ -1,10 +1,10 @@
 //! [`RenderSpec`] (003-visual-render, US6) — the validated, renderable output of a `render`-tool
-//! Rhai script. Produced by the render tool, consumed by [`crate::repl::ReplOutput::render_widget`]
+//! Python script. Produced by the render tool, consumed by [`crate::repl::ReplOutput::render_widget`]
 //! and [`crate::viz::render_to_ansi`].
 //!
-//! **This type deliberately contains NO ratatui or rhai types** (research D5): it is a pure serde
+//! **This type deliberately contains NO ratatui or Monty types** (research D5): it is a pure serde
 //! value so it can be recorded verbatim in the episode transcript (`ToolResult.render_spec`) and
-//! re-rendered later, and so `ratatui`/`rhai` never leak toward `bee-core` through the transcript
+//! re-rendered later, and so `ratatui`/`monty` never leak toward `bee-core` through the transcript
 //! (NFR-002/SC-019). It is `#[non_exhaustive]` — Slice 2 adds `Sprite`/`Animation` additively.
 
 use serde::{Deserialize, Serialize};
@@ -211,7 +211,7 @@ pub struct OverlayRequest {
 
 /// A pixel-art sprite (003-visual-render, Slice 2, FR-028): a `width × height` grid of RGB pixels,
 /// row-major, `None` = transparent. Rendered via the half-block technique (`viz::sprite_render`) to
-/// `⌈height/2⌉` terminal rows. Like every [`RenderSpec`] member it is pure serde (no ratatui/rhai) so
+/// `⌈height/2⌉` terminal rows. Like every [`RenderSpec`] member it is pure serde (no ratatui/Monty) so
 /// it records in the transcript and re-renders later.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SpriteSpec {
@@ -255,7 +255,7 @@ pub struct AnimationSpec {
     pub cycles: u32,
 }
 
-/// The validated, renderable output of a Rhai render script. Variants mirror the Rhai drawing API
+/// The validated, renderable output of a Python render script. Variants mirror the Python drawing API
 /// (contracts/rhai-api.md). Slice 1 covers the static widgets; `Sprite`/`Animation` land in Slice 2
 /// (hence `#[non_exhaustive]`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

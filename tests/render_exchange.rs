@@ -33,7 +33,7 @@ impl ReplOutput for WidgetCapture {
 #[tokio::test]
 async fn agent_render_call_draws_widget_and_summarizes_to_model() {
     let script = r#"
-        let c = bar_chart("File Sizes");
+        c = bar_chart("File Sizes");
         c.bar("main.rs", 340);
         c.bar("lib.rs", 120);
         c.bar("tools.rs", 88);

@@ -606,7 +606,7 @@ mod tests {
     #[test]
     fn an_agent_requested_effect_replaces_the_default_transition() {
         // FR-022: `chart.effect(slide_in("left", 400))` is directional intent, and it must actually
-        // be what plays — otherwise the whole Rhai surface is decoration on decoration.
+        // be what plays — otherwise the whole Python surface is decoration on decoration.
         let mut r = PanelRegistry::new();
         r.apply(PanelOp::Upsert {
             id: "m".into(),

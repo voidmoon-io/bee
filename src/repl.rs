@@ -1456,7 +1456,7 @@ fn remember(editor: &mut DefaultEditor, path: &Option<PathBuf>, line: &str) {
 }
 
 /// The system prompt actually sent to the model: the configured base, plus a short primer on the
-/// `render` tool's Rhai drawing API **only when that tool is registered** (005-themes follow-up). The
+/// `render` tool's Python drawing API **only when that tool is registered** (005-themes follow-up). The
 /// full API surface already lives in the tool's schema, so this stays brief — it just makes the agent
 /// aware visuals exist and nudges it to use them when a chart/table/status grid reads better than
 /// prose. When `render` is not among the enabled tools, the base prompt is returned unchanged so the
@@ -1482,7 +1482,7 @@ pub(crate) fn effective_system_prompt(base: &str, registry: &ToolRegistry) -> St
     if registry.contains("render") {
         prompt.push_str(
             "\n\n\
-             You can also draw visualizations with the `render` tool: write a short Rhai script \
+             You can also draw visualizations with the `render` tool: write a short Python script \
              ending in `render(widget)` to produce bar/line charts, sparklines, tables, gauges, \
              pass/fail dot grids, styled text, or sprites — the tool's schema lists the full \
              drawing API. Reach for it when a chart, table, or status grid communicates results \

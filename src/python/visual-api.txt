@@ -1,0 +1,19 @@
+Render a visualization with Python (Monty subset). Use ordinary Python assignments, loops and lists; no filesystem, network or tool calls. Finish with render(widget), render_to(panel_id, widget), or render_fullscreen(widget). Rhai is no longer accepted.
+
+Charts: bar_chart(title).bar(label,value); line_chart(title), scatter(title), area_chart(title) have .series(label).point(x,y). Chart .color(name), .x_label(s), .y_label(s).
+heatmap(title).row(label, values); sparkline(title, values).
+table(title): .header(strings), .row(values, optional_color).
+gauge(title, fraction): .label(s), .color(name).
+dots(title): .passed(label), .fail(label), .skip(label).
+log_tail(title): .line(text, optional_level), .max_rows(n).
+text(content): .color(name), .bold(), .dim(). markdown(source), ascii_art(lines), separator().
+vsplit()/hsplit(): .add(widget). grid(rows,cols): .cell(row,col,widget), .span(row,col,row_span,col_span,widget), .gap(n), .row_weights(values), .col_weights(values).
+palette(): .set(character, '#RRGGBB' or 'transparent'). sprite(width,height,palette): .paint(lines), .set(x,y,color), .fill(color). animation(ms): .add(sprite), .bounce(True), .cycles(n). bee_sprite(), bee_animation().
+widget.effect(fade_in(ms)); also fade_out, dissolve_in/out, evolve_in/out, slide_in/out(direction,ms), sweep_in/out(direction,ms), pulse(color,ms), glow(ms).
+render_to_ttl(id,widget,ms), remove_panel(id), clear_panels(), render_fullscreen_ttl(widget,ms).
+Caps: nesting 4, 500 elements, grid 12x12/64 cells, sprite 32x32, palette 32 colors, animation 16 frames. Scripts have memory and time limits. Only a text summary returns to the model; visual permissions still apply.
+Example:
+c = bar_chart("Sales")
+c.bar("Q1", 100)
+c.bar("Q2", 150)
+render(c)

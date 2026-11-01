@@ -158,6 +158,7 @@ async fn capture(
             cap,
             protocol,
             cwd: None,
+            parent_death: false,
         },
     )
     .await
@@ -168,6 +169,7 @@ struct CaptureOptions {
     cap: usize,
     protocol: bool,
     cwd: Option<PathBuf>,
+    parent_death: bool,
 }
 
 async fn capture_with(
@@ -181,11 +183,31 @@ async fn capture_with(
         cap,
         protocol,
         cwd,
+        parent_death,
     } = options;
     let (command, cgroup) = sandbox
         .invocation_command(program, args)
         .map_err(io::Error::other)?;
     let mut command = Command::from(command);
+    if parent_death {
+        #[cfg(target_os = "linux")]
+        {
+            let parent = std::process::id();
+            // SAFETY: only async-signal-safe syscalls run after fork. Install after sandbox
+            // hardening and before exec, so even a stopped loader dies with its supervisor.
+            unsafe {
+                command.pre_exec(move || {
+                    if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    if libc::getppid() as u32 != parent {
+                        return Err(io::Error::from_raw_os_error(libc::ESRCH));
+                    }
+                    Ok(())
+                });
+            }
+        }
+    }
     if let Some(cwd) = cwd {
         command
             .current_dir(&cwd)
@@ -256,7 +278,46 @@ pub async fn run_child(
     stdin_data: Option<Vec<u8>>,
     cap: usize,
 ) -> ToolResult {
-    let (status, out, err) = match capture(sandbox, program, args, stdin_data, cap, false).await {
+    child_result(
+        capture(sandbox, program, args, stdin_data, cap, false).await,
+        program,
+        cap,
+    )
+}
+
+/// An interpreter worker has no independent effect channel and must not outlive its supervisor.
+pub(crate) async fn run_worker(
+    sandbox: &Sandbox,
+    program: &str,
+    args: &[String],
+    stdin_data: Vec<u8>,
+    cap: usize,
+) -> ToolResult {
+    child_result(
+        capture_with(
+            sandbox,
+            program,
+            args,
+            CaptureOptions {
+                input: Some(stdin_data),
+                cap,
+                protocol: false,
+                cwd: None,
+                parent_death: true,
+            },
+        )
+        .await,
+        program,
+        cap,
+    )
+}
+
+fn child_result(
+    captured: io::Result<(ExitStatus, Capture, Capture)>,
+    program: &str,
+    cap: usize,
+) -> ToolResult {
+    let (status, out, err) = match captured {
         Ok(result) => result,
         Err(e) => return ToolResult::error(format!("{program}: {e}")),
     };
@@ -332,6 +393,7 @@ pub async fn run_probe(
         cap: 64 * 1024,
         protocol: true,
         cwd: Some(cwd),
+        parent_death: false,
     };
     match tokio::time::timeout(budget, capture_with(sandbox, program, args, options)).await {
         Err(_) => Err(ChildError::TimedOut(budget)),

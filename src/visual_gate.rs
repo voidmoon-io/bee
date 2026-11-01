@@ -115,7 +115,7 @@ static ACTIVE: RwLock<Option<VisualConfig>> = RwLock::new(None);
 /// environment and the scenario file have been folded together.
 ///
 /// Process-global for the same reason [`crate::viz::viewport`] is: the render tool runs in-process
-/// with no session handle, and threading a config through the Rhai engine's closures would put the
+/// with no session handle, and threading a config through the Python engine's closures would put the
 /// configuration into every builder type on the drawing API.
 pub fn set(cfg: VisualConfig) {
     if let Ok(mut g) = ACTIVE.write() {

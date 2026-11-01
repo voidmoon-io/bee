@@ -17,6 +17,10 @@ use bee_userspace::spawn;
 use bee_userspace::{EnforcementPlan, Engine, EngineError, SystemResolver};
 use clap::{Parser, Subcommand};
 
+// Monty enforces each Python worker's memory limit through this allocator.
+#[global_allocator]
+static PYTHON_ALLOCATOR: monty_alloc::LimitedAllocator = monty_alloc::LimitedAllocator;
+
 // Exit codes (contracts/cli.md).
 const EX_POLICY: u8 = 64;
 const EX_UNSUPPORTED: u8 = 65;
@@ -108,6 +112,12 @@ enum Cmd {
     #[cfg(feature = "source")]
     #[command(hide = true)]
     SourceWorker(bee::source::WorkerArgs),
+    /// Bounded Python interpreter for visual scripts and durable codemode (internal).
+    #[command(hide = true)]
+    PythonWorker {
+        #[arg(long)]
+        parent: u32,
+    },
     /// Internal: read a scanner's SARIF report and print normalised findings as JSONL.
     ///
     /// The second child of the scanner pipeline, and the reason there are two: the report is
@@ -132,6 +142,7 @@ enum Cmd {
 
 fn main() -> ExitCode {
     match Cli::parse().cmd {
+        Cmd::PythonWorker { parent } => bee::python::worker_main(parent),
         Cmd::Run(args) => app::run::main(*args),
         Cmd::Repl(args) => app::repl::main(*args),
         Cmd::Metrics(args) => app::metrics::main(args),

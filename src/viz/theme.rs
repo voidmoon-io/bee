@@ -2,7 +2,7 @@
 //! semantic [`Role`]s, resolution from CLI/env/config, and the process-wide active theme.
 //!
 //! The six roles are the *only* interface between the rendering code (`palette`, `buffer_render`, the
-//! Rhai API) and the color system — nothing ever says "paint red", it says "paint the `error` role"
+//! Python API) and the color system — nothing ever says "paint red", it says "paint the `error` role"
 //! and the theme resolves it (spec Design). Colors are either basic-ANSI SGR codes (work on every
 //! terminal, the `honeycomb` default) or 24-bit RGB (quantized to 256/16 colors when the terminal
 //! lacks truecolor, reusing the `sprite_render` quantizers). The theme is loaded once at startup and
@@ -66,7 +66,7 @@ pub enum Role {
 }
 
 /// A resolved theme: the six semantic roles plus an optional extended palette of named colors for
-/// charts, sprites, and the Rhai API.
+/// charts, sprites, and the Python API.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Theme {
     pub name: String,

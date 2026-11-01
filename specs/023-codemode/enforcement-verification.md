@@ -283,3 +283,19 @@ Tested stripped binaries (SHA-256):
 
 No guest staging directories or codemode cgroups remained, and the VM was returned to
 its original stopped state. Log: `/tmp/bee-parallel-vm.log`.
+
+## Port onto main
+
+After porting onto `main` (snapshot/store v7, journal v3, main's call lifecycle), the
+17-case codemode gate passed again on `6.8.0-147-generic`, and main's four-case durable
+executor-recovery gate (`test/vm/durable.sh`) passed. No staging directories or codemode
+cgroups remained; the VM was returned to Stopped.
+
+- `bee`: `6c5083e2adcc4591657ec2aa6957538df44f7bac3442c94cdd6d785b3b360e3e`
+- `codemode_kernel`: `90f574e224bef7f19aabc009a3e4dcc91fe4062351b2a88b6b914e807c9af586`
+
+Host: 905 tests (`--workspace`), 968 (`mcp,sec,astgrep-rust`), 923 (`durable-sessions`),
+723 (`--no-default-features --features durable-sessions`), 582 (`--no-default-features`),
+81 `test-support` and 135 `intercept,test-support` tests passed with no failures;
+`test/durable-investigation.sh` and the VM parser tests passed. Clippy `-D warnings`
+passed for every CI feature set and `durable-sessions,enforce`.

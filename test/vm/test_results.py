@@ -1,4 +1,6 @@
 import unittest
+from pathlib import Path
+import re
 from validate_results import validate
 
 
@@ -25,3 +27,14 @@ class ResultsTest(unittest.TestCase):
     def test_transport_failure_overrides_success(self):
         with self.assertRaises(ValueError):
             validate(self.valid, {"a", "b"}, 1)
+
+
+class CodemodeManifestTest(unittest.TestCase):
+    def test_manifest_covers_each_kernel_case_once(self):
+        root = Path(__file__).resolve().parents[2]
+        manifest = Path(__file__).with_name("codemode-cases.txt").read_text().splitlines()
+        source = (root / "tests/codemode_kernel.rs").read_text()
+        cases = re.findall(r"async fn (kernel_codemode_\w+)\(", source)
+        self.assertEqual(len(manifest), len(set(manifest)))
+        self.assertEqual(set(manifest), set(cases))
+        self.assertEqual(len(cases), 17)

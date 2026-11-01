@@ -18,8 +18,80 @@ pub(super) fn tool(output: &dyn ReplOutput, result: &ToolResult, audit: &[bee_co
         output.panel_op(op);
     }
 }
+/// A codemode script or one of its calls started (023). Grouped events carry a stable identity
+/// so front ends can place nested calls under their script and update rows in place.
+pub(super) fn start(
+    output: &dyn ReplOutput,
+    context: crate::repl::presentation::CallContext,
+    call: &crate::provider::ToolCall,
+) {
+    output.tool_event(&crate::repl::presentation::CallEvent {
+        context,
+        call: call.clone(),
+        outcome: crate::repl::presentation::CallOutcome::Running,
+    });
+}
+
+/// A codemode script or one of its calls finished. Every committed inner result carries a
+/// receipt; a record without one is evidence of an unresolved outcome, never success.
+pub(super) fn grouped(
+    output: &dyn ReplOutput,
+    context: crate::repl::presentation::CallContext,
+    call: &crate::provider::ToolCall,
+    result: &ToolResult,
+    audit: &[bee_core::AuditEvent],
+) {
+    let outcome = if context.parent.is_some() && result.receipt_id.is_none() {
+        crate::repl::presentation::CallOutcome::Unresolved {
+            detail: result.content.clone(),
+        }
+    } else {
+        crate::repl::presentation::CallOutcome::Completed {
+            result: Box::new(result.clone()),
+            audit: audit.to_vec(),
+        }
+    };
+    output.tool_event(&crate::repl::presentation::CallEvent {
+        context,
+        call: call.clone(),
+        outcome,
+    });
+    if let Some(spec) = &result.render_spec {
+        let fx = result.inline_effect.as_ref();
+        match &result.render_target {
+            crate::render_spec::RenderTarget::Panel { id } => output.panel_update(id, spec),
+            crate::render_spec::RenderTarget::Overlay { ttl_ms } => {
+                output.overlay(spec, *ttl_ms, fx)
+            }
+            crate::render_spec::RenderTarget::Inline => output.render_widget(spec, fx),
+        }
+    }
+    for op in &result.panel_ops {
+        output.panel_op(op);
+    }
+}
+
+impl Driver {
+    pub(super) fn call_context(
+        &self,
+        call: &str,
+        parent: Option<&str>,
+    ) -> crate::repl::presentation::CallContext {
+        crate::repl::presentation::CallContext::new(
+            &self.active().request_id,
+            self.active().turns.last().map_or(0, |t| t.index),
+            call,
+            parent,
+            false,
+        )
+    }
+}
+
 struct Progress<'a>(&'a crate::episode::LoopOptions);
 impl ReplOutput for Progress<'_> {
+    fn tool_event(&self, event: &crate::repl::presentation::CallEvent) {
+        self.info(&event.text());
+    }
     fn assistant_delta(&self, text: &str) {
         self.info(text);
     }
@@ -89,6 +161,22 @@ pub async fn run_episode(
     match result {
         Ok((report, _)) => transcript(report, &scenario.id, model.id(), sandbox),
         Err(error) => {
+            // Committed, validated results that preceded the failure stay in the transcript.
+            if let Ok(Some(mut report)) = binding
+                .session
+                .partial_report(&binding.request_id, registry)
+                .await
+            {
+                report.status = match &error {
+                    DriverError::Provider(_) => EpisodeStatus::ApiError {
+                        detail: error.to_string(),
+                    },
+                    _ => EpisodeStatus::InfraError {
+                        detail: error.to_string(),
+                    },
+                };
+                return transcript(report, &scenario.id, model.id(), sandbox);
+            }
             let budget = binding
                 .session
                 .budget(&binding.request_id)
@@ -274,11 +362,22 @@ pub async fn exchange(
         }
         Err(error) => {
             output.error(&error.to_string());
-            let budget = if let Some(id) = admitted_request {
-                session.budget(&id).await.ok().flatten()
+            let budget = if let Some(id) = admitted_request.as_deref() {
+                session.budget(id).await.ok().flatten()
             } else {
                 None
             };
+            // Committed, validated results that preceded the failure stay visible.
+            let partial = if let Some(id) = admitted_request.as_deref() {
+                session.partial_report(id, registry).await.ok().flatten()
+            } else {
+                None
+            };
+            let turns = partial.map(|report| report.turns).unwrap_or_default();
+            let audit: Vec<_> = turns
+                .iter()
+                .flat_map(|turn| turn.calls.iter().flat_map(|call| call.audit.clone()))
+                .collect();
             ExchangeResult {
                 compactions: vec![],
                 outcome: match &error {
@@ -287,9 +386,9 @@ pub async fn exchange(
                 },
                 model_calls: budget.as_ref().map_or(0, |b| b.charged(WorkKind::Model)),
                 tool_calls: budget.as_ref().map_or(0, |b| b.charged(WorkKind::Tool)),
-                denials: 0,
-                turns: vec![],
-                audit: vec![],
+                denials: audit.iter().filter(|e| e.decision == "denied").count() as u32,
+                turns,
+                audit,
                 usage: budget.as_ref().and_then(|b| b.known_usage().ok().flatten()),
                 durable_budget: budget,
             }

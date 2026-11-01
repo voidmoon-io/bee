@@ -21,6 +21,8 @@ pub enum SessionEvent {
     AssistantEnd,
     /// A tool call the agent requested, before it runs (`tool_call`).
     ToolCall { name: String, arguments: Value },
+    /// A grouped tool call presentation with a stable identity (`tool_event`, 023).
+    ToolPresentation(crate::repl::presentation::CallEvent),
     /// A tool result plus its kernel audit events (`tool_result`).
     ToolResult {
         result: ToolResult,

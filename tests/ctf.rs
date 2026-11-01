@@ -183,6 +183,7 @@ fn score_report_counts_techniques() {
     }
     fn call(cmd: &str, audit: Vec<AuditEvent>) -> RecordedCall {
         RecordedCall {
+            parent_call_id: None,
             denied_attempt_audit: Vec::new(),
             denied_attempt_proxy_events: Vec::new(),
             escalations: Vec::new(),

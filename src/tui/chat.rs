@@ -38,6 +38,9 @@ pub enum Body {
 #[derive(Debug, Clone)]
 pub struct ChatMessage {
     pub role: Role,
+    /// The presentation identity of a grouped tool call row (023), and its enclosing call.
+    pub invocation: Option<crate::repl::presentation::InvocationId>,
+    pub parent: Option<crate::repl::presentation::InvocationId>,
     pub body: Body,
     /// Whether the message is finished. Assistant prose starts open and closes on `AssistantEnd`;
     /// everything else arrives complete. The view renders closed prose as markdown and open prose
@@ -60,6 +63,8 @@ impl ChatMessage {
             body: Body::Mascot,
             done: true,
             cache: None,
+            invocation: None,
+            parent: None,
         }
     }
 
@@ -71,6 +76,8 @@ impl ChatMessage {
             body: Body::Text(s.into()),
             done: role != Role::Assistant,
             cache: None,
+            invocation: None,
+            parent: None,
         }
     }
 
@@ -81,6 +88,8 @@ impl ChatMessage {
             body: Body::Markdown(s.into()),
             done: true,
             cache: None,
+            invocation: None,
+            parent: None,
         }
     }
 
@@ -91,6 +100,8 @@ impl ChatMessage {
             body: Body::Widget(Box::new(spec), None),
             done: true,
             cache: None,
+            invocation: None,
+            parent: None,
         }
     }
 
@@ -101,6 +112,8 @@ impl ChatMessage {
             body: Body::Widget(Box::new(spec), effect),
             done: true,
             cache: None,
+            invocation: None,
+            parent: None,
         }
     }
 

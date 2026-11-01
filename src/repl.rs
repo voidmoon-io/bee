@@ -43,6 +43,7 @@ use crate::transcript::{
 };
 
 pub mod consent_input;
+pub mod presentation;
 pub mod terminal;
 
 pub use terminal::TerminalOutput;
@@ -238,6 +239,20 @@ pub trait ReplOutput: Send + Sync {
     fn tool_call(&self, name: &str, arguments: &serde_json::Value);
     /// A tool call's result, plus any kernel audit events it produced.
     fn tool_result(&self, result: &ToolResult, audit: &[AuditEvent]);
+
+    /// A grouped, identified call presentation (023). The default renders it through the plain
+    /// call/result callbacks; front ends that group nested calls override it.
+    fn tool_event(&self, event: &presentation::CallEvent) {
+        match &event.outcome {
+            presentation::CallOutcome::Running => {
+                self.tool_call(&event.call.name, &event.call.arguments)
+            }
+            presentation::CallOutcome::Completed { result, audit } => {
+                self.tool_result(result, audit)
+            }
+            presentation::CallOutcome::Unresolved { detail } => self.error(detail),
+        }
+    }
     /// An error the user should see (provider failure, bad meta-command).
     fn error(&self, msg: &str);
     /// An informational line (banners, warnings, meta-command output).

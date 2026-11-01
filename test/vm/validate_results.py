@@ -39,8 +39,9 @@ def validate(output, expected, guest_status=0):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(__doc__)
     parser.add_argument("--guest-status", type=int, default=0)
+    parser.add_argument("--manifest", type=Path, default=Path(__file__).with_name("cases.txt"))
     args = parser.parse_args()
-    expected = Path(__file__).with_name("cases.txt").read_text().splitlines()
+    expected = args.manifest.read_text().splitlines()
     try:
         results = validate(sys.stdin.read(), expected, args.guest_status)
     except ValueError as error:

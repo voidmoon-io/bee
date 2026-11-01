@@ -420,8 +420,18 @@ pub struct ConcurrentSandbox {
     env: ChildEnv,
 }
 
+/// Borrowed execution boundary for one durable batch member. The parent sandbox owns
+/// enforcement and the sole audit reader; this handle can only spawn beneath its slot.
+#[cfg(feature = "enforce")]
+pub struct BatchSandbox {
+    path: std::path::PathBuf,
+    env: ChildEnv,
+}
+
 /// The execution environment handed to every [`crate::tools::Tool`].
 pub enum Sandbox {
+    #[cfg(feature = "enforce")]
+    Batch(Box<BatchSandbox>),
     Host(HostSandbox),
     #[cfg(feature = "enforce")]
     Enforced(Box<EnforcedSandbox>),
@@ -445,6 +455,8 @@ impl Sandbox {
             }
         }
         match self {
+            #[cfg(feature = "enforce")]
+            Sandbox::Batch(_) => Err("batch policy is owned by its parent".into()),
             Sandbox::Host(_) => Ok(()),
             #[cfg(feature = "enforce")]
             Sandbox::Enforced(e) => e.reload(policy),
@@ -582,6 +594,8 @@ impl Sandbox {
 
     fn child_env(&self) -> &ChildEnv {
         match self {
+            #[cfg(feature = "enforce")]
+            Sandbox::Batch(b) => &b.env,
             Sandbox::Host(h) => &h.env,
             #[cfg(feature = "enforce")]
             Sandbox::Enforced(e) => &e.env,
@@ -592,6 +606,8 @@ impl Sandbox {
 
     fn child_env_mut(&mut self) -> &mut ChildEnv {
         match self {
+            #[cfg(feature = "enforce")]
+            Sandbox::Batch(b) => &mut b.env,
             Sandbox::Host(h) => &mut h.env,
             #[cfg(feature = "enforce")]
             Sandbox::Enforced(e) => &mut e.env,
@@ -744,6 +760,10 @@ impl Sandbox {
     /// elsewhere (018 generalises this).
     pub fn sidecar_supported(&self) -> Result<(), SidecarUnsupported> {
         match self {
+            #[cfg(feature = "enforce")]
+            Sandbox::Batch(_) => Err(SidecarUnsupported {
+                reason: "batch executor",
+            }),
             Sandbox::Host(_) => Err(SidecarUnsupported {
                 reason: "host sandbox has no kernel scope",
             }),
@@ -921,6 +941,14 @@ impl Sandbox {
         self.check_cleanup()
             .map_err(|e| SpawnError::Io(io::Error::other(e)))?;
         match self {
+            #[cfg(feature = "enforce")]
+            Sandbox::Batch(b) => {
+                let procs = bee_userspace::cgroup::procs_path_c(&b.path)?;
+                let join = move || bee_userspace::cgroup::raw_join_self(&procs);
+                let mut cmd = hardened_command(program, args, Some(join))?;
+                b.env.apply(&mut cmd, call)?;
+                Ok(cmd)
+            }
             Sandbox::Host(h) => {
                 // No cgroup join; hardening + env strip only.
                 let mut cmd = hardened_command::<fn() -> io::Result<()>>(program, args, None)?;
@@ -1023,11 +1051,41 @@ impl Sandbox {
     #[cfg(feature = "enforce")]
     pub(crate) fn scope_path(&self) -> Option<&std::path::Path> {
         match self {
+            Self::Batch(b) => Some(&b.path),
             Self::Host(_) => None,
             Self::Enforced(e) => Some(&e.scope.path),
             #[cfg(feature = "concurrent")]
             Self::Concurrent(c) => Some(&c.scope.path),
         }
+    }
+
+    /// Allocate a stable slot before dispatch. It stays present until the driver has
+    /// durably recorded quiescence, so crash recovery can verify its inode.
+    #[cfg(feature = "durable-sessions")]
+    pub(crate) fn batch_slot(&self) -> std::io::Result<Self> {
+        self.check_cleanup().map_err(std::io::Error::other)?;
+        #[cfg(feature = "enforce")]
+        if let Some(parent) = self.scope_path() {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            if !self.durable_compatible() {
+                return Err(std::io::Error::other(
+                    "batch sandbox has incompatible hooks",
+                ));
+            }
+            let path = parent.join(format!(
+                "batch-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&path)?;
+            let mut env = ChildEnv::new(self.child_env().strip_env.clone());
+            env.cleanup_error = self.child_env().cleanup_error.clone();
+            return Ok(Self::Batch(Box::new(BatchSandbox { path, env })));
+        }
+        let mut slot = Self::host(self.child_env().strip_env.clone());
+        slot.child_env_mut().cleanup_error = self.child_env().cleanup_error.clone();
+        Ok(slot)
     }
 
     /// Short-lived tools own a child cgroup. Persistent transports use `tool_command` instead.
@@ -1138,6 +1196,8 @@ impl Sandbox {
             Sandbox::Host(HostSandbox {
                 scripted: Some(s), ..
             }) => s.pop_tool(),
+            #[cfg(feature = "enforce")]
+            Sandbox::Batch(_) => Vec::new(),
             Sandbox::Host(_) => Vec::new(),
             #[cfg(feature = "enforce")]
             Sandbox::Enforced(e) => {
@@ -1228,11 +1288,23 @@ fn restrict_env(cmd: &mut Command, keys: &[String]) {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "durable-sessions")]
+    #[test]
+    fn failed_batch_cleanup_blocks_parent_and_sibling_dispatch() {
+        let sandbox = Sandbox::host(vec![]);
+        let first = sandbox.batch_slot().unwrap();
+        let second = sandbox.batch_slot().unwrap();
+        first.cleanup_failed("descendant remains".into());
+        assert!(sandbox.tool_command("true", &[]).is_err());
+        assert!(second.tool_command("true", &[]).is_err());
+    }
+
     fn ev(cg: u64) -> AuditEvent {
         AuditEvent {
             ts: "1970-01-01T00:00:00Z".into(),
             scope_id: Some("bee-session-1".into()),
             cgroup_id: cg,
+            executor_cgroup_id: None,
             pid: Some(1),
             tgid: Some(1),
             op: "connect".into(),
@@ -1398,6 +1470,7 @@ mod hardening_tests {
             ts: String::new(),
             scope_id: None,
             cgroup_id: 0,
+            executor_cgroup_id: None,
             pid: None,
             tgid: None,
             op: "file_open".into(),

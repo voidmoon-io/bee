@@ -82,9 +82,11 @@ pub(super) struct Active {
     /// Root-to-innermost codemode scripts for the current tool call (023).
     #[serde(default)]
     pub scripts: Vec<super::codemode::Cursor>,
+    #[serde(default)]
+    pub batch_executors: BTreeMap<OperationId, Executor>,
 }
-/// Version 3 adds the codemode script stack; version-2 journals carry none.
-pub(super) const JOURNAL_VERSION: u32 = 3;
+/// Version 4 persists every admitted batch executor; older journals have none.
+pub(super) const JOURNAL_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct Journal {
@@ -188,6 +190,28 @@ impl Journal {
             }
         }
         if let Some(active) = &self.active {
+            if active.batch_executors.len() > super::core::composition::MAX_BATCH
+                || active.batch_executors.keys().any(|id| {
+                    snapshot
+                        .operation(*id)
+                        .is_none_or(|op| op.spec.kind != WorkKind::Tool)
+                        || !snapshot.scripts().values().any(|script| {
+                            script
+                                .suspensions
+                                .last()
+                                .is_some_and(|s| s.batch && s.children.contains(id))
+                        })
+                })
+                || active
+                    .batch_executors
+                    .values()
+                    .map(Executor::cgroup_id)
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len()
+                    != active.batch_executors.len()
+            {
+                return Err(Error::InvalidSnapshot.into());
+            }
             super::codemode::Cursor::validate_stack(
                 &active.scripts,
                 active,

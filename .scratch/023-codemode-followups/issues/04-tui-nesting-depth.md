@@ -1,6 +1,6 @@
 # Indent nested calls by depth in the TUI
 
-Status: ready-for-agent
+Status: done
 
 ## Problem
 
@@ -19,3 +19,12 @@ Add an explicit `depth` to `CallContext` (set by the driver from the cursor stac
 
 A TUI unit test with three nesting levels shows strictly increasing indentation, and
 replay produces the same rows as live. Terminal output matches.
+
+## Resolution
+
+`CallContext.depth` comes from the live cursor stack or the replay parent chain.
+Replay opens ancestors root-first. `CallEvent::text()` supplies identical indentation
+to terminal and TUI, including errors and unresolved outcomes. No call-id parsing.
+
+Verified by the three-level TUI test (opaque ids), live/replay integration comparison
+through depth 3, and the full host suite. Implemented on the PR branch.

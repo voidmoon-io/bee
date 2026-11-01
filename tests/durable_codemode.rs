@@ -933,7 +933,14 @@ impl ReplOutput for Events {
 #[tokio::test]
 async fn grouped_events_preserve_children_and_receipts_on_live_and_replay() {
     use bee::repl::presentation::CallOutcome;
-    for source in [TWO, "call_tool('read_file', {})\n1 / 0"] {
+    let nested = format!(
+        "call_tool('codemode', {{'source': {}}})",
+        json!(format!(
+            "call_tool('codemode', {{'source': {}}})",
+            json!(TWO)
+        ))
+    );
+    for source in [TWO, "call_tool('read_file', {})\n1 / 0", nested.as_str()] {
         let root = tempfile::tempdir().unwrap();
         let session = open(root.path(), None).await;
         let count = Arc::new(AtomicUsize::new(0));
@@ -982,6 +989,8 @@ async fn grouped_events_preserve_children_and_receipts_on_live_and_replay() {
                             event.context.parent.clone(),
                             result.content.clone(),
                             result.receipt_id.clone(),
+                            event.context.depth,
+                            event.text().replace(" [replay]", ""),
                         ))
                     } else {
                         None
@@ -991,6 +1000,9 @@ async fn grouped_events_preserve_children_and_receipts_on_live_and_replay() {
         };
         let original = completed(&live);
         assert_eq!(original, completed(&replay));
+        if source == nested {
+            assert_eq!(original[0].4, 3);
+        }
         assert!(original[0].1.is_some());
         assert!(original[0].3.is_some());
         assert!(original.last().unwrap().1.is_none());

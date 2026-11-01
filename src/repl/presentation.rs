@@ -15,6 +15,7 @@ pub struct CallContext {
     pub invocation: InvocationId,
     pub parent: Option<InvocationId>,
     pub replay: bool,
+    pub depth: usize,
 }
 
 impl CallContext {
@@ -24,6 +25,7 @@ impl CallContext {
         call: &str,
         parent: Option<&str>,
         replay: bool,
+        depth: usize,
     ) -> Self {
         let identity = |call: &str| InvocationId {
             submission: submission.into(),
@@ -34,6 +36,7 @@ impl CallContext {
             invocation: identity(call),
             parent: parent.map(identity),
             replay,
+            depth,
         }
     }
 }
@@ -92,9 +95,10 @@ impl CallEvent {
                 }
             }
         }
-        if self.context.parent.is_some() {
+        if self.context.depth > 0 {
+            let indent = "    ".repeat(self.context.depth);
             text.lines()
-                .map(|line| format!("    {line}"))
+                .map(|line| format!("{indent}{line}"))
                 .collect::<Vec<_>>()
                 .join("\n")
         } else {

@@ -18,7 +18,7 @@ A composition inherits the lesser of the existing session deadline and a tool ti
 
 There are at most 32 admitted children and 64 interpreter invocations, including recovery attempts. Every invocation reserves its count and a 4,000 ms time charge before launching. A returned invocation replaces that charge with its measured elapsed time; a lost response retains the charge. The final result records `worker_invocations` and `worker_time_charge_ms`; the outer completion duration uses this charge, while child durations stay on their own records. Each worker retains its one-second interpreter budget, three-second parent watchdog and 64 MiB memory limit. These host-owned counters cannot be reset by a snapshot.
 
-Driver journal version 3 adds the script stack. Version-2 journals carry no script state and upgrade on open; older readers reject version 3. Changes to the advertised runtime/tool surface still require compatible current configuration, so an unfinished older session can be refused rather than silently changing its model request.
+Driver journal version 4 adds the bounded batch executor map alongside the script stack introduced in v3. Version-2/3 journals upgrade on open with an empty map; older readers reject version 4. Changes to the advertised runtime/tool surface still require compatible current configuration, so an unfinished older session can be refused rather than silently changing its model request.
 
 ## State and commit ordering
 
@@ -82,17 +82,30 @@ and adds no model messages. Transcript records keep stable ancestry
 (`outer/1/2` under `outer/1`). Stopping the root stops every active descendant and its
 admitted children in one commit.
 
-Leaves overlap only when no per-slot durable ownership is needed: the sandbox has no
-kernel executor scope, and no batch member is journal-aware or a nested script. Then
-consent, authorization and result commits remain serialized in input order, and only
-execution overlaps. Enforced sandboxes still run batch members one at a time. The driver
-persists one executor identity and drains one shared scope audit stream, so per-call
-attribution and executor reconciliation remain exact. Overlapping enforced execution
-requires per-slot scopes and audit collectors; that work has not been started.
+Up to four never-started batch leaves overlap in Host, Enforced and Concurrent
+sandboxes. Journal-aware tools and nested scripts still execute sequentially: they
+require the single worker journal and mutable sandbox handle. Consent, authorization,
+budget reservations and result commits stay serialized in input order. Completed
+prefixes commit while later siblings are running.
 
-Snapshot and store version 7 carry ordered child sets, a batch flag and an optional
-parent link from the start; this branch never shipped an intermediate shape. Driver
-journal version 3 holds a root-to-innermost cursor stack.
+Each enforced leaf receives a child cgroup under the session scope. Its boot id,
+canonical path, device and inode are journaled under its OperationId before dispatch.
+The parent retains the only audit reader. Kernel records keep the policy cgroup id
+for routing and add `executor_cgroup_id`, captured from the immediate child of that
+policy scope; this survives removal of a leaf's subprocess cgroups. One collector
+partitions records per executor, including events from siblings that finish early.
+
+Activation, cancellation and expiry stop and verify every recorded slot before
+resolving individual outcomes. Completed siblings remain committed; ambiguous leaves
+retain their original recovery policy. Slot identities stay durable until quiescence
+is committed, then empty cgroups are removed. The existing sequential executor fields
+remain for direct calls and journal-aware tools; the batch map never borrows that
+single ownership boundary.
+
+Snapshot/store version 7 carries ordered child sets, a batch flag and parent links.
+Driver journal version 4 holds the cursor stack and at most four batch executors.
+Presentation carries explicit depth from the live cursor stack or replay parent chain;
+terminal and TUI rows use four spaces per level without interpreting call ids.
 
 Finished script trees are released: the driver forgets a root's tree after delivering
 its result, and pruning drops finished scripts together with their operations. A

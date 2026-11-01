@@ -299,3 +299,60 @@ Host: 905 tests (`--workspace`), 968 (`mcp,sec,astgrep-rust`), 923 (`durable-ses
 81 `test-support` and 135 `intercept,test-support` tests passed with no failures;
 `test/durable-investigation.sh` and the VM parser tests passed. Clippy `-D warnings`
 passed for every CI feature set and `durable-sessions,enforce`.
+
+
+## Issues 02 and 04: enforced overlap and presentation depth
+
+Verified 2026-10-31 with snapshot/store v7 and driver journal v4. Batches now
+execute up to four ordinary leaves concurrently under kernel enforcement, with
+separate executor identities and audit attribution. Journal-aware tools and nested
+scripts still execute sequentially. Live and replayed terminal/TUI presentation
+carry explicit depth.
+
+- `cargo test --offline --locked --features durable-sessions --lib --tests`:
+  **932 passed**, zero failures. Log: `/tmp/bee-host-verified.log`.
+- `cargo test --offline --locked -p bee-core`: **62 passed**.
+- `cargo test --offline --locked -p bee-userspace --features tokio audit_demux`:
+  **3 passed**.
+- Clippy with `durable-sessions,enforce,concurrent`, `--lib --tests -- -D warnings`:
+  passed. Headless durable-session check and formatting also passed.
+- VM gate `bash test/vm/codemode.sh`: **20/20 passed**, no skipped gate cases,
+  kernel `6.8.0-147-generic`. Log: `/tmp/bee-vm-verified.log`.
+
+The three added cases are `kernel_codemode_overlap_barrier`,
+`kernel_codemode_overlap_cancel` and `kernel_codemode_overlap_deadline`.
+The barrier forces overlapping tools and reverses completion order; the denied
+second call alone receives its audit. The stop cases require four live subprocesses
+in four slots and preserve a separate session's process. The updated SIGKILL case
+preserves the durable first result, proves a blocked sibling survives until recovery,
+then verifies every old slot is removed and the ambiguous sibling is not repeated.
+Nested cancellation now expects both batch leaves to have been attempted.
+
+During verification the old fixture waited for receipt publication (`Completed`)
+while a sibling blocked. It now pauses after the durable result/receipt intent
+(`Publishing`). An old pre-recovery emptiness assertion was also replaced: the new
+case deliberately requires a surviving process for recovery to stop. An initial
+host retry-deadline test failed under parallel load; it passed in isolation and in
+the final full run. No verification failures remain.
+
+Tested stripped binary SHA-256:
+
+- `bee`: `593fd52327d2d04a4251563ac33f35eeab347dc2c70b0320f3cf074f334351e5`
+- `codemode_kernel`: `07255c739462a9e14b2e45499f5483825c0365ef917fcb7f1076652438801792`
+
+The gate removed its guest staging files; the temporary debugging binaries were
+removed separately. This verification preceded PR preparation; the PR isolates issues 02 and 04 from unrelated workspace changes.
+
+The VM was returned to its original `Stopped` state and verified with kubectl.
+
+
+### Isolated PR verification
+
+The PR branch starts from `origin/main` at `f809140` and excludes the unrelated
+provider/retry and decision-model work. On this isolated checkout, the full
+`--features durable-sessions --lib --tests` run passed **925 tests**. Enforcement
+and concurrency Clippy (`-D warnings`), formatting and all four VM result-parser
+tests passed. Logs: `/tmp/bee-023-pr-tests.log` and `/tmp/bee-023-pr-clippy.log`.
+The 932-test and 20-case kernel results above were obtained before this isolation;
+the kernel gate was not rerun during PR preparation. No runtime changes were made
+during isolation, apart from excluding the unrelated decision-provider key list.

@@ -523,6 +523,21 @@ fn match_subtree(buf: &[u8; PATH_MAX], plen: usize, rule: &DenyRule) -> bool {
     len == plen || buf[len & (PATH_MAX - 1)] == b'/'
 }
 
+// Preserve the policy scope for routing, and separately identify the executor beneath it.
+// Looking up the ancestor while the task is alive also covers invocation cgroups removed
+// before userspace drains the ring.
+fn executor_cgroup_id(scope: u64) -> u64 {
+    let mut level = 0;
+    while level < MAX_CGROUP_DEPTH - 1 {
+        if unsafe { bpf_get_current_ancestor_cgroup_id(level) } == scope {
+            let child = unsafe { bpf_get_current_ancestor_cgroup_id(level + 1) };
+            return if child == 0 { scope } else { child };
+        }
+        level += 1;
+    }
+    scope
+}
+
 fn emit_audit(cgid: u64, op: Op, observe: bool, errno: i32, path: Option<&[u8; PATH_MAX]>) {
     if let Some(mut slot) = AUDIT_RB.reserve::<AuditRecord>(0) {
         let pidtgid = bpf_get_current_pid_tgid();
@@ -543,6 +558,7 @@ fn emit_audit(cgid: u64, op: Op, observe: bool, errno: i32, path: Option<&[u8; P
         let rec = AuditRecord {
             ts_ns: unsafe { bpf_ktime_get_ns() },
             cgroup_id: cgid,
+            executor_cgroup_id: executor_cgroup_id(cgid),
             pid: pidtgid as u32,
             tgid: (pidtgid >> 32) as u32,
             op: op as u8,
@@ -582,6 +598,7 @@ fn emit_audit_connect(cgid: u64, observe: bool, errno: i32, key: &NetKey) {
         let rec = AuditRecord {
             ts_ns: unsafe { bpf_ktime_get_ns() },
             cgroup_id: cgid,
+            executor_cgroup_id: executor_cgroup_id(cgid),
             pid: pidtgid as u32,
             tgid: (pidtgid >> 32) as u32,
             op: Op::Connect as u8,

@@ -334,6 +334,7 @@ mod tests {
             ts: String::new(),
             scope_id: None,
             cgroup_id: 0,
+            executor_cgroup_id: None,
             pid: None,
             tgid: None,
             op: "file_open".into(),

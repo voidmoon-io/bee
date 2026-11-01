@@ -14,6 +14,8 @@ pub struct AuditEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope_id: Option<String>,
     pub cgroup_id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executor_cgroup_id: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -97,6 +99,7 @@ impl AuditEvent {
                 .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string()),
             scope_id,
             cgroup_id: rec.cgroup_id,
+            executor_cgroup_id: Some(rec.executor_cgroup_id),
             pid: Some(rec.pid),
             tgid: Some(rec.tgid),
             op: op_str(rec.op).to_string(),
@@ -121,6 +124,7 @@ mod tests {
         let s = b"/home/jg/.ssh/id_rsa";
         target[..s.len()].copy_from_slice(s);
         AuditRecord {
+            executor_cgroup_id: 0,
             ts_ns: 0,
             cgroup_id: 74213,
             pid: 40122,

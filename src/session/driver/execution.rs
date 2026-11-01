@@ -187,24 +187,40 @@ impl Driver {
                 // Script calls replay grouped. A nested script is recorded after its children,
                 // so its row is opened from its own record before the first child arrives.
                 let context = |id: &str, parent: Option<&str>| {
+                    let mut depth = 0;
+                    let mut ancestor = parent;
+                    // Bound traversal even if a persisted parent chain is malformed.
+                    while let Some(parent_id) = ancestor.filter(|_| depth < turn.calls.len()) {
+                        depth += 1;
+                        ancestor = turn
+                            .calls
+                            .iter()
+                            .find(|c| c.call.id == parent_id)
+                            .and_then(|c| c.parent_call_id.as_deref());
+                    }
                     crate::repl::presentation::CallContext::new(
                         &report.request_id,
                         turn.index,
                         id,
                         parent,
                         true,
+                        depth,
                     )
                 };
-                if let Some(parent) = &call.parent_call_id {
-                    if let Some(outer) = turn
-                        .calls
-                        .iter()
-                        .find(|c| c.call.id == *parent)
-                        .filter(|_| parents.insert(parent.clone()))
-                    {
+                let mut ancestors = Vec::new();
+                let mut parent = call.parent_call_id.as_deref();
+                while let Some(id) = parent.filter(|_| ancestors.len() < turn.calls.len()) {
+                    let Some(outer) = turn.calls.iter().find(|c| c.call.id == id) else {
+                        break;
+                    };
+                    ancestors.push(outer);
+                    parent = outer.parent_call_id.as_deref();
+                }
+                for outer in ancestors.into_iter().rev() {
+                    if parents.insert(outer.call.id.clone()) {
                         presentation::start(
                             output,
-                            context(parent, outer.parent_call_id.as_deref()),
+                            context(&outer.call.id, outer.parent_call_id.as_deref()),
                             &outer.call,
                         );
                     }
@@ -225,6 +241,7 @@ impl Driver {
         hooks: Option<&crate::grants::escalate::LoopEscalation>,
         active_policy: &mut Option<crate::grants::ActivePolicy>,
     ) -> Result<EpisodeStatus, DriverError> {
+        self.reconcile_batch_executors().await?;
         loop {
             sandbox.check_cleanup().map_err(DriverError::Refused)?;
             self.consume_inputs(output, false).await?;

@@ -83,6 +83,9 @@ impl Driver {
             call,
             parent,
             false,
+            parent
+                .and_then(|id| self.active().scripts.iter().position(|s| s.outer.id == id))
+                .map_or(0, |index| index + 1),
         )
     }
 }

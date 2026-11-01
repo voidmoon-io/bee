@@ -191,6 +191,7 @@ fn enforcement_trace_extracts_audit() {
         ts: "1970-01-01T00:00:00Z".into(),
         scope_id: Some("s".into()),
         cgroup_id: 42,
+        executor_cgroup_id: None,
         pid: Some(1),
         tgid: Some(1),
         op: "file_open".into(),

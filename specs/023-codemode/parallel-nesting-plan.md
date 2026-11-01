@@ -1,6 +1,6 @@
 # Parallel and nested codemode
 
-Status: implemented except enforced-mode overlap (see "Current evidence").
+Status: implemented; verification recorded below.
 Authorized scope: parallel execution, nested codemode, and broader tool exposure.
 This extends the completed follow-up plan.
 
@@ -75,7 +75,7 @@ adds grants. Shell mutations retain `NeverReplay`.
 
 ## Current evidence
 
-Steps 1–4 and 6 are implemented. Step 5 is partly implemented: leaves overlap only in host mode.
+Steps 1–6 are implemented, including enforced-mode overlap.
 
 - Step 2–3: `Suspension` binds an ordered child set with a batch flag; `Script`
   records an optional parent `(script, child)`. Core validation enforces at most four
@@ -86,20 +86,37 @@ Steps 1–4 and 6 are implemented. Step 5 is partly implemented: leaves overlap 
   v5/v6 open in place and roll back on invalid scripts. Finished trees are forgotten
   after delivery and pruned with their operations. Checkpoint retention still derives
   from every active script's latest suspension.
-- Step 4: the driver keeps a root-to-innermost cursor stack (journal v3 on `main`). A batch
+- Step 4: the driver keeps a root-to-innermost cursor stack (journal v4). A batch
   resumes with the full committed result vector; nested completion completes the
   child operation and advances its parent without model messages. Live, replayed and
   unresolved presentation carry stable parent ids at every level.
-- Step 5: `src/session/driver/parallel.rs` overlaps never-started batch leaves when
-  the sandbox has no kernel executor scope and no member is journal-aware or nested.
-  Consent, authorization and result commits remain serialized in input order. Sibling
-  results commit before an adapter failure is reported. Cancellation cleans every
-  cancelled sibling from this activation. **Enforced sandboxes execute batch members
-  one at a time.** They persist one executor identity and drain one shared audit
-  stream; overlapping them needs per-slot scopes and audit collectors. That work is
-  outstanding and not advertised.
+- Step 5: `src/session/driver/parallel.rs` overlaps up to four ordinary leaves in
+  Host, Enforced and Concurrent sandboxes. Each kernel leaf has a child cgroup and a
+  durable OperationId-to-executor entry. A single collector partitions audit by
+  `executor_cgroup_id`; policy-scope routing is unchanged. Ordered futures commit
+  completed prefixes while later leaves run. Activation, cancellation and expiry
+  stop every slot using boot/device/inode identity before resolving outcomes.
+  Journal-aware tools and nested scripts remain sequential.
+- Presentation: explicit depth comes from the cursor stack live and the parent-id
+  chain on replay. Replay opens ancestors root-first; terminal and TUI share the
+  same indentation, including unresolved outcomes.
 
-Validation (2026-10-31):
+Verification for issues 02/04 (2026-10-31):
+
+- 932 main-package host tests passed with `--features durable-sessions --lib --tests`;
+  62 bee-core tests and three concurrent audit-demux tests also passed.
+- Headless durable-session check, formatting, and Clippy `-D warnings` for
+  `durable-sessions,enforce,concurrent` passed.
+- Full codemode VM gate: **20/20 passed** on BPF LSM (`6.8.0-147-generic`). New
+  cases prove barrier overlap with reversed completion order, denial attribution,
+  four-slot cancellation and deadline cleanup while a sibling session survives.
+  The updated SIGKILL case kills after a result/receipt intent is durable but before
+  receipt publication; recovery stops all slots, preserves that result and leaves
+  the running sibling unresolved. Journal-aware tools remain sequential.
+- The VM is back in its original `Stopped` state. Details and binary hashes:
+  `enforcement-verification.md`. Implemented on the PR branch.
+
+Prior baseline validation (2026-10-31, before issues 02/04):
 
 - Host: 571 tests passed with `--no-default-features --features durable-sessions`,
   and 758 with `--features durable-sessions` (TUI included). Zero failures. New

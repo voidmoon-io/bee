@@ -32,6 +32,8 @@ pub mod concurrent;
 pub mod config;
 // Context budget and compaction for long runs (025-long-run-resilience).
 pub mod context;
+// The `edit_file` tool's in-scope worker (exact-string replacement).
+pub mod edit;
 pub mod episode;
 #[cfg(feature = "findings")]
 pub mod evidence;

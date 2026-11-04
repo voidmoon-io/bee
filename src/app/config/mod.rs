@@ -43,6 +43,7 @@ pub const DEFAULT_TOOLS: &[&str] = &[
     "bash",
     "read_file",
     "write_file",
+    "edit_file",
     "list_directory",
     "search",
     "render",

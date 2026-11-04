@@ -17,6 +17,7 @@ const ALLOWED: &[&str] = &[
     "list_directory",
     "search",
     "write_file",
+    "edit_file",
     "bash",
     "ast_grep",
     "cvss",

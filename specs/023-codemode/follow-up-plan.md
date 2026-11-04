@@ -7,6 +7,16 @@ compatibility details. The inherited-lock mechanism is reproduced deterministica
 the original intermittent failure's specific process remains unproven.
 Baseline: `40b6326` (validated durable `write_file`).
 
+## Resuming this work
+
+This plan is complete. Subsequent parallel execution and nesting work is recorded
+in [parallel-nesting-plan.md](parallel-nesting-plan.md). Remaining work is tracked
+in the [023 follow-up issue index](../../.scratch/023-codemode-followups/README.md).
+Consult that index and the working tree before starting: issues 02 and 04 are
+recorded as completed locally, with uncommitted changes. Issue 03 (exec symlink
+policy warnings) is also completed locally. Issue 06 (guest catalog expansion)
+still requires contract decisions.
+
 ## Scope and order
 
 1. Diagnose and fix intermittent immediate-reopen `Store(Locked)`.

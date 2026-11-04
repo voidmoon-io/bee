@@ -479,29 +479,7 @@ async fn stream_with_retry(
     schemas: &[ToolSchema],
     max_retries: u32,
 ) -> Result<crate::provider::EventStream, String> {
-    let mut attempt: u32 = 0;
-    loop {
-        match model.stream(convo, schemas).await {
-            Ok(stream) => return Ok(stream),
-            Err(ModelError::Transient {
-                status,
-                retry_after,
-            }) => {
-                if attempt >= max_retries {
-                    return Err(format!(
-                        "transient provider error (status {status}) after {attempt} retries"
-                    ));
-                }
-                let backoff = retry_after
-                    .unwrap_or_else(|| Duration::from_millis(200 * 2u64.pow(attempt.min(6))));
-                tokio::time::sleep(backoff).await;
-                attempt += 1;
-            }
-            Err(ModelError::Auth) => return Err("provider authentication failed".to_string()),
-            Err(ModelError::Request(m)) => return Err(format!("provider rejected request: {m}")),
-            Err(ModelError::Decode(m)) => return Err(format!("could not decode response: {m}")),
-        }
-    }
+    crate::provider::retry::request(|| model.stream(convo, schemas), max_retries, None).await
 }
 
 /// Drain the steering queue into the conversation as user turns, echoing each so the user sees their
@@ -2676,7 +2654,11 @@ mod durable_resume_tests {
         fn id(&self) -> &str {
             "waiting"
         }
-        async fn complete(&self, _: &Conversation, _: &[ToolSchema]) -> Result<Turn, ModelError> {
+        async fn complete(
+            &self,
+            _: &Conversation,
+            _: &[ToolSchema],
+        ) -> Result<Turn, crate::provider::ModelError> {
             self.0.notify_one();
             std::future::pending().await
         }

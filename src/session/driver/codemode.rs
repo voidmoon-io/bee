@@ -12,6 +12,7 @@ use serde_json::Value;
 // Only qualified, registered tools enter the guest catalog. Session-terminal and
 // UI tools require lifecycle behavior that a script result cannot represent.
 const ALLOWED: &[&str] = &[
+    "feedback",
     "read_file",
     "list_directory",
     "search",
@@ -63,7 +64,7 @@ pub(super) fn schemas(registry: &ToolRegistry) -> Vec<ToolSchema> {
     schemas.retain(|s| s.name != "codemode");
     schemas.push(ToolSchema {
         name: "codemode".into(),
-        description: format!("Run bounded Python (Monty subset). call_tool(name, arguments) returns a tool result dict; the final expression is the result. call_tools([{{'name': ..., 'arguments': {{...}}}}, ...]) admits one to four calls together and returns their results in input order. call_tool('codemode', {{'source': ..., 'inputs': {{...}}}}) runs a nested script, at most four script levels. No imports of external packages, host I/O, time, randomness or async. Print output is discarded. Each outer call, nested script and inner attempt charges the tool budget. All levels share at most 32 inner calls and 64 interpreter invocations including recovery. Available tools: {}", serde_json::to_string(&catalog(registry)).expect("tool schemas serialize")),
+        description: format!("Run bounded Python (Monty subset). call_tool(name, arguments) returns a dict with content (text) and is_error (boolean), plus optional exit_code, receipt_id and provenance; there is no output field. File content can begin with a receipt banner. The final expression is the result. call_tools([{{'name': ..., 'arguments': {{...}}}}, ...]) admits one to four calls together and returns their results in input order. call_tool('codemode', {{'source': ..., 'inputs': {{...}}}}) runs a nested script, at most four script levels. Nested codemode returns a tool result whose content is JSON text with status and value (or error); it does not return the inner value directly. Keep scripts free of imports: imported module state cannot currently be checkpointed across tool calls. Use string operations for text parsing. No host I/O, time, randomness or async. Print output is discarded. Each outer call, nested script and inner attempt charges the tool budget. All levels share at most 32 inner calls and 64 interpreter invocations including recovery. Available tools: {}", serde_json::to_string(&catalog(registry)).expect("tool schemas serialize")),
         parameters: json!({"type":"object","properties":{"source":{"type":"string","maxLength":32768},"inputs":{"type":"object"}},"required":["source"],"additionalProperties":false}),
     });
     schemas

@@ -35,6 +35,7 @@ const DEFAULT_MAX_TOKENS: u64 = 4096;
 struct RigTurn {
     choice: OneOrMany<AssistantContent>,
     usage: rig_core::completion::Usage,
+    stop: Option<String>,
 }
 
 type CompleterFut = Pin<Box<dyn Future<Output = Result<RigTurn, CompletionError>> + Send>>;
@@ -92,7 +93,7 @@ fn anthropic_additional_params(cfg: &ProviderConfig) -> Option<serde_json::Value
 }
 
 /// Erase a concrete Rig `CompletionModel` into a boxed async closure that yields a [`RigTurn`].
-fn make_completer<M>(model: M) -> Completer
+fn make_completer<M>(model: M, stop_reason: fn(&M::Response) -> Option<String>) -> Completer
 where
     M: CompletionModel + Clone + Send + Sync + 'static,
 {
@@ -101,6 +102,7 @@ where
         Box::pin(async move {
             let resp = model.completion(req).await?;
             Ok(RigTurn {
+                stop: stop_reason(&resp.raw_response),
                 choice: resp.choice,
                 usage: resp.usage,
             })
@@ -234,7 +236,10 @@ impl RigModel {
                 if cfg.prompt_caching {
                     model = model.with_prompt_caching().with_automatic_caching();
                 }
-                (make_completer(model.clone()), make_streamer(model))
+                (
+                    make_completer(model.clone(), |r| r.stop_reason.clone()),
+                    make_streamer(model),
+                )
             }
             ProviderType::OpenAiCompat => {
                 let base_url = cfg
@@ -247,7 +252,12 @@ impl RigModel {
                     .build()
                     .map_err(|e| ModelError::Request(format!("openai client: {e}")))?;
                 let model = client.completion_model(&cfg.model);
-                (make_completer(model.clone()), make_streamer(model))
+                (
+                    make_completer(model.clone(), |r| {
+                        r.choices.first().map(|c| c.finish_reason.clone())
+                    }),
+                    make_streamer(model),
+                )
             }
             ProviderType::Mock => {
                 return Err(ModelError::Request(
@@ -418,10 +428,13 @@ fn to_turn(rt: RigTurn) -> Turn {
             _ => {}
         }
     }
-    let stop = if tool_calls.is_empty() {
-        StopReason::EndTurn
-    } else {
-        StopReason::ToolUse
+    let stop = match rt.stop.as_deref() {
+        Some("max_tokens" | "length") => StopReason::MaxTokens,
+        Some("end_turn" | "stop" | "stop_sequence") => StopReason::EndTurn,
+        Some("tool_use" | "tool_calls" | "function_call") => StopReason::ToolUse,
+        Some(other) => StopReason::Other(other.to_string()),
+        None if tool_calls.is_empty() => StopReason::EndTurn,
+        None => StopReason::ToolUse,
     };
     let usage = Some(usage_from_rig(&rt.usage));
     Turn {
@@ -558,6 +571,23 @@ mod tests {
         assert_eq!(streamed_stop(false, 9000, None), StopReason::EndTurn);
         // Usage a provider did not report (zero) never reads as a cut-off.
         assert_eq!(streamed_stop(false, 0, Some(0)), StopReason::EndTurn);
+    }
+
+    #[test]
+    fn buffered_response_preserves_provider_stop_reason() {
+        for (reason, expected) in [
+            ("max_tokens", StopReason::MaxTokens),
+            ("length", StopReason::MaxTokens),
+            ("content_filter", StopReason::Other("content_filter".into())),
+            ("end_turn", StopReason::EndTurn),
+        ] {
+            let turn = to_turn(RigTurn {
+                choice: OneOrMany::one(AssistantContent::text("partial reply")),
+                usage: Default::default(),
+                stop: Some(reason.into()),
+            });
+            assert_eq!(turn.stop, expected);
+        }
     }
 
     #[test]

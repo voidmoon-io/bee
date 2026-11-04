@@ -6,12 +6,12 @@
 //! [`run_episode`] builds the sandbox (a real bee scope under `--features enforce`), materializes
 //! the workdir, runs the loop, and tears down.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use time::OffsetDateTime;
 
 use crate::metrics::{stop_label, Recorder};
-use crate::provider::{Conversation, Message, Model, ModelError, Turn, Usage};
+use crate::provider::{Conversation, Message, Model, Turn, Usage};
 use crate::sandbox::{self, Sandbox};
 use crate::scenario::{Scenario, ScoringMode, WorkdirSetup};
 use crate::tools::ToolRegistry;
@@ -187,39 +187,12 @@ pub(crate) async fn complete_with_retry(
     max_retries: u32,
     deadline: Instant,
 ) -> Result<Turn, String> {
-    let mut attempt: u32 = 0;
-    loop {
-        if Instant::now() >= deadline {
-            return Err("episode deadline exceeded".into());
-        }
-        let reply = tokio::time::timeout_at(deadline.into(), model.complete(convo, schemas))
-            .await
-            .map_err(|_| "episode deadline exceeded".to_string())?;
-        match reply {
-            Ok(turn) => return Ok(turn),
-            Err(ModelError::Transient {
-                status,
-                retry_after,
-            }) => {
-                if attempt >= max_retries {
-                    return Err(format!(
-                        "transient provider error (status {status}) after {attempt} retries"
-                    ));
-                }
-                let backoff = retry_after
-                    .unwrap_or_else(|| Duration::from_millis(200 * 2u64.pow(attempt.min(6))));
-                if backoff >= deadline.saturating_duration_since(Instant::now()) {
-                    tokio::time::sleep_until(deadline.into()).await;
-                    return Err("episode deadline exceeded".into());
-                }
-                tokio::time::sleep(backoff).await;
-                attempt += 1;
-            }
-            Err(ModelError::Auth) => return Err("provider authentication failed".to_string()),
-            Err(ModelError::Request(m)) => return Err(format!("provider rejected request: {m}")),
-            Err(ModelError::Decode(m)) => return Err(format!("could not decode response: {m}")),
-        }
-    }
+    crate::provider::retry::request(
+        || model.complete(convo, schemas),
+        max_retries,
+        Some(deadline),
+    )
+    .await
 }
 
 /// Run the loop over a ready sandbox. The sandbox is `&mut` so audit can be drained between calls.

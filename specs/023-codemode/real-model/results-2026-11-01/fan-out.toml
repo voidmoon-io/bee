@@ -1,0 +1,9 @@
+[scenario]
+id = "fan-out"
+policy_path = "/dev/null"
+system_prompt = "You are validating Bee codemode. Use only the supplied fixtures and tools. Inspect real results; never invent observations. Submit harness feedback with the feedback tool before your final answer."
+task = "Use codemode to efficiently read all three independent files alpha.txt, beta.txt, gamma.txt and return their bug counts in that order, plus the total. Choose the appropriate batching API from its description. All fixture files are under /home/jg/git/bee/specs/023-codemode/real-model/fixtures. Afterwards call feedback with a concrete observation about the harness/tools, then summarize in prose."
+turn_limit = 5
+timeout_secs = 120
+tools = ["read_file", "feedback"]
+finish = false

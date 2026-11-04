@@ -1,6 +1,6 @@
 # Validate codemode with a real model
 
-Status: ready-for-human (needs provider keys and spend)
+Status: done
 
 ## Problem
 
@@ -19,3 +19,13 @@ misuse it.
 ## Acceptance
 
 A short results note listing the model, scenario, outcome, and any description changes.
+
+## Results (2026-11-01)
+
+Validated `claude-opus-4-8` through `bee run --host` with durable sessions.
+Multi-file reading, `call_tools` fan-out and the 32-call limit probe passed.
+Initial nesting timed out after imported-state serialization errors and guessing
+`output` instead of `content`. Clarified the tool description; nesting rerun passed.
+Four successful feedback calls are retained with receipts. See
+`specs/023-codemode/real-model/results.md`, raw transcripts and `feedback.json`.
+Imported-state checkpoint support remains tracked separately in issue 08.

@@ -45,11 +45,13 @@ fn policy(root: &Path, worker: bool, cat: bool) -> bee_core::Policy {
     bee_core::Policy::from_toml(&format!("[policy]\nname='codemode-kernel'\nmode='enforce'\n[policy.exec]\nallow={}\n[policy.filesystem]\n{}='deny'\n",json!(allow),json!(root.join("denied").to_string_lossy()))).unwrap()
 }
 fn sandbox(root: &Path, worker: bool, cat: bool) -> Sandbox {
+    sandbox_with_policy(policy(root, worker, cat))
+}
+fn sandbox_with_policy(policy: bee_core::Policy) -> Sandbox {
     use bee_userspace::{EnforcementPlan, Engine, ScopeMode, SystemResolver};
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     substrate();
-    let policy = policy(root, worker, cat);
     let plan = EnforcementPlan::prepare(
         &policy.compile(&SystemResolver::current()).unwrap(),
         ScopeMode::Enforce,
@@ -1200,4 +1202,39 @@ async fn overlap_stop(deadline: bool) {
     assert!(sibling_child.try_wait().unwrap().is_none());
     sibling.teardown().unwrap();
     sibling_child.wait().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires root and BPF-LSM kernel"]
+async fn kernel_codemode_symlink_exec_warning() {
+    let root = tempfile::tempdir().unwrap();
+    prepare(root.path());
+    let shell = bee_userspace::spawn::resolve_in_path("sh").unwrap();
+    let target = shell.canonicalize().unwrap();
+    assert_ne!(shell, target, "VM fixture requires a symlinked sh");
+    let mut policy = policy(root.path(), true, false);
+    policy
+        .exec
+        .allow
+        .retain(|entry| entry != &target.display().to_string());
+    policy.exec.allow.push(shell.display().to_string());
+    let compiled = policy
+        .compile(&bee_userspace::SystemResolver::current())
+        .unwrap();
+    assert!(bee_userspace::resolve::exec_path_warnings(&compiled)
+        .iter()
+        .any(|warning| warning.contains(&target.display().to_string())));
+    let mut sb = sandbox_with_policy(policy);
+    let path = scope(&sb);
+    let report = run(
+        root.path(),
+        "call_tool('bash', {'command': 'printf SYMLINK-SHOULD-DENY'})",
+        &mut sb,
+    )
+    .await;
+    let call = &report.turns[0].calls[0];
+    assert!(call.result.is_error, "{:?}", call.result);
+    assert!(denied(&call.audit, "exec"), "{:?}", call.audit);
+    removed_invocations(&path);
+    sb.teardown().unwrap();
 }

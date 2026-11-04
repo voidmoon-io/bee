@@ -18,3 +18,4 @@ kernel_codemode_batch_kill_recovery
 kernel_codemode_overlap_barrier
 kernel_codemode_overlap_cancel
 kernel_codemode_overlap_deadline
+kernel_codemode_symlink_exec_warning

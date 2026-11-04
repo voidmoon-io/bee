@@ -1,0 +1,9 @@
+apiVersion: ax.io/v1alpha1
+kind: Task
+metadata:
+  name: bee-smoke-20261104-v2
+  atespace: default
+spec:
+  image: ghcr.io/voidmoon-io/ax/ax-task-runner@sha256:427defcc557a518567735ab8630f9768e015ac31dff259e684b5eb5b899239a4
+  command: ["sleep", "3600"]
+  debug: true

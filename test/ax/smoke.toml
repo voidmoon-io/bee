@@ -1,0 +1,9 @@
+[scenario]
+id = "ax-feedback-smoke"
+policy_path = "/dev/null"
+system_prompt = "Use tools to perform the task and report observed results."
+task = "Read /workspace/bee-smoke/fixture.txt, report the value, and submit concrete feedback about the harness."
+turn_limit = 6
+timeout_secs = 90
+finish = false
+tools = ["read_file", "feedback"]

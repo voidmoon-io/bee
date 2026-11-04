@@ -94,6 +94,8 @@ path = "src/lib.rs"
 
 [features]
 default = ["tui"]
+# Official hosted System One decision APIs.
+decisions = ["dep:reqwest"]
 # Local durable session storage; the pure decision core has no SQLite dependency.
 durable-store = ["dep:rusqlite", "dep:sha2", "dep:getrandom"]
 durable-sessions = ["durable-store", "findings", "tokio/signal"]
@@ -215,6 +217,7 @@ bee-core = { workspace = true }
 bee-userspace = { workspace = true }
 
 rig-core = { workspace = true }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream"], optional = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 async-stream = "0.3"
@@ -488,3 +491,8 @@ required-features = ["intercept", "test-support"]
 name = "intercept_latency"
 harness = false
 required-features = ["intercept"]
+
+[[test]]
+name = "rig_runner_spike"
+path = "tests/rig_runner_spike.rs"
+required-features = ["test-support"]

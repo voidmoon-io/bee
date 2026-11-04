@@ -12,6 +12,27 @@ use std::path::{Path, PathBuf};
 
 use bee_core::{CompileError, ExecIdentity, Resolver};
 
+/// Diagnose path rules that differ from the path the kernel sees. This is advisory:
+/// validation never rewrites a grant, and pinned rules already identify the target inode.
+pub fn exec_path_warnings(policy: &bee_core::CompiledPolicy) -> Vec<String> {
+    use std::os::unix::ffi::OsStrExt;
+
+    policy.exec.iter().filter(|rule| !rule.pin_inode).filter_map(|rule| {
+        let path = Path::new(std::ffi::OsStr::from_bytes(&rule.path));
+        match path.canonicalize() {
+            Ok(target) if target != path => Some(format!(
+                "exec allow path '{}' resolves to '{}'; the kernel matches the resolved file path, so this entry may deny execution. Explicitly allow '{}' if intended (also permits executing that target directly). The rule is unchanged.",
+                path.display(), target.display(), target.display()
+            )),
+            Ok(_) => None,
+            Err(error) => Some(format!(
+                "cannot inspect exec allow path '{}': {error}; resolved-path matching could not be checked. The rule is unchanged.",
+                path.display()
+            )),
+        }
+    }).collect()
+}
+
 /// Convert a libc `st_dev` into the kernel's `s_dev` encoding — a **conversion, not a cast**.
 ///
 /// glibc packs a 64-bit `dev_t` with the major split across two ranges; the kernel's `s_dev` is the

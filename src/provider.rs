@@ -13,6 +13,7 @@ use thiserror::Error;
 pub mod framing;
 pub mod limits;
 pub mod mock_model;
+pub(crate) mod retry;
 pub mod rig_model;
 
 /// Where a tool result's content came from — which decides how it is framed for the model

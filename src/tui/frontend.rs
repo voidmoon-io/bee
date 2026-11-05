@@ -1,12 +1,13 @@
 //! Front-end selection and honest fallback (008-grid-tui, US3 T033; contracts/modes-and-cli.md).
 //!
-//! `--tui` is a *request*, not a guarantee: piping the output, a `TERM=dumb` terminal, or a window
-//! below the hard floor all make a full-screen UI the wrong answer. [`choose`] is the whole decision,
+//! The full-screen UI is the default front-end, but not a guarantee: piping the output, a `TERM=dumb`
+//! terminal, or a window below the hard floor all make it the wrong answer. [`choose`] is the whole decision,
 //! kept **pure** (every input passed in, nothing read from the environment) so the matrix is unit
 //! testable without a terminal.
 //!
-//! The rule the contract insists on: `--tui` must never silently "do nothing". Whenever a requested
-//! full-screen session degrades to inline, [`Choice::note`] carries a one-line reason for stderr.
+//! The rule the contract insists on: an explicit `--tui` must never silently "do nothing". Whenever
+//! a requested full-screen session degrades to inline, [`Choice::note`] carries a one-line reason
+//! for stderr.
 
 /// Which front-end to run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,7 +22,7 @@ pub enum Frontend {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Choice {
     pub frontend: Frontend,
-    /// `Some` only when `--tui` was requested but could not be honored.
+    /// `Some` only when `--tui` was requested explicitly but could not be honored.
     pub note: Option<String>,
 }
 
@@ -45,7 +46,8 @@ pub const HARD_FLOOR: (u16, u16) = (40, 10);
 
 /// Decide the front-end (contracts/modes-and-cli.md `choose_frontend`).
 ///
-/// * `tui` / `no_tui` — the CLI flags (they conflict, so at most one is set).
+/// * `tui` / `no_tui` — the CLI flags (they conflict, so at most one is set). Full screen is the
+///   default; `tui` only makes a fallback explain itself.
 /// * `stdout_is_tty` — false when piped or redirected.
 /// * `term` — the `TERM` environment value.
 /// * `size` — the terminal's `(cols, rows)`.
@@ -62,23 +64,29 @@ pub fn choose(
     if no_tui {
         return Choice::plain(Frontend::Inline);
     }
-    if !tui {
-        // Default for this release is the inline REPL — opt-in full-screen (spec Assumptions).
-        return Choice::plain(Frontend::Inline);
-    }
+    // The full-screen UI is the default. A terminal that cannot host it falls back to inline: with a
+    // note when `--tui` asked for it explicitly, silently otherwise — piping `bee repl` is ordinary,
+    // not a degraded request.
+    let fallback = |note: String| {
+        if tui {
+            Choice::inline(note)
+        } else {
+            Choice::plain(Frontend::Inline)
+        }
+    };
     if !stdout_is_tty {
-        return Choice::inline(
-            "--tui ignored: stdout is not a terminal (piped or redirected); running inline",
+        return fallback(
+            "--tui ignored: stdout is not a terminal (piped or redirected); running inline".into(),
         );
     }
     if term.is_some_and(|t| t.eq_ignore_ascii_case("dumb")) {
-        return Choice::inline(
-            "--tui ignored: TERM=dumb cannot drive a full-screen UI; running inline",
+        return fallback(
+            "--tui ignored: TERM=dumb cannot drive a full-screen UI; running inline".into(),
         );
     }
     let (cols, rows) = size;
     if cols < HARD_FLOOR.0 || rows < HARD_FLOOR.1 {
-        return Choice::inline(format!(
+        return fallback(format!(
             "--tui ignored: terminal is {cols}×{rows}, below the {}×{} minimum; running inline",
             HARD_FLOOR.0, HARD_FLOOR.1
         ));
@@ -91,22 +99,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_and_explicit_opt_out_are_inline_without_a_note() {
-        // No flags at all: inline is the default, and that is not a degradation worth a note.
+    fn the_default_is_full_screen_and_the_opt_out_is_inline() {
         assert_eq!(
             choose(false, false, true, Some("xterm"), (200, 60)),
-            Choice::plain(Frontend::Inline)
+            Choice::plain(Frontend::FullScreen)
         );
-        // --no-tui is a deliberate choice, so it is also silent.
-        assert_eq!(
-            choose(false, true, true, Some("xterm"), (200, 60)),
-            Choice::plain(Frontend::Inline)
-        );
-        // --no-tui wins even if --tui somehow also arrived.
-        assert_eq!(
-            choose(true, true, true, Some("xterm"), (200, 60)),
-            Choice::plain(Frontend::Inline)
-        );
+        // --no-tui is a deliberate choice, so it is silent — and wins even over --tui.
+        for tui in [false, true] {
+            assert_eq!(
+                choose(tui, true, true, Some("xterm"), (200, 60)),
+                Choice::plain(Frontend::Inline)
+            );
+        }
+    }
+
+    #[test]
+    fn an_unrequested_fallback_is_silent() {
+        // Piping `bee repl` (or a dumb or tiny terminal) without asking for --tui is not a
+        // degraded request, so it carries no note.
+        for c in [
+            choose(false, false, false, Some("xterm"), (200, 60)),
+            choose(false, false, true, Some("dumb"), (200, 60)),
+            choose(false, false, true, Some("xterm"), (10, 4)),
+        ] {
+            assert_eq!(c, Choice::plain(Frontend::Inline));
+        }
     }
 
     #[test]

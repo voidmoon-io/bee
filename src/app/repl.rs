@@ -64,10 +64,11 @@ pub struct ReplArgs {
     /// `--features mcp`.
     #[arg(long)]
     pub mcp_config: Option<PathBuf>,
-    /// Launch the full-screen TUI front-end. Requires building with `--features tui`.
+    /// Ask for the full-screen TUI, and say why if the terminal cannot host it. The TUI is already
+    /// the default on a capable terminal; this only makes a fallback explain itself.
     #[arg(long, conflicts_with = "no_tui")]
     pub tui: bool,
-    /// Force the inline REPL, overriding `--tui`.
+    /// Run the inline REPL instead of the full-screen TUI.
     #[arg(long)]
     pub no_tui: bool,
     /// How much screen the agent may claim: `none`, `panels` (default), `panels-wide`, or
@@ -497,8 +498,8 @@ fn print_banner(
     println!();
 }
 
-/// `--tui` is a request, not a command: piping, `TERM=dumb`, or a terminal below the hard floor all
-/// fall back to the inline REPL with a one-line note, so the request never silently does nothing.
+/// The full-screen TUI is the default. Piping, `TERM=dumb`, or a terminal below the hard floor fall
+/// back to the inline REPL — with a one-line note when `--tui` was asked for explicitly.
 fn choose_frontend(args: &ReplArgs) -> bool {
     #[cfg(feature = "tui")]
     {

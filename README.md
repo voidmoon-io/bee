@@ -83,14 +83,14 @@ that tools will run as hardened host processes with no kernel scope. See
 a way to prove a policy enforces with no agent in the picture — and needs a BPF-LSM kernel, so it
 fails closed on an ordinary host. `bee metrics` reports recorded usage, cost, and latency.
 
-### Full-screen TUI (optional)
+### Full-screen TUI
 
-`bee repl` runs the classic inline REPL by default. Build with the `tui` feature and pass `--tui` for
-a full-screen chat surface with model-owned live panels (008-grid-tui):
+`bee repl` opens a full-screen chat surface with model-owned live panels (008-grid-tui). Pass
+`--no-tui` for the classic inline REPL:
 
 ```bash
-cargo build --release --features tui
-./target/release/bee repl --provider <provider.toml> --tui        # --no-tui forces inline
+./target/release/bee repl --provider <provider.toml>              # full screen
+./target/release/bee repl --provider <provider.toml> --no-tui     # inline
 ```
 
 Durable sessions expose `codemode`: bounded Python composes registered tools with `call_tool`, admits up to four calls together with `call_tools`, and can nest scripts four levels deep. Every call keeps the normal consent, budget, receipt and recovery rules. See [implementation and limits](specs/023-codemode/implementation.md).
@@ -99,9 +99,9 @@ Visual scripts use **Python via Monty**, with bounded execution in a disposable 
 
 The agent can address a rendered widget to a named side panel with `render_to("metrics", widget)`
 (and `render_to_ttl` / `remove_panel` / `clear_panels` to manage them); an untargeted `render(widget)`
-still flows inline. `--tui` degrades honestly — piped output, `TERM=dumb`, or a terminal below 40×10
-fall back to the inline REPL with a one-line note. The feature is **off by default**, so the standard
-build pulls in no terminal backend.
+still flows inline. Piped output, `TERM=dumb`, or a terminal below 40×10 fall back to the inline REPL
+(with a one-line note if you passed `--tui` explicitly). The TUI is the `tui` cargo feature, on by
+default; `--no-default-features` builds without a terminal backend.
 
 Assistant replies render as **markdown** once the message finishes streaming — headings, emphasis,
 lists, links and code, styled through the active theme's semantic roles rather than a second palette.

@@ -58,10 +58,10 @@ fn exactly_at_the_floor_still_runs_full_screen() {
 }
 
 #[test]
-fn the_default_and_no_tui_are_inline_without_a_note() {
-    // Neither flag: inline is this release's default, not a degradation.
+fn the_default_is_full_screen_and_no_tui_is_inline_without_a_note() {
+    // Neither flag: the full-screen UI is the default on a capable terminal.
     let d = choose(false, false, true, Some("xterm"), CAPABLE);
-    assert_eq!(d.frontend, Frontend::Inline);
+    assert_eq!(d.frontend, Frontend::FullScreen);
     assert!(d.note.is_none());
 
     // --no-tui is deliberate, and wins over --tui.
@@ -72,6 +72,16 @@ fn the_default_and_no_tui_are_inline_without_a_note() {
         assert_eq!(c.frontend, Frontend::Inline);
         assert!(c.note.is_none(), "an explicit opt-out is not a fallback");
     }
+}
+
+#[test]
+fn piping_without_a_request_runs_inline_silently() {
+    let c = choose(false, false, false, Some("xterm"), CAPABLE);
+    assert_eq!(c.frontend, Frontend::Inline);
+    assert!(
+        c.note.is_none(),
+        "piping `bee repl` is ordinary, not a degraded request"
+    );
 }
 
 #[test]

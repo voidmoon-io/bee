@@ -202,6 +202,7 @@ pub(crate) fn kernel_sandbox(
     if let Some(p) = &prepared {
         compiled = p.tool_policy(compiled);
     }
+    let compiled = crate::tools::exec::tool_scope(compiled)?;
     let plan = EnforcementPlan::prepare(&compiled, ScopeMode::Enforce)
         .map_err(|e| format!("enforcement plan: {e}"))?;
     let mut engine = Engine::init().map_err(|e| format!("engine init: {e}"))?;

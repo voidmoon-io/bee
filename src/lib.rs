@@ -32,9 +32,11 @@ pub mod concurrent;
 pub mod config;
 // Context budget and compaction for long runs (025-long-run-resilience).
 pub mod context;
+// The shared in-scope file worker behind `read_file` and `edit_file`.
 pub mod episode;
 #[cfg(feature = "findings")]
 pub mod evidence;
+pub mod fileops;
 // The finding ledger (016-native-tools US2). Gated: it is the substrate the security tools write
 // into, and a build that selects none of them has nothing to record.
 #[cfg(feature = "findings")]

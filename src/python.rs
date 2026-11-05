@@ -60,12 +60,7 @@ pub enum Response {
 }
 
 pub fn executable() -> Result<PathBuf, String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    // Cargo integration/unit harnesses live beside the application under target/*/deps.
-    if exe.parent().is_some_and(|p| p.ends_with("deps")) {
-        return Ok(exe.parent().unwrap().parent().unwrap().join("bee"));
-    }
-    Ok(exe)
+    crate::tools::exec::bee_executable()
 }
 
 pub async fn execute(request: Request, sandbox: &crate::Sandbox) -> Result<Response, String> {

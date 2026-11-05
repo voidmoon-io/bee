@@ -42,6 +42,7 @@ pub(crate) fn tool(name: &str, icpt: Option<Interceptor>) -> Option<Box<dyn Tool
 }
 
 /// The refusal every HTTP tool gives when there is no live proxy.
+#[allow(clippy::result_large_err)] // the refusal is the tool's own result
 pub(crate) async fn live(icpt: &Option<Interceptor>) -> Result<&Interceptor, ToolResult> {
     match icpt {
         None => Err(unavailable(

@@ -1,0 +1,18 @@
+[
+  {
+    "scenario": "multi-file",
+    "exit_code": 0
+  },
+  {
+    "scenario": "fan-out",
+    "exit_code": 0
+  },
+  {
+    "scenario": "nested",
+    "exit_code": 3
+  },
+  {
+    "scenario": "limit",
+    "exit_code": 0
+  }
+]

@@ -20,17 +20,21 @@ fn substrate() {
         "active BPF LSM required"
     );
 }
-fn policy(root: &Path, worker: bool, cat: bool) -> bee_core::Policy {
-    let mut allow = vec![
-        "ls".to_string(),
-        "sleep".to_string(),
-        "tee".to_string(),
+fn policy(root: &Path, worker: bool, sh: bool) -> bee_core::Policy {
+    // `worker` allows the bee binary: the Python worker and the `file-worker` behind every file
+    // tool, which need nothing else (`kernel_codemode_file_tools_need_no_exec_rule`). `sh` comes with `cat`
+    // for the shell commands the `bash` cases run.
+    let mut allow = vec!["sleep".to_string()];
+    if sh {
+        allow.push("cat".into());
         // Unpinned exec rules match the executed file's path; `sh` is a symlink (e.g. to dash).
-        std::fs::canonicalize(bee_userspace::spawn::resolve_in_path("sh").unwrap())
-            .unwrap()
-            .to_string_lossy()
-            .into_owned(),
-    ];
+        allow.push(
+            std::fs::canonicalize(bee_userspace::spawn::resolve_in_path("sh").unwrap())
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        );
+    }
     if worker {
         allow.push(
             bee::python::executable()
@@ -39,22 +43,24 @@ fn policy(root: &Path, worker: bool, cat: bool) -> bee_core::Policy {
                 .into_owned(),
         );
     }
-    if cat {
-        allow.push("cat".into());
-    }
     bee_core::Policy::from_toml(&format!("[policy]\nname='codemode-kernel'\nmode='enforce'\n[policy.exec]\nallow={}\n[policy.filesystem]\n{}='deny'\n",json!(allow),json!(root.join("denied").to_string_lossy()))).unwrap()
 }
-fn sandbox(root: &Path, worker: bool, cat: bool) -> Sandbox {
-    use bee_userspace::{EnforcementPlan, Engine, ScopeMode, SystemResolver};
+fn sandbox(root: &Path, worker: bool, sh: bool) -> Sandbox {
+    sandbox_with_policy(policy(root, worker, sh))
+}
+fn sandbox_with_policy(policy: bee_core::Policy) -> Sandbox {
+    sandbox_with_compiled(
+        policy
+            .compile(&bee_userspace::SystemResolver::current())
+            .unwrap(),
+    )
+}
+fn sandbox_with_compiled(compiled: bee_core::CompiledPolicy) -> Sandbox {
+    use bee_userspace::{EnforcementPlan, Engine, ScopeMode};
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     substrate();
-    let policy = policy(root, worker, cat);
-    let plan = EnforcementPlan::prepare(
-        &policy.compile(&SystemResolver::current()).unwrap(),
-        ScopeMode::Enforce,
-    )
-    .unwrap();
+    let plan = EnforcementPlan::prepare(&compiled, ScopeMode::Enforce).unwrap();
     let mut engine = Engine::init().unwrap();
     let scope = engine
         .create_scope(
@@ -147,8 +153,13 @@ fn source(root: &Path, mode: &str) -> String {
             format!("a = call_tool('write_file', {{'path': {}, 'content': {}}})\ncall_tool('write_file', {{'path': {}, 'content': a['content']}})", json!(first), json!(content), json!(root.join("second")))
         },
         "cpu"=>"while True: pass".into(),
-        "blocked"=>format!("call_tool('read_file', {{'path': {}}})\ncall_tool('read_file', {{'path': {allowed}}})",json!(root.join("fifo").to_str().unwrap())),
-        "batch"=>format!("r = call_tools([{{'name': 'read_file', 'arguments': {{'path': {allowed}}}}}, {{'name': 'read_file', 'arguments': {{'path': {}}}}}])\n[x['content'] for x in r]", json!(root.join("fifo"))),
+        // A never-replay call blocked on the FIFO (write-open waits for a reader), so recovery
+        // after a kill must report it unresolved rather than run it again.
+        "blocked"=>format!("call_tool('write_file', {{'path': {}, 'content': 'x'}})\ncall_tool('read_file', {{'path': {allowed}}})",json!(root.join("fifo").to_str().unwrap())),
+        // The same, but a read: retry-safe, so recovery runs it again.
+        "blocked-read"=>format!("a = call_tool('read_file', {{'path': {}}})\nb = call_tool('read_file', {{'path': {allowed}}})\n[a['content'], b['content']]",json!(root.join("fifo").to_str().unwrap())),
+        "batch"=>format!("r = call_tools([{{'name': 'read_file', 'arguments': {{'path': {allowed}}}}}, {{'name': 'write_file', 'arguments': {{'path': {}, 'content': 'x'}}}}])\n[x['content'] for x in r]", json!(root.join("fifo"))),
+        "two-sh"=>"a = call_tool('bash', {'command': 'true'})\nb = call_tool('bash', {'command': 'true'})\n[a['is_error'], b['is_error']]".into(),
         "two"=>format!("a = call_tool('read_file', {{'path': {allowed}}})\nb = call_tool('read_file', {{'path': {allowed}}})\n[a['content'], b['content']]"),
         _=>panic!("unknown fixture"),
     }
@@ -261,6 +272,73 @@ async fn kernel_codemode_file_policy() {
     sb.teardown().unwrap();
 }
 
+/// A tool scope whose exec allowlist names neither bee nor any coreutil still runs every file tool
+/// — from a codemode script, whose Python worker is bee too — because every tool scope is compiled
+/// through `tool_scope`. The filesystem rules still decide: the denied read is refused by the LSM.
+#[tokio::test]
+#[ignore = "requires root and BPF-LSM kernel"]
+async fn kernel_codemode_file_tools_need_no_exec_rule() {
+    let root = tempfile::tempdir().unwrap();
+    prepare(root.path());
+    let policy = bee_core::Policy::from_toml(&format!("[policy]\nname='file-tools'\nmode='enforce'\n[policy.exec]\nallow=['sleep']\n[policy.filesystem]\n{}='deny'\n",json!(root.path().join("denied").to_string_lossy()))).unwrap();
+    let compiled = policy
+        .compile(&bee_userspace::SystemResolver::current())
+        .unwrap();
+    let mut sb = sandbox_with_compiled(bee::tools::exec::tool_scope(compiled).unwrap());
+    let path = scope(&sb);
+    let allowed = json!(root.path().join("allowed"));
+    let secret = json!(root.path().join("denied/secret"));
+    let code = format!("e = call_tool('edit_file', {{'path': {allowed}, 'old_string': 'BEFORE', 'new_string': 'AFTER'}})\nr = call_tool('read_file', {{'path': {allowed}}})\nw = call_tool('write_file', {{'path': {}, 'content': 'x'}})\nl = call_tool('list_directory', {{'path': {}}})\nd = call_tool('read_file', {{'path': {secret}}})\ns1 = call_tool('ensure_line', {{'path': {allowed}, 'line': 'tail'}})\ns2 = call_tool('ensure_line', {{'path': {allowed}, 'line': 'tail'}})\nx = call_tool('ensure_line', {{'path': {secret}, 'line': 'x'}})\n[e['is_error'], 'AFTER' in r['content'], w['is_error'], 'new' in l['content'], d['is_error'], 'changed' in s1['content'], 'unchanged' in s2['content'], x['is_error']]", json!(root.path().join("new")), json!(root.path()));
+    let session = session(root.path(), None).await;
+    let mut registry = bee::tools::registry_for(
+        &bee::tools::DEFAULT_TOOLS
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>(),
+        None,
+    );
+    registry.enable_evidence(session.evidence());
+    let report = session
+        .run(
+            "request",
+            Some("go"),
+            "system",
+            limits(),
+            &model(&code),
+            &mut registry,
+            &mut sb,
+            &Output,
+            None,
+        )
+        .await
+        .unwrap()
+        .0;
+    let calls = &report.turns[0].calls;
+    assert_eq!(calls.len(), 9, "{calls:?}");
+    for i in [4, 7] {
+        assert!(denied(&calls[i].audit, "file_open"), "{:?}", calls[i].audit);
+    }
+    assert!(
+        calls[..8].iter().all(|c| !denied(&c.audit, "exec")),
+        "{calls:?}"
+    );
+    let value: serde_json::Value = serde_json::from_str(&calls[8].result.content).unwrap();
+    assert_eq!(
+        value["value"],
+        json!([false, true, false, true, true, true, true, true])
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("allowed")).unwrap(),
+        "AFTER\ntail\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("denied/secret")).unwrap(),
+        "NEVER-LEAK"
+    );
+    removed_invocations(&path);
+    sb.teardown().unwrap();
+}
+
 #[tokio::test]
 #[ignore = "requires root and BPF-LSM kernel"]
 async fn kernel_codemode_worker_exec_denied() {
@@ -291,7 +369,7 @@ async fn kernel_codemode_inner_exec_denied() {
     prepare(root.path());
     let mut sb = sandbox(root.path(), true, false);
     let path = scope(&sb);
-    let report = run(root.path(), &source(root.path(), "two"), &mut sb).await;
+    let report = run(root.path(), &source(root.path(), "two-sh"), &mut sb).await;
     let calls = &report.turns[0].calls;
     assert_eq!(calls.len(), 3, "{calls:?}");
     for call in &calls[..2] {
@@ -373,8 +451,8 @@ async fn kernel_codemode_cancel_child() {
     let started = Instant::now();
     let (report, _) = loop {
         tokio::select! { result=&mut future=>break result.unwrap(), _=tokio::time::sleep(Duration::from_millis(5))=>{
-            assert!(started.elapsed()<Duration::from_secs(10),"cat did not start");
-            if !cancelled && named_process(&path,"cat").is_some() { session.cancel().unwrap();cancelled=true; }
+            assert!(started.elapsed()<Duration::from_secs(10),"the blocked worker did not start");
+            if !cancelled && named_process(&path,"file-worker").is_some() { session.cancel().unwrap();cancelled=true; }
         } }
     };
     assert!(cancelled);
@@ -560,12 +638,12 @@ async fn kernel_codemode_unknown_child() {
     let root = tempfile::tempdir().unwrap();
     prepare(root.path());
     let (mut child, old) = start(root.path(), "blocked").await;
-    wait_for(|| named_process(&old, "cat").is_some()).await;
+    wait_for(|| named_process(&old, "file-worker").is_some()).await;
     child.0.kill().unwrap();
     child.0.wait().unwrap();
     assert!(
         !processes(&old).is_empty(),
-        "cat did not survive the parent"
+        "the blocked worker did not survive the parent"
     );
     let mut sb = sandbox(root.path(), true, true);
     let session = session(root.path(), None).await;
@@ -597,6 +675,49 @@ async fn kernel_codemode_unknown_child() {
             .charged(WorkKind::Tool),
         2
     );
+    sb.teardown().unwrap();
+    remove_empty(&old);
+}
+
+/// A read is retry-safe: after the supervisor is killed mid-read, recovery confirms the old worker
+/// is gone and runs the read again, and the script completes instead of stopping unresolved.
+#[tokio::test]
+#[ignore = "requires root and BPF-LSM kernel"]
+async fn kernel_codemode_read_retried_after_kill() {
+    let root = tempfile::tempdir().unwrap();
+    prepare(root.path());
+    let (mut child, old) = start(root.path(), "blocked-read").await;
+    wait_for(|| named_process(&old, "file-worker").is_some()).await;
+    child.0.kill().unwrap();
+    child.0.wait().unwrap();
+    // The retry must not block: the FIFO becomes an ordinary file.
+    std::fs::remove_file(root.path().join("fifo")).unwrap();
+    std::fs::write(root.path().join("fifo"), "RETRIED").unwrap();
+    let mut sb = sandbox(root.path(), true, true);
+    let session = session(root.path(), None).await;
+    let mut registry = registry(&session);
+    let (report, _) = session
+        .run(
+            "request",
+            None,
+            "system",
+            limits(),
+            &model(&source(root.path(), "blocked-read")),
+            &mut registry,
+            &mut sb,
+            &Output,
+            None,
+        )
+        .await
+        .unwrap();
+    empty(&old);
+    let calls = &report.turns[0].calls;
+    let last: serde_json::Value =
+        serde_json::from_str(&calls.last().unwrap().result.content).unwrap();
+    let value = last["value"].as_array().expect("script completed");
+    assert!(value[0].as_str().unwrap().ends_with("RETRIED"), "{value:?}");
+    assert!(value[1].as_str().unwrap().ends_with("BEFORE"), "{value:?}");
+    removed_invocations(&scope(&sb));
     sb.teardown().unwrap();
     remove_empty(&old);
 }
@@ -666,7 +787,7 @@ async fn kernel_codemode_write_recovery() {
             "write-lost" => {
                 std::fs::read_to_string(root.path().join("allowed")).is_ok_and(|s| s == "LOST")
             }
-            _ => named_process(&old, "tee").is_some(),
+            _ => named_process(&old, "file-worker").is_some(),
         })
         .await;
         child.0.kill().unwrap();
@@ -757,7 +878,7 @@ async fn kernel_codemode_cancel_write() {
     let (report, _) = loop {
         tokio::select! { result=&mut future=>break result.unwrap(), _=tokio::time::sleep(Duration::from_millis(5))=>{
             assert!(started.elapsed()<Duration::from_secs(10),"tee did not start");
-            if !cancelled && named_process(&path,"tee").is_some() { session.cancel().unwrap();cancelled=true; }
+            if !cancelled && named_process(&path,"file-worker").is_some() { session.cancel().unwrap();cancelled=true; }
         } }
     };
     assert!(cancelled);
@@ -965,8 +1086,8 @@ async fn kernel_codemode_nested_cancel() {
         let started = Instant::now();
         let (report, _) = loop {
             tokio::select! { result=&mut future=>break result.unwrap(), _=tokio::time::sleep(Duration::from_millis(5))=>{
-                assert!(started.elapsed()<Duration::from_secs(10),"cat did not start");
-                if !cancelled && named_process(&path,"cat").is_some() { session.cancel().unwrap();cancelled=true; }
+                assert!(started.elapsed()<Duration::from_secs(10),"the blocked worker did not start");
+                if !cancelled && named_process(&path,"file-worker").is_some() { session.cancel().unwrap();cancelled=true; }
             } }
         };
         assert!(cancelled);
@@ -1011,7 +1132,7 @@ async fn kernel_codemode_batch_kill_recovery() {
     child.0.kill().unwrap();
     child.0.wait().unwrap();
     assert!(
-        named_process(&old, "cat").is_some(),
+        named_process(&old, "file-worker").is_some(),
         "running sibling must survive until recovery"
     );
     std::fs::write(root.path().join("allowed"), "AFTER").unwrap();
@@ -1200,4 +1321,39 @@ async fn overlap_stop(deadline: bool) {
     assert!(sibling_child.try_wait().unwrap().is_none());
     sibling.teardown().unwrap();
     sibling_child.wait().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires root and BPF-LSM kernel"]
+async fn kernel_codemode_symlink_exec_warning() {
+    let root = tempfile::tempdir().unwrap();
+    prepare(root.path());
+    let shell = bee_userspace::spawn::resolve_in_path("sh").unwrap();
+    let target = shell.canonicalize().unwrap();
+    assert_ne!(shell, target, "VM fixture requires a symlinked sh");
+    let mut policy = policy(root.path(), true, false);
+    policy
+        .exec
+        .allow
+        .retain(|entry| entry != &target.display().to_string());
+    policy.exec.allow.push(shell.display().to_string());
+    let compiled = policy
+        .compile(&bee_userspace::SystemResolver::current())
+        .unwrap();
+    assert!(bee_userspace::resolve::exec_path_warnings(&compiled)
+        .iter()
+        .any(|warning| warning.contains(&target.display().to_string())));
+    let mut sb = sandbox_with_policy(policy);
+    let path = scope(&sb);
+    let report = run(
+        root.path(),
+        "call_tool('bash', {'command': 'printf SYMLINK-SHOULD-DENY'})",
+        &mut sb,
+    )
+    .await;
+    let call = &report.turns[0].calls[0];
+    assert!(call.result.is_error, "{:?}", call.result);
+    assert!(denied(&call.audit, "exec"), "{:?}", call.audit);
+    removed_invocations(&path);
+    sb.teardown().unwrap();
 }

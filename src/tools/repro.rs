@@ -87,6 +87,7 @@ struct Prepared {
     worker: std::path::PathBuf,
 }
 impl ReproRun {
+    #[allow(clippy::result_large_err)] // ToolResult is the caller's own return value
     async fn prepare(&self, arguments: serde_json::Value) -> Result<Prepared, ToolResult> {
         let plan: crate::reproduction::Plan = serde_json::from_value(arguments)
             .map_err(|e| ToolResult::invalid_args("repro_run", e))?;

@@ -97,6 +97,10 @@ enum Cmd {
     /// tool uses to keep the library search under enforcement.
     #[command(hide = true)]
     SearchWorker(bee::search::SearchArgs),
+    /// Internal: serve one `read_file` / `edit_file` request (JSON on stdin) inside the scope. Same
+    /// seam as `search-worker`: every open is mediated by the LSM, never done by the harness.
+    #[command(hide = true)]
+    FileWorker,
     /// Internal: run a structural (tree-sitter) search and print `path:line:text`. Same seam as
     /// `search-worker` and for the same reason — the `ast_grep` tool execs this through the sandbox
     /// so the parse runs *inside the scope*, with every file it opens mediated by the LSM.
@@ -166,6 +170,11 @@ fn main() -> ExitCode {
             &command,
         ),
         Cmd::SearchWorker(args) => cmd_search_worker(&args),
+        Cmd::FileWorker => ExitCode::from(bee::fileops::run(
+            &mut std::io::stdin().lock(),
+            &mut std::io::stdout().lock(),
+            &mut std::io::stderr().lock(),
+        )),
         #[cfg(feature = "astgrep")]
         Cmd::AstgrepWorker(args) => cmd_astgrep_worker(&args),
         #[cfg(feature = "gitlog")]
@@ -296,6 +305,9 @@ fn cmd_validate(policy: &Path, parent: Option<&Path>) -> ExitCode {
             return ExitCode::from(EX_POLICY);
         }
     };
+    for warning in bee_userspace::resolve::exec_path_warnings(&compiled) {
+        eprintln!("warning: {warning}");
+    }
     // `[policy.http]` (019): compile the proxy scope too, and check the tool scope as a session
     // would install it — with the proxy loopback as its only network rule. The port is chosen at
     // session start; any value exercises the same plan.

@@ -1,0 +1,39 @@
+{
+  "version": 2,
+  "splits": {
+    "development": [
+      {
+        "id": "5c8aab57b4d9290f",
+        "family": "export_access",
+        "variant": "vulnerable",
+        "split": "development",
+        "expected": "confirmed",
+        "source_sha256": "b41f3ef73180e09a41564fd13e67500e64f5747a01adc11c50a4ddabd3042e2e"
+      },
+      {
+        "id": "20c77bbd6e617ce6",
+        "family": "export_access",
+        "variant": "patched",
+        "split": "development",
+        "expected": "refuted",
+        "source_sha256": "bf141213f994ca13ee178b4547922e16460eaa1dbde522d38ec9b734e2fd068c"
+      },
+      {
+        "id": "1a31022f00ab1e1d",
+        "family": "export_access",
+        "variant": "false_lead",
+        "split": "development",
+        "expected": "refuted",
+        "source_sha256": "3ff0014a26623817955fd8ec4423f879f2570393a6042c0cff39ec5a0f3c1c34"
+      },
+      {
+        "id": "deb99ce4e4993d5f",
+        "family": "export_access",
+        "variant": "unavailable",
+        "split": "development",
+        "expected": "blocked",
+        "source_sha256": "a6d3dbb5640347e404e4955afb6138cf48998e672cde0164c036db227439af29"
+      }
+    ]
+  }
+}

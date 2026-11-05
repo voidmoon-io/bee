@@ -1,0 +1,283 @@
+{
+  "scenario_id": "multi-file",
+  "model_id": "anthropic/claude-opus-4-8",
+  "status": {
+    "status": "completed"
+  },
+  "turns": [
+    {
+      "index": 0,
+      "assistant_text": "I'll start by reading the two fixture files using codemode.",
+      "calls": [
+        {
+          "parent_call_id": "toolu_01GWCPCW1fB9FeMSYKj7UQAi",
+          "call": {
+            "id": "toolu_01GWCPCW1fB9FeMSYKj7UQAi/1",
+            "name": "read_file",
+            "arguments": {
+              "path": "/home/jg/git/bee/specs/023-codemode/real-model/fixtures/alpha.txt"
+            }
+          },
+          "result": {
+            "receipt_id": "sha256:29b595f1ad47049053e087e25cd49a15d806d789f1ca2d50a20c351109b122de",
+            "content": "[Bee receipt: sha256:29b595f1ad47049053e087e25cd49a15d806d789f1ca2d50a20c351109b122de; records tool output, not verification]\nProject Alpha: owner Ada; open bugs 3; deadline Friday.\n",
+            "exit_code": 0,
+            "is_error": false,
+            "provenance": {
+              "kind": "child"
+            }
+          }
+        },
+        {
+          "parent_call_id": "toolu_01GWCPCW1fB9FeMSYKj7UQAi",
+          "call": {
+            "id": "toolu_01GWCPCW1fB9FeMSYKj7UQAi/2",
+            "name": "read_file",
+            "arguments": {
+              "path": "/home/jg/git/bee/specs/023-codemode/real-model/fixtures/beta.txt"
+            }
+          },
+          "result": {
+            "receipt_id": "sha256:b8a4b6edf053d9daef5bc11efe5df75ebb913755baee475204783481155bbcc5",
+            "content": "[Bee receipt: sha256:b8a4b6edf053d9daef5bc11efe5df75ebb913755baee475204783481155bbcc5; records tool output, not verification]\nProject Beta: owner Bo; open bugs 5; deadline Monday.\n",
+            "exit_code": 0,
+            "is_error": false,
+            "provenance": {
+              "kind": "child"
+            }
+          }
+        },
+        {
+          "call": {
+            "id": "toolu_01GWCPCW1fB9FeMSYKj7UQAi",
+            "name": "codemode",
+            "arguments": {
+              "source": "a = call_tool('read_file', {'path': '/home/jg/git/bee/specs/023-codemode/real-model/fixtures/alpha.txt'})\nb = call_tool('read_file', {'path': '/home/jg/git/bee/specs/023-codemode/real-model/fixtures/beta.txt'})\n[a, b]"
+            }
+          },
+          "result": {
+            "content": "{\"status\":\"completed\",\"value\":[{\"content\":\"[Bee receipt: sha256:29b595f1ad47049053e087e25cd49a15d806d789f1ca2d50a20c351109b122de; records tool output, not verification]\\nProject Alpha: owner Ada; open bugs 3; deadline Friday.\\n\",\"exit_code\":0,\"is_error\":false,\"provenance\":{\"kind\":\"child\"},\"receipt_id\":\"sha256:29b595f1ad47049053e087e25cd49a15d806d789f1ca2d50a20c351109b122de\"},{\"content\":\"[Bee receipt: sha256:b8a4b6edf053d9daef5bc11efe5df75ebb913755baee475204783481155bbcc5; records tool output, not verification]\\nProject Beta: owner Bo; open bugs 5; deadline Monday.\\n\",\"exit_code\":0,\"is_error\":false,\"provenance\":{\"kind\":\"child\"},\"receipt_id\":\"sha256:b8a4b6edf053d9daef5bc11efe5df75ebb913755baee475204783481155bbcc5\"}],\"worker_invocations\":3,\"worker_time_charge_ms\":150}",
+            "is_error": false
+          }
+        }
+      ],
+      "duration_ms": 3443
+    },
+    {
+      "index": 1,
+      "assistant_text": "Both files read successfully. Let me verify the receipts and compute the total.",
+      "calls": [
+        {
+          "call": {
+            "id": "toolu_01UYBx2EA8PDCUW3h6F1Pp5y",
+            "name": "codemode",
+            "arguments": {
+              "source": "vals = [3, 5]\ntotal = 0\nfor v in vals:\n    total = total + v\ntotal"
+            }
+          },
+          "result": {
+            "content": "{\"status\":\"completed\",\"value\":8,\"worker_invocations\":1,\"worker_time_charge_ms\":23}",
+            "is_error": false
+          }
+        }
+      ],
+      "duration_ms": 1868
+    },
+    {
+      "index": 2,
+      "assistant_text": "Now let me submit feedback with a concrete observation.",
+      "calls": [
+        {
+          "call": {
+            "id": "toolu_01QaTbxt6TPEUv1vJHYqEek7",
+            "name": "feedback",
+            "arguments": {
+              "category": "positive",
+              "message": "codemode's call_tools batching and nested call_tool worked cleanly: reading two fixtures in one block returned both results in input order, each with a distinct receipt_id and provenance.kind=\"child\". The receipt banner is helpfully prefixed to content (\"records tool output, not verification\"), which clearly distinguishes data from verification. One concrete observation: worker_invocations reported 3 for a block issuing 2 read_file calls (the enclosing script counts as an invocation), which is reasonable but worth documenting so budget accounting isn't surprising. Arithmetic over parsed values also returned correctly (3+5=8)."
+            }
+          },
+          "result": {
+            "receipt_id": "sha256:f790e293b7299f6c1c3c756eda1f3f7b6bc3d287f5fa0c673eabf5f87b5fe684",
+            "content": "[Bee receipt: sha256:f790e293b7299f6c1c3c756eda1f3f7b6bc3d287f5fa0c673eabf5f87b5fe684; records tool output, not verification]\nFeedback accepted for this run's transcript.",
+            "is_error": false
+          }
+        }
+      ],
+      "duration_ms": 10529
+    },
+    {
+      "index": 3,
+      "assistant_text": "## Summary\n\nUsing codemode, I read both fixture files and extracted their contents:\n\n- **alpha.txt** — Project Alpha: owner **Ada**, open bugs **3**, deadline Friday. (receipt `sha256:29b595f1…`)\n- **beta.txt** — Project Beta: owner **Bo**, open bugs **5**, deadline Monday. (receipt `sha256:b8a4b6ed…`)\n\n**Owners:** Ada (Project Alpha) and Bo (Project Beta).\n\n**Total open bugs:** 3 + 5 = **8** (verified with a codemode computation returning `8`).\n\nAll observations come directly from the real tool output — both reads returned `exit_code: 0`, `is_error: false`, and `provenance.kind: \"child\"`. I then submitted a concrete piece of harness feedback (accepted for this run's transcript) noting that batched/nested calls worked cleanly, receipts carry clear \"records tool output, not verification\" banners, and that `worker_invocations` counted 3 for a 2-call block since the enclosing script itself counts toward the budget.",
+      "duration_ms": 4807
+    }
+  ],
+  "timing": {
+    "started_at": "2026-11-01T15:00:13.176Z",
+    "ended_at": "2026-11-01T15:00:34.718Z",
+    "total_ms": 21542
+  },
+  "usage": {
+    "input_tokens": 8,
+    "output_tokens": 932,
+    "cache_read_tokens": 7086,
+    "cache_write_tokens": 3025
+  },
+  "durable_budget": {
+    "reservations": [
+      {
+        "attempt": {
+          "session": "multi-file",
+          "activation": "263907206701470353175724586997114885983",
+          "operation": 1,
+          "number": 1
+        },
+        "kind": "Model",
+        "charge": {
+          "Settled": {
+            "usage": {
+              "input_tokens": 2,
+              "output_tokens": 177,
+              "cache_write_tokens": 1933
+            },
+            "duration_ms": 3283
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "multi-file",
+          "activation": "263907206701470353175724586997114885983",
+          "operation": 2,
+          "number": 1
+        },
+        "kind": "Tool",
+        "charge": {
+          "Settled": {
+            "usage": null,
+            "duration_ms": 150
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "multi-file",
+          "activation": "263907206701470353175724586997114885983",
+          "operation": 3,
+          "number": 1
+        },
+        "kind": "Tool",
+        "charge": {
+          "Settled": {
+            "usage": null,
+            "duration_ms": 5
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "multi-file",
+          "activation": "263907206701470353175724586997114885983",
+          "operation": 4,
+          "number": 1
+        },
+        "kind": "Tool",
+        "charge": {
+          "Settled": {
+            "usage": null,
+            "duration_ms": 5
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "multi-file",
+          "activation": "263907206701470353175724586997114885983",
+          "operation": 5,
+          "number": 1
+        },
+        "kind": "Model",
+        "charge": {
+          "Settled": {
+            "usage": {
+              "input_tokens": 2,
+              "output_tokens": 100,
+              "cache_read_tokens": 1933,
+              "cache_write_tokens": 573
+            },
+            "duration_ms": 1845
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "multi-file",
+          "activation": "263907206701470353175724586997114885983",
+          "operation": 6,
+          "number": 1
+        },
+        "kind": "Tool",
+        "charge": {
+          "Settled": {
+            "usage": null,
+            "duration_ms": 23
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "multi-file",
+          "activation": "263907206701470353175724586997114885983",
+          "operation": 7,
+          "number": 1
+        },
+        "kind": "Model",
+        "charge": {
+          "Settled": {
+            "usage": {
+              "input_tokens": 2,
+              "output_tokens": 288,
+              "cache_read_tokens": 2506,
+              "cache_write_tokens": 141
+            },
+            "duration_ms": 10529
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "multi-file",
+          "activation": "263907206701470353175724586997114885983",
+          "operation": 8,
+          "number": 1
+        },
+        "kind": "Tool",
+        "charge": {
+          "Settled": {
+            "usage": null,
+            "duration_ms": 0
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "multi-file",
+          "activation": "263907206701470353175724586997114885983",
+          "operation": 9,
+          "number": 1
+        },
+        "kind": "Model",
+        "charge": {
+          "Settled": {
+            "usage": {
+              "input_tokens": 2,
+              "output_tokens": 367,
+              "cache_read_tokens": 2647,
+              "cache_write_tokens": 378
+            },
+            "duration_ms": 4807
+          }
+        }
+      }
+    ]
+  }
+}

@@ -62,6 +62,13 @@ Try the CLI (works without a special kernel):
                             --parent policies/parent.toml             # attenuation check
 ```
 
+`bee validate` warns when an unpinned executable allow rule resolves through a
+symlink (for example, `sh` → `/usr/bin/dash`). The kernel matches the resolved
+file path; validation leaves the grant unchanged. Explicitly allow the reported
+target if intended, understanding that this also permits executing that target
+directly. Inode-pinned (`!`) rules already identify the target file and do not
+produce this warning. `bee check` checks kernel support, not policy rules.
+
 ### The two primary journeys
 
 ```bash
@@ -158,6 +165,16 @@ the run. CTF runs and the REPL never see `finish`. `bee run` exits **0** only fo
 `finish` with outcome `completed` (or a normal ending where finish was not offered) and **3** for a run
 that ended without completing its task — see `bee run --help`.
 ## Durable sessions (opt-in)
+
+Agents can call `feedback({"category":"confusion","message":"..."})` to leave
+feedback about the harness or tools. Categories are `bug`, `confusion`,
+`suggestion`, and `positive`; messages must be nonblank and at most 4,000 characters.
+Feedback is included in the default tool set. Scenarios with an explicit `tools`
+list must include `feedback` to enable it. Durable codemode scripts can also call it.
+The submission is stored in the ordinary transcript's tool-call arguments (JSON
+on stdout or the `bee run --out` file), with its result and receipt in durable
+sessions. It does not end the run. Filter calls named `feedback` with successful
+results to collect accepted submissions; replay retains the same call identity.
 
 With `--features durable-sessions`, `run` and `repl` can share a persisted session
 using `--session-dir`, `--session-id`, and `--request-id` or `--resume`. Committed

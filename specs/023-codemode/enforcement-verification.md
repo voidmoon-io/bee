@@ -356,3 +356,28 @@ tests passed. Logs: `/tmp/bee-023-pr-tests.log` and `/tmp/bee-023-pr-clippy.log`
 The 932-test and 20-case kernel results above were obtained before this isolation;
 the kernel gate was not rerun during PR preparation. No runtime changes were made
 during isolation, apart from excluding the unrelated decision-provider key list.
+
+## Exec symlink warning — issue 03 (2026-11-01)
+
+`bee validate` now diagnoses unpinned exec paths that canonicalize differently,
+without rewriting grants; pinned rules are exempt. Host regression verifies
+alias/canonical/pinned behavior, unchanged compiled rules, and CLI stderr.
+
+Passed:
+- `cargo test --test exec_policy_warnings --no-default-features`
+- `cargo clippy -p bee-userspace --all-targets -- -D warnings`
+- `cargo clippy --no-default-features --bin bee --test exec_policy_warnings -- -D warnings`
+- `cargo fmt --all --check` and `git diff --check`
+- `python3 -m unittest discover -s test/vm -p test_results.py` (4 tests)
+- `bash -n test/vm/codemode.sh test/vm/remote-codemode.sh`
+- `bash test/vm/codemode.sh`: **21/21 passed**, including
+  `kernel_codemode_symlink_exec_warning` (warns and preserves exec denial).
+
+Gate log: `/tmp/bee-issue03-vm.log`. Binary SHA-256:
+- bee: `117b08bea5fbb792ca2f1dbfc0a57d3fd54527bf1a04c03c756af2040adde6bc`
+- codemode_kernel: `9aacd646c11b57e87b9d8f36cd747aa2af40edea521766e046e7b5dcc0fba6b9`
+
+The gate tested the current working tree, including the previously uncommitted
+02/04 work. Landed with the file-tools PR.
+
+The VM was restored to its original `Stopped` state after guest cleanup.

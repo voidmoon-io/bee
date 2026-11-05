@@ -271,6 +271,31 @@ async fn capture_with(
     Ok((status, out, err))
 }
 
+/// The `bee` binary that in-scope workers (`file-worker`, `python-worker`) are exec'd from. Under
+/// `cargo test` the current executable is a harness in `target/*/deps`, so use the application
+/// binary beside it — otherwise the worker subcommand would be handed to the test harness.
+pub fn bee_executable() -> Result<PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    if let Some(profile) = exe
+        .parent()
+        .filter(|p| p.ends_with("deps"))
+        .and_then(|p| p.parent())
+    {
+        return Ok(profile.join("bee"));
+    }
+    Ok(exe)
+}
+
+/// `compiled`, a tool scope's policy, with the bee binary exec-allowed so the built-in file and
+/// search tools' workers run under any exec allowlist ([`bee_core::compiler::with_harness_exec`]).
+/// Every tool scope is compiled through here: at session start, on a grant reload, in a batch.
+pub fn tool_scope(compiled: bee_core::CompiledPolicy) -> Result<bee_core::CompiledPolicy, String> {
+    let exe = bee_executable()?
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve the bee binary: {e}"))?;
+    Ok(bee_core::compiler::with_harness_exec(compiled, &exe))
+}
+
 pub async fn run_child(
     sandbox: &Sandbox,
     program: &str,

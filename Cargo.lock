@@ -457,6 +457,7 @@ dependencies = [
  "ratatui",
  "rcgen",
  "regex",
+ "reqwest",
  "rig-core",
  "ripgrep-api",
  "rmcp",

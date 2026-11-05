@@ -1,0 +1,30 @@
+[
+  {
+    "transcript": "results-2026-11-01/fan-out.json",
+    "call_id": "toolu_01Wss6JN9ebUmgojZtceh4rD",
+    "receipt_id": "sha256:c25396a1138a800a4676556c5f43cd5cd7632de561fce9b547b3326b5f09e76f",
+    "category": "positive",
+    "message": "The call_tools([...]) batching API worked well for reading three independent files in a single codemode invocation. Results were returned in input order, matching the documented behavior, and worker_invocations was reported as 2 (one outer + the batched reads), which made the budget accounting transparent. Each result included a receipt_id and provenance.kind, which is helpful for auditing. One concrete observation: the file content is prefixed inline with a \"[Bee receipt: sha256:...]\" banner within the \"content\" field itself, so a naive parser that does line 1 == data would pick up the banner rather than the actual file text; callers must skip that first line. Documenting that content-prefix convention explicitly would reduce confusion."
+  },
+  {
+    "transcript": "results-2026-11-01/limit.json",
+    "call_id": "toolu_01CHezLvY2XjKKPVnEp7JsWB",
+    "receipt_id": "sha256:5bc84e208d827b2f458090c395af6e9295318a0599065f901fe05e19b207907b",
+    "category": "bug",
+    "message": "When a codemode script exceeds the shared inner-call limit, the whole invocation fails with an opaque aggregate error (\"codemode requested an unavailable tool or exceeded its call or nesting limit\", status=error, worker_invocations=33) and the script's accumulated return value is DISCARDED. In my probe I made 33 sequential read_file calls, accumulating successful results into a list; try/except around call_tool did NOT catch the limit breach (it aborts the interpreter rather than raising a catchable exception), and the final expression was never returned. Consequently earlier successful results are not retained/observable from the caller side even though worker_invocations=33 confirms calls were made. Suggestion: (1) surface a distinct, specific error code for \"inner-call limit exceeded\" vs \"unavailable tool\" since the message conflates them; (2) consider returning partial state or at least the count of successful calls before the limit so callers can observe retained earlier results as the docs imply; (3) document that the limit is enforced as a non-catchable abort, not a Python-level exception."
+  },
+  {
+    "transcript": "results-2026-11-01/multi-file.json",
+    "call_id": "toolu_01QaTbxt6TPEUv1vJHYqEek7",
+    "receipt_id": "sha256:f790e293b7299f6c1c3c756eda1f3f7b6bc3d287f5fa0c673eabf5f87b5fe684",
+    "category": "positive",
+    "message": "codemode's call_tools batching and nested call_tool worked cleanly: reading two fixtures in one block returned both results in input order, each with a distinct receipt_id and provenance.kind=\"child\". The receipt banner is helpfully prefixed to content (\"records tool output, not verification\"), which clearly distinguishes data from verification. One concrete observation: worker_invocations reported 3 for a block issuing 2 read_file calls (the enclosing script counts as an invocation), which is reasonable but worth documenting so budget accounting isn't surprising. Arithmetic over parsed values also returned correctly (3+5=8)."
+  },
+  {
+    "transcript": "nested-retry-2026-11-01/nested.json",
+    "call_id": "toolu_01T3anLT3nUiNUoErVGQeENU",
+    "receipt_id": "sha256:62a1d64199395c75fabb1adf75ff686e0f170324cd025a943fbf79ce5b37ae3b",
+    "category": "confusion",
+    "message": "When calling a nested codemode via call_tool('codemode', {...}), the inner script's returned value is NOT delivered directly. Instead it comes back wrapped as a JSON string inside result['content'], e.g. {\"status\":\"completed\",\"value\":8,...}. The outer script must string-parse that JSON (no json module is importable since imports are disallowed) to recover the inner value. This is documented in the tool description (\"it does not return the inner value directly\") but is easy to miss and forces manual JSON parsing. A helper to unwrap nested results, or a note showing the content shape, would reduce friction. Observed concretely: inner returned alpha(3)+beta(5)=8, surfaced as content string; outer added gamma(2) for grand_total=10. Worker invocation accounting was visible (worker_invocations:6) which was helpful."
+  }
+]

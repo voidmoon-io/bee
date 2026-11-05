@@ -17,7 +17,7 @@ use crate::tools::{Tool, ToolResult};
 use crate::transcript::DEFAULT_OUTPUT_CAP;
 
 /// The cap on matching lines a single call returns. Also bounds walk time on a large tree.
-const MATCH_LIMIT: usize = 200;
+pub(crate) const MATCH_LIMIT: usize = 200;
 
 #[derive(Deserialize)]
 struct Args {

@@ -106,6 +106,9 @@ pub struct TerminalOutput {
     reclaim_rows: Arc<AtomicUsize>,
     /// The running spinner/animation task, if any.
     spin_task: Mutex<Option<JoinHandle<()>>>,
+    /// The call whose result comes next: calls run one at a time, and the result line is summarized
+    /// from its name and arguments.
+    last_call: Mutex<Option<(String, serde_json::Value)>>,
 }
 
 impl TerminalOutput {
@@ -121,6 +124,7 @@ impl TerminalOutput {
             active_rows: Arc::new(AtomicUsize::new(0)),
             reclaim_rows: Arc::new(AtomicUsize::new(0)),
             spin_task: Mutex::new(None),
+            last_call: Mutex::new(None),
         }
     }
 
@@ -302,9 +306,12 @@ impl ReplOutput for TerminalOutput {
     }
 
     fn tool_call(&self, name: &str, arguments: &serde_json::Value) {
-        let args = clip(&safe_line(&arguments.to_string()), MAX_ARG_CHARS);
-        let name = safe_line(name);
-        let line = format!("  {} {name} {args}", glyph::ARROW);
+        let what = match super::summary::target(name, arguments) {
+            Some(target) => target,
+            None => clip(&safe_line(&arguments.to_string()), MAX_ARG_CHARS),
+        };
+        *self.last_call.lock().expect("last call") = Some((name.to_string(), arguments.clone()));
+        let line = format!("  {} {} {what}", glyph::ARROW, safe_line(name));
         self.emit(&self.role(Role::Dim, &line)); // dim
     }
 
@@ -314,15 +321,25 @@ impl ReplOutput for TerminalOutput {
         } else {
             (glyph::CHECK, Role::Success)
         };
+        let call = self.last_call.lock().expect("last call").take();
+        let summary = call
+            .as_ref()
+            .and_then(|(name, args)| super::summary::outcome(name, args, result));
         let content = if result.content.trim().is_empty() {
             "(no output)".to_string()
         } else {
             safe_block(&result.content).into_owned()
         };
 
-        let lines: Vec<&str> = content.lines().collect();
-        let shown = lines.len().min(MAX_RESULT_LINES);
-        for (i, line) in lines.iter().take(shown).enumerate() {
+        // The outcome, when the tool has one, heads the block; the output follows it, indented.
+        let mut lines: Vec<&str> = Vec::new();
+        if let Some(s) = &summary {
+            lines.push(s);
+        }
+        let body: Vec<&str> = content.lines().collect();
+        let shown = body.len().min(MAX_RESULT_LINES);
+        lines.extend(&body[..shown]);
+        for (i, line) in lines.iter().enumerate() {
             let prefixed = if i == 0 {
                 format!("  {mark} {line}")
             } else {
@@ -330,8 +347,8 @@ impl ReplOutput for TerminalOutput {
             };
             self.emit(&self.role(role, &prefixed));
         }
-        if lines.len() > shown {
-            let more = lines.len() - shown;
+        if body.len() > shown {
+            let more = body.len() - shown;
             self.emit(&self.role(Role::Dim, &format!("    … {more} more line(s)")));
         }
 
@@ -514,6 +531,29 @@ mod tests {
     }
 
     #[test]
+    fn a_known_tool_is_summarized_and_its_output_follows() {
+        let (t, buf) = term();
+        t.tool_call("read_file", &serde_json::json!({ "path": "src/a.rs" }));
+        t.tool_result(&ToolResult::ok("fn a() {}\nfn b() {}".to_string()), &[]);
+        let out = buf.lock().unwrap().clone();
+        assert!(out.contains("read_file src/a.rs\n"), "{out}");
+        assert!(
+            out.contains("2 lines\n    fn a() {}\n    fn b() {}"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_tool_keeps_the_generic_lines() {
+        let (t, buf) = term();
+        t.tool_call("http_get", &serde_json::json!({ "url": "http://x" }));
+        t.tool_result(&ToolResult::ok("200 OK".to_string()), &[]);
+        let out = buf.lock().unwrap().clone();
+        assert!(out.contains("http_get {\"url\":\"http://x\"}"), "{out}");
+        assert!(out.contains(" 200 OK"), "{out}");
+    }
+
+    #[test]
     fn no_color_emits_no_escapes() {
         let (t, buf) = term();
         t.info("hi");
@@ -545,6 +585,9 @@ mod tests {
         });
         check("tool_call", |t| {
             t.tool_call(ATTACK, &serde_json::json!({ "arg": ATTACK }))
+        });
+        check("summarized tool_call", |t| {
+            t.tool_call("bash", &serde_json::json!({ "command": ATTACK }))
         });
         check("tool_result", |t| {
             t.tool_result(&ToolResult::ok(ATTACK), &[])

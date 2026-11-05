@@ -44,6 +44,7 @@ use crate::transcript::{
 
 pub mod consent_input;
 pub mod presentation;
+pub mod summary;
 pub mod terminal;
 
 pub use terminal::TerminalOutput;

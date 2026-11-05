@@ -134,7 +134,7 @@ grid system live in [the grid TUI plan](./grid-tui-plan.md).
 
 ### Full-screen surface (008-grid-tui)
 
-`bee repl --tui` (build with `--features tui`) adds a full-screen front-end over the same
+`bee repl` opens a full-screen front-end by default (`--no-tui` for inline). It runs over the same
 conversation core the inline REPL uses, so both stay in lock-step.
 
 | Element | Form | Used for |

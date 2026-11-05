@@ -112,10 +112,10 @@ concurrent = ["enforce", "bee-userspace/tokio"]
 # the optional `rmcp` dep below. Stdio (`transport-child-process`) ships first; the remote
 # Streamable-HTTP transport feature is added with the domain-gating slice (US9, task T024).
 mcp = ["dep:rmcp"]
-# Full-screen TUI front-end (008-grid-tui, M3–M4). Default-off so the plain build stays headless and
-# free of a terminal backend (Constitution V / SC-005): turns on ratatui's crossterm backend and pulls
-# the optional terminal deps below. Without it, `viz::buffer_render` keeps using the headless Buffer
-# and `bee-repl` runs the inline REPL only. 009 adds tachyonfx here too, so the effects pipeline is
+# Full-screen TUI front-end (008-grid-tui, M3–M4), and `bee repl`'s default. On by default; build with
+# `--no-default-features` for a headless binary free of a terminal backend (Constitution V / SC-005).
+# It turns on ratatui's crossterm backend and pulls the optional terminal deps below. Without it,
+# `viz::buffer_render` keeps using the headless Buffer and `bee repl` runs the inline REPL only. 009 adds tachyonfx here too, so the effects pipeline is
 # compiled only in full-screen builds.
 tui = [
     "dep:crossterm",

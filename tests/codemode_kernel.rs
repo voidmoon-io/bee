@@ -22,7 +22,7 @@ fn substrate() {
 }
 fn policy(root: &Path, worker: bool, sh: bool) -> bee_core::Policy {
     // `worker` allows the bee binary: the Python worker and the `file-worker` behind every file
-    // tool, which need nothing else (`kernel_file_tools_need_no_exec_rule`). `sh` comes with `cat`
+    // tool, which need nothing else (`kernel_codemode_file_tools_need_no_exec_rule`). `sh` comes with `cat`
     // for the shell commands the `bash` cases run.
     let mut allow = vec!["sleep".to_string()];
     if sh {
@@ -277,7 +277,7 @@ async fn kernel_codemode_file_policy() {
 /// through `tool_scope`. The filesystem rules still decide: the denied read is refused by the LSM.
 #[tokio::test]
 #[ignore = "requires root and BPF-LSM kernel"]
-async fn kernel_file_tools_need_no_exec_rule() {
+async fn kernel_codemode_file_tools_need_no_exec_rule() {
     let root = tempfile::tempdir().unwrap();
     prepare(root.path());
     let policy = bee_core::Policy::from_toml(&format!("[policy]\nname='file-tools'\nmode='enforce'\n[policy.exec]\nallow=['sleep']\n[policy.filesystem]\n{}='deny'\n",json!(root.path().join("denied").to_string_lossy()))).unwrap();

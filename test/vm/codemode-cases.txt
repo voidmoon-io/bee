@@ -1,5 +1,5 @@
 kernel_codemode_file_policy
-kernel_file_tools_need_no_exec_rule
+kernel_codemode_file_tools_need_no_exec_rule
 kernel_codemode_worker_exec_denied
 kernel_codemode_inner_exec_denied
 kernel_codemode_worker_timeout

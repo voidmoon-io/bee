@@ -33,7 +33,7 @@ use rustyline::DefaultEditor;
 use time::OffsetDateTime;
 
 use crate::provider::{
-    Conversation, Message, Model, ModelError, StopReason, StreamEvent, ToolSchema, Turn, Usage,
+    Conversation, Message, Model, StopReason, StreamEvent, ToolSchema, Turn, Usage,
 };
 use crate::render_spec::{EffectSpec, RenderSpec};
 use crate::sandbox::Sandbox;

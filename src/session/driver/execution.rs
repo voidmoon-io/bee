@@ -796,6 +796,7 @@ impl Driver {
                     }
                 }
                 StreamEvent::ToolCall(_) => {} // Only the complete committed response can dispatch.
+                StreamEvent::Reasoning(_) => {} // Display-only; never committed.
                 StreamEvent::Done(turn) => {
                     if !text.is_empty() && turn.text.as_deref().unwrap_or("") != text {
                         return Err(DriverError::Refused(

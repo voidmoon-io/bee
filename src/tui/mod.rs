@@ -256,6 +256,7 @@ async fn run_turn(
     consent: &mut Option<ConsentReceiver>,
 ) -> io::Result<()> {
     update(app, Message::ExchangeStarted);
+    let started = std::time::Instant::now();
     // A cancelled turn leaves the conversation as it found it, so no half-finished tool call reaches
     // the next request.
     let before = conversation.messages.len();
@@ -318,8 +319,10 @@ async fn run_turn(
                 // Guarded so a completed future is never polled again.
                 result = &mut exchange, if !turn_done => {
                     turn_done = true;
-                    // The exchange emits its trailing events (footer/TurnDone) before returning; fold
-                    // them in, redraw once more via the loop head, then finish.
+                    // Say how the exchange ended — the same footer as the inline REPL — so a turn
+                    // that produced nothing visible still leaves a line. Then fold in the trailing
+                    // events, redraw once more via the loop head, and finish.
+                    footer(&sink, &result, started.elapsed(), model.id());
                     while let Ok(ev) = rx.try_recv() {
                         update(app, Message::session(ev));
                     }
@@ -390,6 +393,22 @@ async fn run_turn(
     );
     app.system_line("turn cancelled — it was not added to the conversation");
     Ok(())
+}
+
+/// The per-exchange footer, through the sink like every other session line.
+fn footer(
+    sink: &SessionSink,
+    result: &crate::repl::ExchangeResult,
+    elapsed: std::time::Duration,
+    model_id: &str,
+) {
+    use crate::repl::ReplOutput;
+    let line = crate::repl::exchange_footer(result, elapsed, model_id);
+    if crate::repl::footer_is_alert(result) {
+        sink.footer_alert(&line);
+    } else {
+        sink.footer(&line);
+    }
 }
 
 /// What a line submitted while a turn runs does. It never joins the running turn as text: a
@@ -734,6 +753,51 @@ mod scheduler_tests {
         assert!(
             tick_interval(&app).is_none(),
             "the poll retires with the panel"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::repl::{ExchangeOutcome, ExchangeResult};
+    use crate::tui::events::SessionEvent;
+
+    fn ended(outcome: ExchangeOutcome) -> ExchangeResult {
+        ExchangeResult {
+            #[cfg(feature = "durable-sessions")]
+            durable_budget: None,
+            outcome,
+            model_calls: 1,
+            tool_calls: 0,
+            denials: 0,
+            turns: Vec::new(),
+            audit: Vec::new(),
+            usage: None,
+            compactions: Vec::new(),
+            last_stop: None,
+            reasoning_chars: 0,
+        }
+    }
+
+    /// The TUI used to print nothing when an exchange ended; it now leaves the same footer line the
+    /// inline REPL does, naming how the exchange ended.
+    #[test]
+    fn a_terminated_exchange_leaves_a_footer_with_its_reason() {
+        let (sink, mut rx) = SessionSink::new();
+        let result = ended(ExchangeOutcome::Terminated("hook timed out".into()));
+        footer(
+            &sink,
+            &result,
+            std::time::Duration::from_millis(5),
+            "mock/x",
+        );
+        drop(sink);
+        let got: Vec<SessionEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(
+            matches!(got.as_slice(), [SessionEvent::Footer(s)]
+                if s.starts_with("— terminated: hook timed out · no text")),
+            "{got:?}"
         );
     }
 }

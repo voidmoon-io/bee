@@ -547,6 +547,7 @@ impl EnforcedSandbox {
         if let Some(b) = &self.ca_bundle {
             compiled.fs.push(bee_core::FsPrimitive::read_grant(b));
         }
+        let compiled = crate::tools::exec::tool_scope(compiled)?;
         let plan = EnforcementPlan::prepare(&compiled, ScopeMode::Enforce)
             .map_err(|e| format!("reload plan: {e}"))?;
         if let Some(why) = &self.poisoned {

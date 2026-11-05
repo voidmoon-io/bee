@@ -1,4 +1,5 @@
 kernel_codemode_file_policy
+kernel_file_tools_need_no_exec_rule
 kernel_codemode_worker_exec_denied
 kernel_codemode_inner_exec_denied
 kernel_codemode_worker_timeout
@@ -7,6 +8,7 @@ kernel_codemode_memory_cleanup
 kernel_codemode_committed_recovery
 kernel_codemode_parent_death
 kernel_codemode_unknown_child
+kernel_codemode_read_retried_after_kill
 kernel_codemode_write_policy
 kernel_codemode_write_recovery
 kernel_codemode_cancel_write

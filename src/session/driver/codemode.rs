@@ -18,6 +18,7 @@ const ALLOWED: &[&str] = &[
     "search",
     "write_file",
     "edit_file",
+    "ensure_line",
     "bash",
     "ast_grep",
     "cvss",
@@ -50,12 +51,17 @@ mod catalog_tests {
     #[test]
     fn exposes_only_registered_supported_tools() {
         let registry = crate::tools::registry_for(
-            &["bash".into(), "read_file".into(), "give_up".into()],
+            &[
+                "bash".into(),
+                "read_file".into(),
+                "edit_file".into(),
+                "give_up".into(),
+            ],
             None,
         );
         let mut names: Vec<_> = catalog(&registry).into_iter().map(|s| s.name).collect();
         names.sort();
-        assert_eq!(names, ["bash", "read_file"]);
+        assert_eq!(names, ["bash", "edit_file", "read_file"]);
         assert!(registry.contains("give_up"));
     }
 }

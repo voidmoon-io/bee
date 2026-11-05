@@ -97,10 +97,10 @@ enum Cmd {
     /// tool uses to keep the library search under enforcement.
     #[command(hide = true)]
     SearchWorker(bee::search::SearchArgs),
-    /// Internal: apply one `edit_file` request (JSON on stdin) inside the scope. Same seam as
-    /// `search-worker`: the read and write-back are mediated by the LSM, never done by the harness.
+    /// Internal: serve one `read_file` / `edit_file` request (JSON on stdin) inside the scope. Same
+    /// seam as `search-worker`: every open is mediated by the LSM, never done by the harness.
     #[command(hide = true)]
-    EditWorker,
+    FileWorker,
     /// Internal: run a structural (tree-sitter) search and print `path:line:text`. Same seam as
     /// `search-worker` and for the same reason — the `ast_grep` tool execs this through the sandbox
     /// so the parse runs *inside the scope*, with every file it opens mediated by the LSM.
@@ -170,7 +170,7 @@ fn main() -> ExitCode {
             &command,
         ),
         Cmd::SearchWorker(args) => cmd_search_worker(&args),
-        Cmd::EditWorker => ExitCode::from(bee::edit::run(
+        Cmd::FileWorker => ExitCode::from(bee::fileops::run(
             &mut std::io::stdin().lock(),
             &mut std::io::stdout().lock(),
             &mut std::io::stderr().lock(),

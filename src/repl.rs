@@ -207,8 +207,10 @@ impl Default for ReplConfig {
             #[cfg(feature = "durable-sessions")]
             durable_tool_call_limit: 1024,
             system_prompt: "You are a coding agent operating in a sandbox. You have access to \
-                            bash, read_file, write_file, and list_directory tools. Use them to \
-                            help the user with their tasks."
+                            bash, read_file, write_file, edit_file, ensure_line, list_directory \
+                            and search tools. Prefer edit_file or ensure_line to rewriting a \
+                            whole file; both are idempotent, so repeating one reports \
+                            `unchanged`. Use them to help the user with their tasks."
                 .to_string(),
             agent_turn_budget: 25,
             tool_timeout_secs: 30,

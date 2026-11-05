@@ -16,7 +16,6 @@ pub mod bash;
 pub mod ctf;
 #[cfg(feature = "decisions")]
 pub mod decision;
-pub mod edit;
 pub mod exec;
 pub mod feedback;
 pub mod files;
@@ -80,6 +79,7 @@ pub const DEFAULT_TOOLS: &[&str] = &[
     "read_file",
     "write_file",
     "edit_file",
+    "ensure_line",
     "list_directory",
     "search",
 ];
@@ -731,7 +731,8 @@ fn build(name: &str, deps: &ToolDeps) -> Result<Option<Box<dyn Tool>>, UnknownTo
         "bash" => Box::new(bash::Bash),
         "read_file" => Box::new(files::ReadFile),
         "write_file" => Box::new(files::WriteFile),
-        "edit_file" => Box::new(edit::EditFile),
+        "edit_file" => Box::new(files::EditFile),
+        "ensure_line" => Box::new(files::EnsureLine),
         "list_directory" => Box::new(files::ListDirectory),
         "submit_flag" => match &deps.ctf_flag {
             Some(value) => Box::new(ctf::SubmitFlag::new(value.clone())),

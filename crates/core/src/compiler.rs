@@ -391,6 +391,32 @@ pub fn with_proxy_loopback(mut tool: CompiledPolicy, port: u16) -> CompiledPolic
     tool
 }
 
+/// Let a tool scope exec the harness's own binary, so the in-scope workers behind the built-in
+/// file and search tools (`bee file-worker`, `bee search-worker`, …) run under any exec allowlist.
+/// Reading and writing what the filesystem rules grant is table stakes for a tool scope; it should
+/// not also need an exec rule naming the harness.
+///
+/// This adds no file or network authority: the worker runs in the same scope, with the same
+/// privilege drop, so the LSM mediates every open and connect exactly as for any other child. With
+/// no exec allowlist the policy is returned unchanged — exec is unenforced there, and adding a rule
+/// would turn enforcement on and deny everything else.
+///
+/// `harness_exe` is the resolved, canonical path of that binary, as for [`Policy::compile_http`].
+pub fn with_harness_exec(
+    mut tool: CompiledPolicy,
+    harness_exe: &std::path::Path,
+) -> CompiledPolicy {
+    let path = harness_exe.as_os_str().as_encoded_bytes();
+    if !tool.exec.is_empty() && !tool.exec.iter().any(|e| e.path == path) {
+        tool.exec.push(CompiledExec {
+            path: path.to_vec(),
+            pin_inode: false,
+            identity: None,
+        });
+    }
+    tool
+}
+
 /// Output of [`Policy::compile_http`]: what the kernel installs for the proxy, and what the proxy
 /// worker enforces in user space.
 #[derive(Debug, Clone)]
@@ -624,5 +650,42 @@ mod tests {
         assert_eq!(split_host_port("[::1]:8080").unwrap(), ("::1", 8080));
         assert!(split_host_port("noport").is_err());
         assert!(split_host_port("host:notaport").is_err());
+    }
+}
+
+#[cfg(test)]
+mod harness_exec_tests {
+    use super::*;
+
+    fn exec(path: &str) -> CompiledExec {
+        CompiledExec {
+            path: path.as_bytes().to_vec(),
+            pin_inode: false,
+            identity: None,
+        }
+    }
+
+    #[test]
+    fn an_exec_allowlist_gains_the_harness_once() {
+        let tool = CompiledPolicy {
+            exec: vec![exec("/usr/bin/cargo")],
+            ..Default::default()
+        };
+        let bee = std::path::Path::new("/opt/bee/bee");
+        let once = with_harness_exec(tool, bee);
+        assert_eq!(once.exec, [exec("/usr/bin/cargo"), exec("/opt/bee/bee")]);
+        assert_eq!(with_harness_exec(once.clone(), bee).exec, once.exec);
+    }
+
+    #[test]
+    fn no_allowlist_stays_unenforced() {
+        let tool = with_harness_exec(
+            CompiledPolicy::default(),
+            std::path::Path::new("/opt/bee/bee"),
+        );
+        assert!(
+            tool.exec.is_empty(),
+            "a rule here would turn exec enforcement on"
+        );
     }
 }

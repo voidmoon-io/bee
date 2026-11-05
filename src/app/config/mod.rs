@@ -44,6 +44,7 @@ pub const DEFAULT_TOOLS: &[&str] = &[
     "read_file",
     "write_file",
     "edit_file",
+    "ensure_line",
     "list_directory",
     "search",
     "render",

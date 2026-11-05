@@ -85,6 +85,7 @@ impl Tool for HttpFuzz {
 
 /// The arguments as a [`FuzzSpec`]: the template (from `raw`, or a recorded exchange through
 /// [`ops::template_from`]) parsed, and every payload set expanded.
+#[allow(clippy::result_large_err)] // the refusal is the tool's own result
 async fn parse(
     icpt: &Interceptor,
     sandbox: &Sandbox,
@@ -203,6 +204,7 @@ fn template(icpt: &Interceptor, t: &Value, marker: char) -> Result<(RawTarget, S
 }
 
 /// A project payload file, read by a `cat` child in the tool scope (016 rule).
+#[allow(clippy::result_large_err)] // the refusal is the tool's own result
 async fn read_project_file(sandbox: &Sandbox, path: &str) -> Result<Vec<String>, ToolResult> {
     let r = crate::tools::exec::run_child(
         sandbox,

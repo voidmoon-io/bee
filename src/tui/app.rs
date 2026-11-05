@@ -129,6 +129,9 @@ pub struct App {
     pub mascot_mood: Mood,
     mascot_had_error: bool,
     mascot_pending_tools: usize,
+    /// The call whose result comes next (calls run one at a time), so the result line can be
+    /// summarized from its name and arguments.
+    last_tool_call: Option<(String, serde_json::Value)>,
     /// A consent question on screen (024 T059). It swallows input until answered.
     pub consent: Option<ConsentModal>,
     /// The operator's answer to [`App::consent`], for the event loop to send (drained via
@@ -181,6 +184,7 @@ impl App {
             mascot_mood: Mood::Idle,
             mascot_had_error: false,
             mascot_pending_tools: 0,
+            last_tool_call: None,
             consent: None,
             consent_answer: None,
         }
@@ -748,14 +752,12 @@ fn handle_session(app: &mut App, ev: SessionEvent) {
         SessionEvent::ToolCall { name, arguments } => {
             app.mascot_pending_tools = app.mascot_pending_tools.saturating_add(1);
             app.set_mascot_mood(Mood::Working);
-            app.push_line(
-                Role::Tool,
-                format!(
-                    "▸ {}{}",
-                    safe_line(&name),
-                    safe_line(&compact_args(&arguments))
-                ),
-            );
+            let what = match crate::repl::summary::target(&name, &arguments) {
+                Some(target) => format!(" {target}"),
+                None => safe_line(&compact_args(&arguments)).into_owned(),
+            };
+            app.push_line(Role::Tool, format!("▸ {}{what}", safe_line(&name)));
+            app.last_tool_call = Some((name, arguments));
         }
         SessionEvent::ToolResult { result, audit } => {
             app.mascot_pending_tools = app.mascot_pending_tools.saturating_sub(1);
@@ -769,8 +771,20 @@ fn handle_session(app: &mut App, ev: SessionEvent) {
                 Mood::Thinking
             });
             let mark = if result.is_error { "✗" } else { "✓" };
-            let line = safe_line(result.content.lines().next().unwrap_or_default());
+            let call = app.last_tool_call.take();
+            let outcome = call
+                .as_ref()
+                .and_then(|(name, args)| crate::repl::summary::outcome(name, args, &result));
+            let line = match outcome {
+                Some(outcome) => outcome,
+                None => safe_line(result.content.lines().next().unwrap_or_default()).into_owned(),
+            };
             app.push_line(Role::Tool, format!("{mark} {line}"));
+            // A failure keeps a few lines of why, since only one line of output is shown.
+            let name = call.as_ref().map_or("", |(name, _)| name.as_str());
+            for line in crate::repl::summary::preview(name, &result) {
+                app.push_line(Role::Tool, format!("  {line}"));
+            }
             // Flash the chat so the eye finds the result that belongs to the call above it — accent
             // for the ordinary case, the verdict colors when a run actually ended (FR-026).
             app.chrome_cues.push(if result.terminal {
@@ -847,6 +861,74 @@ fn compact_args(v: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn chat_lines(app: &App) -> Vec<String> {
+        app.chat
+            .iter()
+            .filter_map(|m| match &m.body {
+                crate::tui::chat::Body::Text(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tool_lines_say_what_the_call_was_about_and_what_came_of_it() {
+        let mut app = App::new(120, 40);
+        update(
+            &mut app,
+            Message::session(SessionEvent::ToolCall {
+                name: "read_file".into(),
+                arguments: serde_json::json!({ "path": "src/a.rs" }),
+            }),
+        );
+        update(
+            &mut app,
+            Message::session(SessionEvent::ToolResult {
+                result: crate::tools::ToolResult::ok("fn a() {}\nfn b() {}".to_string()),
+                audit: vec![],
+            }),
+        );
+        let lines = chat_lines(&app);
+        assert!(
+            lines.contains(&"▸ read_file src/a.rs".to_string()),
+            "{lines:?}"
+        );
+        assert!(lines.contains(&"✓ 2 lines".to_string()), "{lines:?}");
+    }
+
+    #[test]
+    fn a_failed_command_shows_its_exit_and_the_tail_of_its_output() {
+        let mut app = App::new(120, 40);
+        update(
+            &mut app,
+            Message::session(SessionEvent::ToolCall {
+                name: "bash".into(),
+                arguments: serde_json::json!({ "command": "cargo build" }),
+            }),
+        );
+        let failed = crate::tools::ToolResult {
+            exit_code: Some(101),
+            is_error: true,
+            ..crate::tools::ToolResult::ok("Compiling x\nerror[E0425]: not found".to_string())
+        };
+        update(
+            &mut app,
+            Message::session(SessionEvent::ToolResult {
+                result: failed,
+                audit: vec![],
+            }),
+        );
+        let lines = chat_lines(&app);
+        let at = lines
+            .iter()
+            .position(|l| l == "✗ exit 101")
+            .expect("exit line");
+        assert_eq!(
+            lines[at + 1..],
+            ["  Compiling x", "  error[E0425]: not found"]
+        );
+    }
 
     #[test]
     fn grouped_rows_upsert_replay_and_scope_repeated_ids() {

@@ -114,6 +114,7 @@ mod tests {
             match ev.expect("event ok") {
                 StreamEvent::TextDelta(d) => text.push_str(&d),
                 StreamEvent::ToolCall(tc) => calls.push(tc.name),
+                StreamEvent::Reasoning(_) => {}
                 StreamEvent::Done(t) => done = Some(t),
             }
         }

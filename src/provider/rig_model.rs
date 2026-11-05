@@ -119,17 +119,22 @@ where
     Box::new(move |req: CompletionRequest| {
         let model = model.clone();
         Box::pin(async move {
+            let max_tokens = req.max_tokens;
             let resp = model.stream(req).await.map_err(to_model_error)?;
-            Ok(map_rig_stream(resp))
+            Ok(map_rig_stream(resp, max_tokens))
         })
     })
 }
 
 /// Map a Rig streaming response into an [`EventStream`]: text deltas are forwarded live, each
 /// complete tool call is forwarded as it lands, and a single [`StreamEvent::Done`] carrying the
-/// assembled [`Turn`] is emitted when the provider stream ends. Partial tool-call deltas and
-/// reasoning are not surfaced (matching the non-streaming [`to_turn`]).
-fn map_rig_stream<R>(mut resp: StreamingCompletionResponse<R>) -> EventStream
+/// assembled [`Turn`] is emitted when the provider stream ends. Reasoning is forwarded as
+/// display-only [`StreamEvent::Reasoning`] and kept out of the turn (matching the non-streaming
+/// [`to_turn`]); partial tool-call deltas and provider-native items are not surfaced.
+fn map_rig_stream<R>(
+    mut resp: StreamingCompletionResponse<R>,
+    max_tokens: Option<u64>,
+) -> EventStream
 where
     R: Clone + Unpin + GetTokenUsage + Send + 'static,
 {
@@ -137,6 +142,7 @@ where
         let mut text = String::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut usage = Usage::default();
+        let mut saw_reasoning_delta = false;
 
         while let Some(item) = resp.next().await {
             match item {
@@ -156,7 +162,16 @@ where
                 Ok(StreamedAssistantContent::Final(r)) => {
                     usage = usage_from_rig(&r.token_usage());
                 }
-                // Partial tool-call deltas, reasoning, and provider-native items are not surfaced.
+                Ok(StreamedAssistantContent::ReasoningDelta { reasoning, .. }) => {
+                    saw_reasoning_delta = true;
+                    yield Ok(StreamEvent::Reasoning(reasoning));
+                }
+                // A complete block repeats what its deltas already carried; forward it only from a
+                // provider that sends no deltas.
+                Ok(StreamedAssistantContent::Reasoning(r)) if !saw_reasoning_delta => {
+                    yield Ok(StreamEvent::Reasoning(r.display_text()));
+                }
+                // Partial tool-call deltas and provider-native items are not surfaced.
                 Ok(_) => {}
                 Err(e) => {
                     yield Err(to_model_error(e));
@@ -173,7 +188,7 @@ where
             }
         }
 
-        let stop = if tool_calls.is_empty() { StopReason::EndTurn } else { StopReason::ToolUse };
+        let stop = streamed_stop(!tool_calls.is_empty(), usage.output_tokens, max_tokens);
         let turn = Turn {
             text: (!text.is_empty()).then_some(text),
             tool_calls,
@@ -182,6 +197,19 @@ where
         };
         yield Ok(StreamEvent::Done(turn));
     })
+}
+
+/// The stop reason of a streamed turn. Rig 0.40 parses the provider's finish reason on a stream but
+/// does not expose it, so it is inferred: tool calls mean `ToolUse`; output that reached the request's
+/// `max_tokens` cap means `MaxTokens` (the reply was cut off, often mid-reasoning); otherwise `EndTurn`.
+fn streamed_stop(has_tool_calls: bool, output_tokens: u32, max_tokens: Option<u64>) -> StopReason {
+    if has_tool_calls {
+        StopReason::ToolUse
+    } else if max_tokens.is_some_and(|cap| cap > 0 && u64::from(output_tokens) >= cap) {
+        StopReason::MaxTokens
+    } else {
+        StopReason::EndTurn
+    }
 }
 
 impl RigModel {
@@ -517,6 +545,19 @@ mod tests {
                 "required": ["path"]
             }),
         }]
+    }
+
+    #[test]
+    fn streamed_turn_that_reached_the_cap_is_max_tokens() {
+        assert_eq!(
+            streamed_stop(false, 4096, Some(4096)),
+            StopReason::MaxTokens
+        );
+        assert_eq!(streamed_stop(false, 4095, Some(4096)), StopReason::EndTurn);
+        assert_eq!(streamed_stop(true, 4096, Some(4096)), StopReason::ToolUse);
+        assert_eq!(streamed_stop(false, 9000, None), StopReason::EndTurn);
+        // Usage a provider did not report (zero) never reads as a cut-off.
+        assert_eq!(streamed_stop(false, 0, Some(0)), StopReason::EndTurn);
     }
 
     #[test]

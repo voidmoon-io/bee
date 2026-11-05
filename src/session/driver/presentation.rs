@@ -361,6 +361,9 @@ pub async fn exchange(
                 turns: report.turns,
                 audit,
                 usage: report.usage,
+                // The durable driver does not carry these through its report.
+                last_stop: None,
+                reasoning_chars: 0,
             }
         }
         Err(error) => {
@@ -394,6 +397,8 @@ pub async fn exchange(
                 audit,
                 usage: budget.as_ref().and_then(|b| b.known_usage().ok().flatten()),
                 durable_budget: budget,
+                last_stop: None,
+                reasoning_chars: 0,
             }
         }
     }

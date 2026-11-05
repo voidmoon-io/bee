@@ -198,6 +198,10 @@ pub enum StreamEvent {
     TextDelta(String),
     /// A fully-formed tool call the model requested.
     ToolCall(ToolCall),
+    /// A chunk of the model's reasoning (thinking) text. Display-only: it is never part of the
+    /// [`Turn`] and never sent back to the provider. A front-end uses it to show the model was
+    /// working even when it ends up producing no prose.
+    Reasoning(String),
     /// The turn finished; carries the complete [`Turn`] (text, tool calls, stop reason, usage).
     Done(Turn),
 }

@@ -33,7 +33,7 @@ use rustyline::DefaultEditor;
 use time::OffsetDateTime;
 
 use crate::provider::{
-    Conversation, Message, Model, ModelError, StreamEvent, ToolSchema, Turn, Usage,
+    Conversation, Message, Model, ModelError, StopReason, StreamEvent, ToolSchema, Turn, Usage,
 };
 use crate::render_spec::{EffectSpec, RenderSpec};
 use crate::sandbox::Sandbox;
@@ -279,6 +279,12 @@ pub trait ReplOutput: Send + Sync {
     fn footer(&self, msg: &str) {
         self.info(msg);
     }
+    /// The per-exchange footer for an exchange that did not end in a visible reply — an error, a
+    /// stop, or a reply with no text. Defaults to [`ReplOutput::footer`]; a front-end with color
+    /// overrides it so the line is not mistaken for routine metadata.
+    fn footer_alert(&self, msg: &str) {
+        self.footer(msg);
+    }
     /// Acknowledgement that a steering message was queued/injected. Defaults to
     /// [`ReplOutput::info`].
     fn steering(&self, msg: &str) {
@@ -364,6 +370,11 @@ pub struct ExchangeResult {
     pub usage: Option<Usage>,
     /// Compactions of the conversation during this exchange (025 FR-017).
     pub compactions: Vec<crate::transcript::CompactionEvent>,
+    /// Why the last model call of the exchange stopped, when one completed.
+    pub last_stop: Option<StopReason>,
+    /// Characters of reasoning the model streamed during the exchange (display-only; providers
+    /// that report `reasoning_tokens` are counted there too).
+    pub reasoning_chars: u64,
 }
 
 /// The session record produced when the REPL exits.
@@ -510,56 +521,61 @@ fn drain_steering(queue: &SteeringQueue, convo: &mut Conversation, output: &dyn 
     drained
 }
 
-/// Consume one model stream: render text deltas live and return the assembled [`Turn`] plus the
-/// time-to-first-token (ms since `call_start`, the dispatch instant), for metrics. The "working"
+/// One consumed model stream: the assembled [`Turn`], the time-to-first-token (ms since dispatch),
+/// and how much reasoning text the model streamed along the way.
+struct Streamed {
+    turn: Turn,
+    ttft_ms: Option<u64>,
+    reasoning_chars: u64,
+}
+
+/// Consume one model stream: render text deltas live and return the assembled turn. The "working"
 /// indicator (started by the caller when the call was dispatched) is stopped the instant the first
-/// event arrives. `saw_text` reports whether any prose was rendered (so the caller can close the
-/// assistant block).
+/// event arrives. A stream that ends without its final `Done` event is an error, not an empty turn:
+/// read as an empty reply it would end the exchange as if the model had answered.
 async fn consume_stream(
     mut stream: crate::provider::EventStream,
     output: &dyn ReplOutput,
     call_start: Instant,
-) -> Result<(Turn, Option<u64>), String> {
+) -> Result<Streamed, String> {
     // Wait for the first event, then drop the "working" indicator — from here on the stream itself
     // (tokens, tool calls) shows liveness.
     let first = stream.next().await;
     output.busy_stop();
-    let ttft = first
+    let ttft_ms = first
         .is_some()
         .then(|| call_start.elapsed().as_millis() as u64);
 
     let mut saw_text = false;
+    let mut reasoning_chars = 0u64;
     let mut ev = first;
-    loop {
+    let result = loop {
         match ev {
             Some(Ok(StreamEvent::TextDelta(delta))) => {
                 output.assistant_delta(&delta);
                 saw_text = true;
             }
+            Some(Ok(StreamEvent::Reasoning(r))) => {
+                reasoning_chars = reasoning_chars.saturating_add(r.chars().count() as u64);
+            }
             // Tool calls are rendered by the caller as they execute; the Done turn carries them.
             Some(Ok(StreamEvent::ToolCall(_))) => {}
             Some(Ok(StreamEvent::Done(turn))) => {
-                if saw_text {
-                    output.assistant_end();
-                }
-                return Ok((turn, ttft));
+                break Ok(Streamed {
+                    turn,
+                    ttft_ms,
+                    reasoning_chars,
+                })
             }
-            Some(Err(e)) => {
-                if saw_text {
-                    output.assistant_end();
-                }
-                return Err(e.to_string());
-            }
-            None => {
-                // Stream ended without a Done event — treat as an empty text turn.
-                if saw_text {
-                    output.assistant_end();
-                }
-                return Ok((Turn::text(String::new()), ttft));
-            }
+            Some(Err(e)) => break Err(e.to_string()),
+            None => break Err("model stream ended without a final response".to_string()),
         }
         ev = stream.next().await;
+    };
+    if saw_text {
+        output.assistant_end();
     }
+    result
 }
 
 /// Tell the user what an escalation did. Only a grant or a refusal is worth a line: `AlreadyHeld` is
@@ -647,12 +663,17 @@ pub async fn run_exchange(
     let mut usage_total: Option<Usage> = None;
     let mut compactions: Vec<crate::transcript::CompactionEvent> = Vec::new();
 
-    macro_rules! terminate {
-        ($reason:expr) => {{
+    let mut last_stop: Option<StopReason> = None;
+    let mut reasoning_chars = 0u64;
+
+    // Every way out of the exchange returns through `end!`, so the result always carries the stop
+    // reason and reasoning seen so far.
+    macro_rules! end {
+        ($outcome:expr) => {{
             return ExchangeResult {
                 #[cfg(feature = "durable-sessions")]
                 durable_budget: None,
-                outcome: ExchangeOutcome::Terminated($reason),
+                outcome: $outcome,
                 model_calls,
                 tool_calls,
                 denials,
@@ -660,7 +681,17 @@ pub async fn run_exchange(
                 audit: audit_all,
                 usage: usage_total,
                 compactions,
+                last_stop,
+                reasoning_chars,
             };
+        }};
+    }
+    // A termination the user has not been told about yet: say why, then end.
+    macro_rules! terminate {
+        ($reason:expr) => {{
+            let reason: String = $reason;
+            output.error(&format!("exchange ended: {reason}"));
+            end!(ExchangeOutcome::Terminated(reason));
         }};
     }
     if let Some(esc) = &config.escalation {
@@ -704,8 +735,9 @@ pub async fn run_exchange(
             )
             .await;
             report_turn_start(output, &report);
+            // Already shown by `report_turn_start`.
             if let Some(e) = report.narrow_error {
-                terminate!(e);
+                end!(ExchangeOutcome::Terminated(e));
             }
         }
         let schemas = registry.schemas();
@@ -782,18 +814,7 @@ pub async fn run_exchange(
             Ok(p) => p,
             Err(detail) => {
                 output.error(&format!("context exhausted: {detail}"));
-                return ExchangeResult {
-                    #[cfg(feature = "durable-sessions")]
-                    durable_budget: None,
-                    outcome: ExchangeOutcome::ContextExhausted(detail),
-                    model_calls,
-                    tool_calls,
-                    denials,
-                    turns,
-                    audit: audit_all,
-                    usage: usage_total,
-                    compactions,
-                };
+                end!(ExchangeOutcome::ContextExhausted(detail));
             }
         };
 
@@ -818,21 +839,14 @@ pub async fn run_exchange(
                             "error",
                         );
                     }
-                    return ExchangeResult {
-                        #[cfg(feature = "durable-sessions")]
-                        durable_budget: None,
-                        outcome: exchange_error(detail),
-                        model_calls,
-                        tool_calls,
-                        denials,
-                        turns,
-                        audit: audit_all,
-                        usage: usage_total,
-                        compactions,
-                    };
+                    end!(exchange_error(detail));
                 }
             };
-        let (turn, ttft_ms) = match consume_stream(stream, output, turn_start).await {
+        let Streamed {
+            turn,
+            ttft_ms,
+            reasoning_chars: turn_reasoning,
+        } = match consume_stream(stream, output, turn_start).await {
             Ok(t) => t,
             Err(detail) => {
                 output.error(&detail);
@@ -846,21 +860,12 @@ pub async fn run_exchange(
                         "error",
                     );
                 }
-                return ExchangeResult {
-                    #[cfg(feature = "durable-sessions")]
-                    durable_budget: None,
-                    outcome: exchange_error(detail),
-                    model_calls,
-                    tool_calls,
-                    denials,
-                    turns,
-                    audit: audit_all,
-                    usage: usage_total,
-                    compactions,
-                };
+                end!(exchange_error(detail));
             }
         };
         model_calls += 1;
+        last_stop = Some(turn.stop.clone());
+        reasoning_chars = reasoning_chars.saturating_add(turn_reasoning);
         if let Some(ctx) = lock_state(config).context.as_mut() {
             ctx.observe(prepared.sent_bytes, turn.usage.as_ref());
         }
@@ -884,6 +889,15 @@ pub async fn run_exchange(
         // steering message while it was finishing, don't hand control back yet — record this turn
         // and loop so the agent responds to the nudge instead of forcing a cold re-send.
         if turn.tool_calls.is_empty() {
+            if let Some((alert, line)) =
+                reply_notice(turn.text.as_deref(), &turn.stop, turn.usage, turn_reasoning)
+            {
+                if alert {
+                    output.error(&line);
+                } else {
+                    output.info(&line);
+                }
+            }
             conversation.push(Message::Assistant {
                 text: turn.text,
                 tool_calls: Vec::new(),
@@ -896,18 +910,7 @@ pub async fn run_exchange(
                 duration_ms: turn_start.elapsed().as_millis() as u64,
             });
             if steering.lock().expect("steering queue").is_empty() {
-                return ExchangeResult {
-                    #[cfg(feature = "durable-sessions")]
-                    durable_budget: None,
-                    outcome: ExchangeOutcome::Responded,
-                    model_calls,
-                    tool_calls,
-                    denials,
-                    turns,
-                    audit: audit_all,
-                    usage: usage_total,
-                    compactions,
-                };
+                end!(ExchangeOutcome::Responded);
             }
             continue;
         }
@@ -961,6 +964,14 @@ pub async fn run_exchange(
                 .cloned()
                 .or_else(|| sandbox.check_cleanup().err())
             {
+                // Close the `▸ tool` line before the exchange ends, so the call is not left open.
+                let audit: Vec<AuditEvent> = outcome
+                    .audit
+                    .iter()
+                    .chain(&outcome.proxy_audit)
+                    .cloned()
+                    .collect();
+                output.tool_result(&outcome.result, &audit);
                 audit_all.extend(outcome.audit_trail().cloned());
                 recorded.push(outcome.to_recorded(tc));
                 turns.push(TranscriptTurn {
@@ -1080,18 +1091,7 @@ pub async fn run_exchange(
                         calls: recorded,
                         duration_ms: turn_start.elapsed().as_millis() as u64,
                     });
-                    return ExchangeResult {
-                        #[cfg(feature = "durable-sessions")]
-                        durable_budget: None,
-                        outcome: ExchangeOutcome::Stuck { tool, repeats },
-                        model_calls,
-                        tool_calls,
-                        denials,
-                        turns,
-                        audit: audit_all,
-                        usage: usage_total,
-                        compactions,
-                    };
+                    end!(ExchangeOutcome::Stuck { tool, repeats });
                 }
             }
         }
@@ -1109,18 +1109,7 @@ pub async fn run_exchange(
     // Budget exhausted: the agent never produced a text-only turn. The conversation is intact; the
     // user can send another message and the agent can continue.
     output.info("[agent reached tool-call limit for this exchange — returning control to you]");
-    ExchangeResult {
-        #[cfg(feature = "durable-sessions")]
-        durable_budget: None,
-        outcome: ExchangeOutcome::BudgetExhausted,
-        model_calls,
-        tool_calls,
-        denials,
-        turns,
-        audit: audit_all,
-        usage: usage_total,
-        compactions,
-    }
+    end!(ExchangeOutcome::BudgetExhausted);
 }
 
 /// The REPL's session state, recovering from a poisoned lock: the state is plain data, and a panic
@@ -1156,13 +1145,113 @@ fn human_tokens(n: u32) -> String {
     }
 }
 
-/// The dim one-line summary printed after each exchange, including derived cost for priced models.
-fn exchange_footer(result: &ExchangeResult, elapsed: Duration, model_id: &str) -> String {
-    let mut parts = vec![
+/// What to tell the user about a final (no-tool) reply that would otherwise pass silently: one with
+/// no text, or one cut off at the output cap. `None` for an ordinary reply. The flag is `true` when
+/// the line is an alert (the reply was truncated) rather than information.
+fn reply_notice(
+    text: Option<&str>,
+    stop: &StopReason,
+    usage: Option<Usage>,
+    reasoning_chars: u64,
+) -> Option<(bool, String)> {
+    let empty = text.is_none_or(|t| t.trim().is_empty());
+    let cut_off = *stop == StopReason::MaxTokens;
+    if !empty && !cut_off {
+        return None;
+    }
+    let mut why = vec![format!("stop={}", stop_name(stop))];
+    if let Some(r) = reasoning_summary(usage, reasoning_chars) {
+        why.push(r);
+    }
+    let why = why.join(", ");
+    let budget = "raise `max_tokens` under [provider] to give it more room";
+    Some(match (empty, cut_off) {
+        (true, true) => (
+            true,
+            format!("model returned no text ({why}) — it hit its output limit; {budget}"),
+        ),
+        (true, false) => (false, format!("model returned no text ({why})")),
+        _ => (
+            true,
+            format!("reply was cut off at its output limit ({why}); {budget}"),
+        ),
+    })
+}
+
+/// A stop reason as the provider would name it.
+fn stop_name(stop: &StopReason) -> &str {
+    match stop {
+        StopReason::EndTurn => "end_turn",
+        StopReason::ToolUse => "tool_use",
+        StopReason::MaxTokens => "max_tokens",
+        StopReason::Other(s) => s,
+    }
+}
+
+/// How much the model reasoned: the provider's reasoning-token count when it reports one, else the
+/// fact that reasoning text streamed. `None` when there was no sign of reasoning.
+fn reasoning_summary(usage: Option<Usage>, reasoning_chars: u64) -> Option<String> {
+    match usage.map_or(0, |u| u.reasoning_tokens) {
+        0 if reasoning_chars > 0 => Some(format!("{reasoning_chars} chars of reasoning")),
+        0 => None,
+        n => Some(format!("{} reasoning tok", human_tokens(n))),
+    }
+}
+
+/// How an exchange ended, as the footer's leading word(s).
+fn outcome_label(outcome: &ExchangeOutcome) -> String {
+    match outcome {
+        ExchangeOutcome::Responded => "responded".to_string(),
+        ExchangeOutcome::BudgetExhausted => "turn budget exhausted".to_string(),
+        ExchangeOutcome::ApiError(_) => "provider error".to_string(),
+        ExchangeOutcome::ContextExhausted(_) => "context exhausted".to_string(),
+        ExchangeOutcome::Stuck { tool, repeats } => format!("stuck: {tool} ×{repeats}"),
+        ExchangeOutcome::Terminated(reason) => {
+            let first = reason.lines().next().unwrap_or("").trim();
+            let short: String = first.chars().take(80).collect();
+            let more = if short.len() < reason.trim().len() {
+                "…"
+            } else {
+                ""
+            };
+            format!("terminated: {short}{more}")
+        }
+    }
+}
+
+/// Whether the exchange put any assistant prose on screen.
+fn exchange_had_text(result: &ExchangeResult) -> bool {
+    result.turns.iter().any(|t| {
+        t.assistant_text
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
+    })
+}
+
+/// Whether the exchange's footer is an alert: it did not end in a visible reply.
+pub(crate) fn footer_is_alert(result: &ExchangeResult) -> bool {
+    result.outcome != ExchangeOutcome::Responded || !exchange_had_text(result)
+}
+
+/// The one-line summary printed after each exchange: how it ended, then counts, tokens, derived cost
+/// for priced models, and time. The stop reason appears only when it is not the ordinary one.
+pub(crate) fn exchange_footer(
+    result: &ExchangeResult,
+    elapsed: Duration,
+    model_id: &str,
+) -> String {
+    let mut parts = vec![outcome_label(&result.outcome)];
+    if !exchange_had_text(result) {
+        parts.push("no text".to_string());
+    }
+    if let Some(stop @ (StopReason::MaxTokens | StopReason::Other(_))) = &result.last_stop {
+        parts.push(format!("stop={}", stop_name(stop)));
+    }
+    parts.extend([
         plural(result.model_calls, "turn"),
         plural(result.tool_calls, "tool call"),
         plural(result.denials, "denial"),
-    ];
+    ]);
     match &result.usage {
         Some(u) => {
             let mut tok = format!(
@@ -1189,6 +1278,9 @@ fn exchange_footer(result: &ExchangeResult, elapsed: Duration, model_id: &str) -
             }
         }
         None => parts.push("usage n/a".to_string()),
+    }
+    if let Some(r) = reasoning_summary(result.usage, result.reasoning_chars) {
+        parts.push(r);
     }
     parts.push(format!("{:.1}s", elapsed.as_secs_f64()));
     format!("— {}", parts.join(" · "))
@@ -1867,7 +1959,12 @@ pub async fn run_repl(
         if let Some(u) = result.usage {
             usage_total = Some(usage_total.map_or(u, |acc| acc + u));
         }
-        output.footer(&exchange_footer(&result, ex_start.elapsed(), model.id()));
+        let footer = exchange_footer(&result, ex_start.elapsed(), model.id());
+        if footer_is_alert(&result) {
+            output.footer_alert(&footer);
+        } else {
+            output.footer(&footer);
+        }
         #[cfg(feature = "durable-sessions")]
         if let Some(budget) = result.durable_budget {
             durable_budget
@@ -2266,6 +2363,8 @@ mod tests {
             durable_budget: None,
             outcome: ExchangeOutcome::Responded,
             compactions: Vec::new(),
+            last_stop: None,
+            reasoning_chars: 0,
             model_calls: 2,
             tool_calls: 1,
             denials: 0,
@@ -2301,6 +2400,8 @@ mod tests {
             durable_budget: None,
             outcome: ExchangeOutcome::Responded,
             compactions: Vec::new(),
+            last_stop: None,
+            reasoning_chars: 0,
             model_calls: 1,
             tool_calls: 0,
             denials: 0,
@@ -2341,6 +2442,8 @@ mod tests {
             durable_budget: None,
             outcome: ExchangeOutcome::Responded,
             compactions: Vec::new(),
+            last_stop: None,
+            reasoning_chars: 0,
             model_calls: 1,
             tool_calls: 0,
             denials: 0,
@@ -2354,6 +2457,205 @@ mod tests {
         };
         let footer = exchange_footer(&result, Duration::from_millis(500), "mock/scripted");
         assert!(!footer.contains('$'), "{footer}");
+    }
+
+    /// A model whose stream is exactly the given events — for shapes `MockModel` cannot script:
+    /// reasoning-only replies, a stream cut short.
+    struct EventsModel(Mutex<Option<Vec<StreamEvent>>>);
+
+    impl EventsModel {
+        fn new(events: Vec<StreamEvent>) -> Self {
+            EventsModel(Mutex::new(Some(events)))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Model for EventsModel {
+        fn id(&self) -> &str {
+            "mock/events"
+        }
+        async fn complete(
+            &self,
+            _: &Conversation,
+            _: &[ToolSchema],
+        ) -> Result<Turn, crate::provider::ModelError> {
+            unreachable!("the REPL streams")
+        }
+        async fn stream(
+            &self,
+            _: &Conversation,
+            _: &[ToolSchema],
+        ) -> Result<crate::provider::EventStream, crate::provider::ModelError> {
+            let events = self.0.lock().unwrap().take().expect("one stream");
+            Ok(Box::pin(futures_util::stream::iter(
+                events.into_iter().map(Ok),
+            )))
+        }
+    }
+
+    fn silent_turn(stop: StopReason, usage: Usage) -> Turn {
+        Turn {
+            text: None,
+            tool_calls: Vec::new(),
+            stop,
+            usage: Some(usage),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_empty_reply_is_named_not_swallowed() {
+        let model = MockModel::scripted(vec![Turn::text("")]);
+        let (res, out) = exchange(&model, &ReplConfig::default()).await;
+        assert_eq!(res.outcome, ExchangeOutcome::Responded);
+        assert!(
+            out.contains("INFO model returned no text (stop=end_turn)"),
+            "output: {}",
+            out.dump()
+        );
+        let footer = exchange_footer(&res, Duration::from_millis(10), model.id());
+        assert!(footer.starts_with("— responded · no text"), "{footer}");
+        assert!(footer_is_alert(&res));
+    }
+
+    #[tokio::test]
+    async fn a_reasoning_only_reply_says_the_model_was_thinking() {
+        let model = EventsModel::new(vec![
+            StreamEvent::Reasoning("let me think".into()),
+            StreamEvent::Reasoning(" about it".into()),
+            StreamEvent::Done(silent_turn(StopReason::EndTurn, Usage::default())),
+        ]);
+        let (res, out) = exchange(&model, &ReplConfig::default()).await;
+        assert_eq!(res.reasoning_chars, 21);
+        assert!(
+            out.contains("model returned no text (stop=end_turn, 21 chars of reasoning)"),
+            "output: {}",
+            out.dump()
+        );
+        let footer = exchange_footer(&res, Duration::from_millis(10), model.id());
+        assert!(footer.contains("21 chars of reasoning"), "{footer}");
+    }
+
+    #[tokio::test]
+    async fn a_reply_cut_off_at_max_tokens_is_an_alert_naming_the_knob() {
+        let usage = Usage {
+            output_tokens: 4096,
+            reasoning_tokens: 4000,
+            ..Default::default()
+        };
+        let model = EventsModel::new(vec![StreamEvent::Done(silent_turn(
+            StopReason::MaxTokens,
+            usage,
+        ))]);
+        let (res, out) = exchange(&model, &ReplConfig::default()).await;
+        assert_eq!(res.last_stop, Some(StopReason::MaxTokens));
+        assert!(
+            out.contains("ERROR model returned no text (stop=max_tokens, 4.0k reasoning tok)"),
+            "output: {}",
+            out.dump()
+        );
+        assert!(
+            out.contains("max_tokens` under [provider]"),
+            "{}",
+            out.dump()
+        );
+        let footer = exchange_footer(&res, Duration::from_millis(10), model.id());
+        assert!(footer.contains("stop=max_tokens"), "{footer}");
+        assert!(footer.contains("4.0k reasoning tok"), "{footer}");
+    }
+
+    #[test]
+    fn a_truncated_reply_with_text_is_flagged_and_an_ordinary_one_is_not() {
+        let (alert, line) =
+            reply_notice(Some("half a sen"), &StopReason::MaxTokens, None, 0).unwrap();
+        assert!(alert);
+        assert!(line.starts_with("reply was cut off"), "{line}");
+        assert_eq!(
+            reply_notice(Some("fine"), &StopReason::EndTurn, None, 0),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_ends_without_done_is_an_error() {
+        let model = EventsModel::new(vec![StreamEvent::TextDelta("partial".into())]);
+        let (res, out) = exchange(&model, &ReplConfig::default()).await;
+        assert!(
+            matches!(&res.outcome, ExchangeOutcome::ApiError(d) if d.contains("without a final")),
+            "{:?}",
+            res.outcome
+        );
+        assert!(
+            out.contains("ERROR model stream ended without a final response"),
+            "output: {}",
+            out.dump()
+        );
+        // The partial prose that did arrive was closed off, not left dangling.
+        assert!(out.contains("TEXT partial"), "output: {}", out.dump());
+    }
+
+    /// Terminates the exchange at the named step.
+    struct TerminateAt(&'static str);
+
+    #[async_trait::async_trait]
+    impl crate::hooks::LoopHook for TerminateAt {
+        async fn on_event(&self, ev: &crate::hooks::StepEvent<'_>) -> crate::hooks::Flow {
+            use crate::hooks::{Flow, StepEvent};
+            match (self.0, ev) {
+                ("before_model", StepEvent::BeforeModelCall { .. })
+                | ("after_tool", StepEvent::AfterToolResult { .. }) => {
+                    Flow::Terminate(format!("hook stopped at {}", self.0))
+                }
+                _ => Flow::Continue,
+            }
+        }
+    }
+
+    fn terminating_config(step: &'static str) -> ReplConfig {
+        let policy = bee_core::Policy::from_toml("[policy]\nname='t'\n").unwrap();
+        let esc = crate::grants::escalate::LoopEscalation {
+            base: policy.clone(),
+            ceiling: policy,
+            hooks: vec![Box::new(TerminateAt(step))],
+            operator: crate::operator::Operator::autonomous(Arc::new(crate::operator::NullOutput))
+                .with_timeout(Duration::from_secs(1)),
+            default_ttl: crate::grants::Ttl::Turns(1),
+        };
+        ReplConfig {
+            escalation: Some(ReplEscalation::new(esc).unwrap()),
+            ..ReplConfig::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_before_model_call_hook_failure_is_reported() {
+        let model = MockModel::scripted(vec![Turn::text("never sent")]);
+        let (res, out) = exchange(&model, &terminating_config("before_model")).await;
+        assert!(matches!(res.outcome, ExchangeOutcome::Terminated(_)));
+        assert!(
+            out.contains("ERROR exchange ended:") && out.contains("hook stopped at before_model"),
+            "output: {}",
+            out.dump()
+        );
+        let footer = exchange_footer(&res, Duration::from_millis(10), model.id());
+        assert!(footer.contains("terminated:"), "{footer}");
+    }
+
+    #[tokio::test]
+    async fn an_after_tool_result_hook_failure_closes_the_call_then_reports() {
+        let model = MockModel::scripted(vec![Turn::calls(vec![bash_call("1", "echo ran-it")])]);
+        let (res, out) = exchange(&model, &terminating_config("after_tool")).await;
+        assert!(matches!(res.outcome, ExchangeOutcome::Terminated(_)));
+        let dump = out.dump();
+        let call = dump.find("CALL bash").expect("call line");
+        let result = dump
+            .find("RESULT err=false ran-it")
+            .expect("result line closes the call");
+        let error = dump.find("ERROR exchange ended:").expect("error line");
+        assert!(call < result && result < error, "output: {dump}");
+        assert!(
+            dump.contains("hook stopped at after_tool"),
+            "output: {dump}"
+        );
     }
 
     #[test]

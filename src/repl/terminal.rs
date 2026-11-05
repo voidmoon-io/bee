@@ -369,6 +369,11 @@ impl ReplOutput for TerminalOutput {
         self.emit(&self.role(Role::Dim, &safe_block(msg))); // dim
     }
 
+    fn footer_alert(&self, msg: &str) {
+        // The exchange did not end in a visible reply; dim would read as routine metadata.
+        self.emit(&self.role(Role::Error, &safe_block(msg)));
+    }
+
     fn steering(&self, msg: &str) {
         // accent — user's steering nudge
         self.emit(&self.role(Role::Accent, &safe_block(msg)));
@@ -547,6 +552,7 @@ mod tests {
         check("info", |t| t.info(ATTACK));
         check("error", |t| t.error(ATTACK));
         check("footer", |t| t.footer(ATTACK));
+        check("footer_alert", |t| t.footer_alert(ATTACK));
         check("steering", |t| t.steering(ATTACK));
     }
 

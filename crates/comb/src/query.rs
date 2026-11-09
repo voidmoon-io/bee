@@ -7,8 +7,8 @@
 use rusqlite::types::Value as SqlValue;
 use serde::Deserialize;
 
-use super::control::format_ts;
-use super::store::{Store, StoreError};
+use crate::control::format_ts;
+use crate::store::{Store, StoreError};
 
 /// Most rows one query returns.
 pub const MAX_LIMIT: u32 = 200;

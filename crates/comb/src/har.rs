@@ -8,8 +8,8 @@
 
 use serde::Serialize;
 
-use super::query::{history, HistoryFilter};
-use super::store::{Store, StoredExchange};
+use crate::query::{history, HistoryFilter};
+use crate::store::{Store, StoredExchange};
 
 #[derive(Serialize)]
 pub struct Har {
@@ -122,7 +122,7 @@ pub fn export(store: &Store, filter: &HistoryFilter) -> Result<Har, String> {
     if f.all_sessions.is_none() {
         f.all_sessions = Some(true);
     }
-    f.limit = Some(f.limit.unwrap_or(super::query::MAX_LIMIT));
+    f.limit = Some(f.limit.unwrap_or(crate::query::MAX_LIMIT));
     let rows = history(store, &f).map_err(|e| e.to_string())?;
     let mut entries = Vec::new();
     for r in rows.rows.iter().rev() {
@@ -169,7 +169,7 @@ fn body(store: &Store, sha: Option<&String>) -> (Vec<u8>, String) {
         .flatten()
         .map(|m| m.encoding)
         .unwrap_or_else(|| "identity".into());
-    let decoded = super::slice::decode(&raw, &enc, super::slice::DECODE_CAP)
+    let decoded = crate::slice::decode(&raw, &enc, crate::slice::DECODE_CAP)
         .map(|d| d.bytes)
         .unwrap_or(raw);
     (decoded, enc)

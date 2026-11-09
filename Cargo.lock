@@ -431,10 +431,10 @@ dependencies = [
  "bee-common",
  "bee-core",
  "bee-userspace",
- "brotli-decompressor",
  "bstr",
  "clap",
  "color-eyre",
+ "comb",
  "criterion",
  "crossterm",
  "cvss",
@@ -447,7 +447,6 @@ dependencies = [
  "hyper",
  "hyper-util",
  "insta",
- "json-patch",
  "libc",
  "monty",
  "monty-alloc",
@@ -463,12 +462,10 @@ dependencies = [
  "rusqlite",
  "rustls",
  "rustyline",
- "ruzstd",
  "serde",
  "serde_json",
  "serde_yaml_ng",
  "sha2 0.10.9",
- "similar",
  "tachyonfx",
  "tempfile",
  "textwrap",
@@ -910,6 +907,26 @@ name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
+
+[[package]]
+name = "comb"
+version = "0.1.0"
+dependencies = [
+ "bee-core",
+ "brotli-decompressor",
+ "flate2",
+ "json-patch",
+ "regex",
+ "rusqlite",
+ "ruzstd",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "similar",
+ "thiserror",
+ "time",
+ "tokio",
+]
 
 [[package]]
 name = "combine"

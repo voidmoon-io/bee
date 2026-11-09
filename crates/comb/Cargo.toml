@@ -1,0 +1,33 @@
+[package]
+name = "comb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+# rcgen 0.14 (the worker's CA, moving here with it) declares MSRV 1.88; match the application package.
+rust-version = "1.96"
+description = "HTTP(S) interception: proxy worker, exchange store, combq queries, replay, fuzz, diff."
+
+[features]
+# Test-only (019 T048): the worker's `debug.connect`/`debug.read` control frames. NEVER in a shipping
+# build — only the VM matrix enables it (through bee's `vm-test`).
+vm-test = []
+
+[dependencies]
+bee-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true }
+tokio = { workspace = true, features = ["net", "sync", "io-util", "io-std"] }
+rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled", "limits"] }
+sha2 = "0.10"
+flate2 = "1.1"
+similar = "2.7"
+regex = "1"
+brotli-decompressor = "6"
+ruzstd = "0.9"
+json-patch = "4.2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }

@@ -5,7 +5,7 @@
 //! thin adapters over these: they parse JSON arguments into a spec, make one op call, and shape the
 //! result. Ops never see a `Sandbox`; the caller passes the call's attribution as a [`CallCtx`].
 
-pub mod bound;
+pub use comb::bound;
 pub mod fuzz_run;
 pub mod read;
 pub mod replay;

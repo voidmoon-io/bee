@@ -294,7 +294,7 @@ pub struct TunnelRecord {
     pub outcome: String,
 }
 
-pub use crate::proxy_event::{ProxyEvent, ProxyEventKind};
+pub use bee_core::proxy_event::{ProxyEvent, ProxyEventKind};
 
 /// Worker → harness.
 // `Exchange` dominates the size; frames are moved once, from the codec to the handler, so boxing it

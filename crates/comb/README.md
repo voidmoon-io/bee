@@ -80,6 +80,32 @@ Call `credential` with the tool call's id before running the tool, and pass the 
 
 The proxy records forwarded traffic like any other exchange, attributed to the `call_id` (`origin: "forwarded"`). `http_intercept` rules apply to it.
 
+## combq
+
+`http_history` (and `comb history`) take `q`, a combq query, ANDed with the JSON filter fields:
+
+```
+req.method eq "POST" and resp.code gte 500
+resp.header["server"] cont "nginx" and not tag eq "baseline"
+req.path like "/api/%" and (resp.body regex "\"role\"\\s*:" or req.query cont "debug")
+req.created_at gt -10m and resp.roundtrip gt 2000
+"Authorization"           // a bare string: the raw request or response contains it
+```
+
+- **Fields:**
+  - `req.{method,host,port,path,query,ext,tls,len,created_at,header,header["name"],body,raw}`
+  - `resp.{code,len,roundtrip,ttfb,header,header["name"],body,raw}`
+  - `origin`, `call`, `tag`, `outcome`, `fuzz`, `id`, `session`, `turn`
+- **Operators:** `eq ne gt gte lt lte cont ncont like nlike regex nregex`. `cont` ignores case.
+- **Precedence:** `not` binds tighter than `and`, which binds tighter than `or`. Use parentheses for anything else.
+- **Comments:** `//`, `#` or `/* */`.
+
+A parse error carries a caret under the mistake.
+
+Column clauses run as SQL. Clauses on headers, bodies, raw bytes, regex, `query` or `ext` are checked in Rust against at most 2000 candidates. The result then reports `scanned`, and `scan_truncated` when there were more candidates than that.
+
+An `http_intercept` rule's matcher takes `when: "<combq>"`. It can use only `req.*` fields, and not `req.created_at`.
+
 ## Offline
 
 ```

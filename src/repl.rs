@@ -94,11 +94,8 @@ pub struct ReplConfig {
     /// episode, the operator is present, so consent can be a prompt rather than a pre-authorizing
     /// ceiling file.
     pub escalation: Option<ReplEscalation>,
-    /// The live HTTP history pane (019 US9): returns a fresh table when exchanges have arrived since
-    /// the last call, `None` otherwise. Set only in a session with `[policy.http]`.
-    #[allow(clippy::type_complexity)]
-    pub http_pane:
-        Option<std::sync::Arc<dyn Fn() -> Option<crate::render_spec::RenderSpec> + Send + Sync>>,
+    /// The live HTTP history pane (019 US9). Set only in a session with `[policy.http]`.
+    pub http_pane: Option<std::sync::Arc<dyn HttpPane>>,
     /// The context settings below the session (025): user and project `[context]`, and the provider
     /// file's window and reply limit.
     pub context: crate::context::ContextInputs,
@@ -390,6 +387,62 @@ pub struct ReplSession {
     pub transcript: Option<EpisodeTranscript>,
 }
 
+/// The live HTTP history pane, as a front-end drives it.
+pub trait HttpPane: Send + Sync {
+    /// A fresh table when exchanges arrived or the filter changed since the last call.
+    fn refresh(&self) -> Option<crate::render_spec::RenderSpec>;
+    /// Set (`Some`) or clear (`None`) the pane's combq filter. `Ok` describes the new state; `Err`
+    /// is a parse error with a caret, and the old filter stays.
+    fn set_filter(&self, q: Option<&str>) -> Result<String, String>;
+}
+
+/// What `/http …` asks for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HttpCommand {
+    /// `/http filter <combq>`.
+    Filter(String),
+    /// `/http filter` with nothing after it.
+    Clear,
+    /// Anything else: show usage.
+    Usage,
+}
+
+pub const HTTP_USAGE: &str = "usage: /http filter <combq query>   (e.g. resp.code gte 500 and \
+    req.path cont \"/api\")\n       /http filter                 clear the pane's filter";
+
+/// Parse a line as an `/http` command, if it is one.
+pub fn parse_http_command(line: &str) -> Option<HttpCommand> {
+    let rest = line.trim().strip_prefix("/http")?;
+    if !(rest.is_empty() || rest.starts_with(char::is_whitespace)) {
+        return None;
+    }
+    let rest = rest.trim();
+    Some(match rest.strip_prefix("filter") {
+        Some("") => HttpCommand::Clear,
+        Some(q) if q.starts_with(char::is_whitespace) => HttpCommand::Filter(q.trim().to_string()),
+        _ => HttpCommand::Usage,
+    })
+}
+
+/// Apply an `/http` command to `pane`: the line to show the operator, and whether it is an error.
+pub fn run_http_command(pane: Option<&dyn HttpPane>, cmd: HttpCommand) -> (String, bool) {
+    let Some(pane) = pane else {
+        return (
+            "this session has no [policy.http], so there is no HTTP pane".into(),
+            true,
+        );
+    };
+    let r = match cmd {
+        HttpCommand::Filter(q) => pane.set_filter(Some(&q)),
+        HttpCommand::Clear => pane.set_filter(None),
+        HttpCommand::Usage => return (HTTP_USAGE.into(), false),
+    };
+    match r {
+        Ok(m) => (m, false),
+        Err(e) => (e, true),
+    }
+}
+
 /// A parsed meta-command (a line beginning with `/`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MetaCommand {
@@ -418,6 +471,8 @@ pub enum MetaCommand {
     Retry,
     /// `/help` — list available commands.
     Help,
+    /// `/http filter …` — filter the HTTP history pane with a combq query.
+    Http(HttpCommand),
     /// An unrecognized `/command`.
     Unknown(String),
 }
@@ -428,6 +483,9 @@ pub fn parse_meta_command(line: &str) -> Option<MetaCommand> {
     let line = line.trim();
     if !line.starts_with('/') {
         return None;
+    }
+    if let Some(cmd) = parse_http_command(line) {
+        return Some(MetaCommand::Http(cmd));
     }
     let mut parts = line.splitn(2, char::is_whitespace);
     let cmd = parts.next().unwrap_or("");
@@ -461,6 +519,7 @@ const HELP_TEXT: &str = "commands:\n  \
     /skill [name]   list skills, or load one's instructions into the conversation\n  \
     /system [text]  show the system prompt, or replace it\n  \
     /history        show recent messages this session\n  \
+    /http filter q  filter the HTTP history pane with a combq query (no q: clear)\n  \
     /retry          re-send your last message\n  \
     /save [path]    write the session transcript to a JSON file (default: bee-repl-session.json)\n  \
     /audit          summarize the audit events seen so far\n  \
@@ -1823,6 +1882,14 @@ pub async fn run_repl(
                         output.info("system prompt updated.");
                     }
                     MetaCommand::History => output.info(&history_summary(&message_log)),
+                    MetaCommand::Http(cmd) => {
+                        let (msg, is_err) = run_http_command(config.http_pane.as_deref(), cmd);
+                        if is_err {
+                            output.error(&msg);
+                        } else {
+                            output.info(&msg);
+                        }
+                    }
                     MetaCommand::Retry => match &last_user_message {
                         Some(m) => to_run = Some(m.clone()),
                         None => output.error("nothing to retry yet."),
@@ -2737,5 +2804,70 @@ mod durable_resume_tests {
                 .unresolved(),
             1
         );
+    }
+}
+
+#[cfg(test)]
+mod http_command_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    #[test]
+    fn http_commands_parse() {
+        assert_eq!(
+            parse_http_command("/http filter resp.code gte 500"),
+            Some(HttpCommand::Filter("resp.code gte 500".into()))
+        );
+        assert_eq!(
+            parse_http_command("  /http filter  "),
+            Some(HttpCommand::Clear)
+        );
+        assert_eq!(parse_http_command("/http"), Some(HttpCommand::Usage));
+        assert_eq!(
+            parse_http_command("/http nonsense"),
+            Some(HttpCommand::Usage)
+        );
+        assert_eq!(parse_http_command("/httpx"), None);
+        assert_eq!(parse_http_command("tell me about /http"), None);
+        assert_eq!(
+            parse_meta_command("/http filter turn eq 1"),
+            Some(MetaCommand::Http(HttpCommand::Filter("turn eq 1".into())))
+        );
+    }
+
+    struct Fake(Mutex<Option<String>>);
+
+    impl HttpPane for Fake {
+        fn refresh(&self) -> Option<crate::render_spec::RenderSpec> {
+            None
+        }
+        fn set_filter(&self, q: Option<&str>) -> Result<String, String> {
+            if q == Some("bad") {
+                return Err("http filter: nope".into());
+            }
+            *self.0.lock().unwrap() = q.map(str::to_string);
+            Ok("ok".into())
+        }
+    }
+
+    #[test]
+    fn http_commands_reach_the_pane() {
+        let pane = Fake(Mutex::new(None));
+        let p: Option<&dyn HttpPane> = Some(&pane);
+        assert_eq!(
+            run_http_command(p, HttpCommand::Filter("turn eq 1".into())),
+            ("ok".into(), false)
+        );
+        assert_eq!(pane.0.lock().unwrap().as_deref(), Some("turn eq 1"));
+        assert!(run_http_command(p, HttpCommand::Filter("bad".into())).1);
+        assert_eq!(
+            pane.0.lock().unwrap().as_deref(),
+            Some("turn eq 1"),
+            "a bad filter keeps the old one"
+        );
+        run_http_command(p, HttpCommand::Clear);
+        assert_eq!(*pane.0.lock().unwrap(), None);
+        let (msg, err) = run_http_command(None, HttpCommand::Clear);
+        assert!(err && msg.contains("no [policy.http]"));
     }
 }

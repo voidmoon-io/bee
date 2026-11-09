@@ -63,7 +63,7 @@ pub mod repl;
 #[cfg(feature = "repro")]
 pub mod reproduction;
 // Terminal-safety for untrusted text. Ungated: every front-end and the consent prompt need it.
-pub mod safe_text;
+pub use bee_core::safe_text;
 pub mod sandbox;
 // SARIF ingestion for the external scanner tier (016-native-tools US3).
 #[cfg(feature = "scanners")]

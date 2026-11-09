@@ -938,6 +938,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "comb-cli"
+version = "0.1.0"
+dependencies = [
+ "bee-core",
+ "clap",
+ "comb",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "combine"
 version = "4.6.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"

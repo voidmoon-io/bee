@@ -1,0 +1,27 @@
+[package]
+name = "comb-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version = "1.96"
+description = "The `comb` binary: the interception proxy and its tools over a JSON-lines API."
+
+[[bin]]
+name = "comb"
+path = "src/main.rs"
+
+[features]
+vm-test = ["comb/vm-test"]
+
+[dependencies]
+comb = { workspace = true }
+bee-core = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["io-std", "io-util", "sync"] }
+libc = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

@@ -12,7 +12,9 @@
 //! are user-space checks. Every result labels which layer enforced it (`HttpScope::enforced_by`),
 //! so a standalone embedding without a kernel scope never claims one.
 
+pub mod api;
 pub mod bound;
+pub mod client;
 pub mod control;
 pub mod diff;
 pub mod fuzz;

@@ -1,6 +1,6 @@
 # `comb` binary: serve, query, get, replay, fuzz, rules
 
-Status: ready-for-agent
+Status: done
 
 `crates/comb-cli`. `comb serve --scope scope.toml --store DIR [--listen 127.0.0.1:PORT]` starts
 the proxy (spawning `comb worker` as a child, like bee does) and a JSON-lines control API on

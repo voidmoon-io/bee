@@ -13,15 +13,12 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use crate::intercept::control::{Outcome, RawTarget};
-use crate::intercept::ops::bound::b64;
-use crate::intercept::ops::send::MAX_REDIRECTS;
-use crate::intercept::ops::{self, OpError, SendResult, SendSpec, StructuredRequest};
-use crate::intercept::sidecar::Interceptor;
-use crate::provider::ToolSchema;
-use crate::sandbox::Sandbox;
-use crate::tools::http::{call_ctx, invalid, live, op_error, respond};
-use crate::tools::{Provenance, Tool, ToolResult};
+use super::{CallError, Reply, ToolDef};
+use crate::bound::b64;
+use crate::control::{Outcome, RawTarget};
+use crate::ops::send::MAX_REDIRECTS;
+use crate::ops::{self, CallCtx, OpError, SendResult, SendSpec, StructuredRequest};
+use crate::sidecar::Interceptor;
 
 pub const BOUND: usize = 4 * 1024;
 /// With a `baseline` diff (contracts/http-tools.md#http_send).
@@ -29,88 +26,70 @@ pub const BOUND_WITH_DIFF: usize = 16 * 1024;
 const DEFAULT_TIMEOUT_MS: u64 = 15_000;
 const MAX_TIMEOUT_MS: u64 = 120_000;
 
-pub struct HttpSend {
-    pub(crate) icpt: Option<Interceptor>,
-}
-
-#[async_trait::async_trait]
-impl Tool for HttpSend {
-    fn name(&self) -> &'static str {
-        "http_send"
-    }
-
-    fn schema(&self) -> ToolSchema {
-        ToolSchema {
-            name: "http_send".into(),
-            description: "Send one HTTP/1.1 request to an in-scope target through the session's \
+pub(super) fn def() -> ToolDef {
+    ToolDef {
+        name: "http_send",
+        description: "Send one HTTP/1.1 request to an in-scope target through the session's \
                           interception proxy, and record it. Give either `request` (method, url, \
                           ordered header pairs, body) or `raw` (exact bytes, sent unmodified). \
                           Returns an exchange id, status, timing and a short preview; use \
                           `http_get` to read more of it. Out-of-scope and egress-only hosts are \
-                          refused."
-                .into(),
-            parameters: json!({
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                    "request": {
-                        "type": "object",
-                        "additionalProperties": false,
-                        "properties": {
-                            "method": { "type": "string" },
-                            "url": { "type": "string", "description": "http:// or https:// URL" },
-                            "headers": { "type": "array", "items": { "type": "array", "items": { "type": "string" }, "minItems": 2, "maxItems": 2 } },
-                            "body": { "type": "string" },
-                            "body_base64": { "type": "string" }
-                        },
-                        "required": ["url"]
+                          refused.",
+        parameters: json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "request": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "method": { "type": "string" },
+                        "url": { "type": "string", "description": "http:// or https:// URL" },
+                        "headers": { "type": "array", "items": { "type": "array", "items": { "type": "string" }, "minItems": 2, "maxItems": 2 } },
+                        "body": { "type": "string" },
+                        "body_base64": { "type": "string" }
                     },
-                    "raw": {
-                        "type": "object",
-                        "additionalProperties": false,
-                        "properties": {
-                            "scheme": { "type": "string", "enum": ["http", "https"] },
-                            "host": { "type": "string" },
-                            "port": { "type": "integer" },
-                            "bytes": { "type": "string" },
-                            "bytes_base64": { "type": "string" }
-                        },
-                        "required": ["scheme", "host", "port"]
+                    "required": ["url"]
+                },
+                "raw": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "scheme": { "type": "string", "enum": ["http", "https"] },
+                        "host": { "type": "string" },
+                        "port": { "type": "integer" },
+                        "bytes": { "type": "string" },
+                        "bytes_base64": { "type": "string" }
                     },
-                    "baseline": { "type": "string", "description": "exchange id to diff the response against (same shape as http_replay's diff)" },
-                    "follow_redirects": { "type": "integer", "minimum": 0, "maximum": 5 },
-                    "timeout_ms": { "type": "integer", "minimum": 1 },
-                    "tags": { "type": "array", "items": { "type": "string" } }
-                }
-            }),
-        }
+                    "required": ["scheme", "host", "port"]
+                },
+                "baseline": { "type": "string", "description": "exchange id to diff the response against (same shape as http_replay's diff)" },
+                "follow_redirects": { "type": "integer", "minimum": 0, "maximum": 5 },
+                "timeout_ms": { "type": "integer", "minimum": 1 },
+                "tags": { "type": "array", "items": { "type": "string" } }
+            }
+        }),
     }
+}
 
-    async fn call(&self, args: Value, sandbox: &Sandbox) -> ToolResult {
-        let icpt = match live(&self.icpt).await {
-            Ok(i) => i,
-            Err(r) => return r,
-        };
-        let spec = match parse_args(&args) {
-            Ok(p) => p,
-            Err(e) => return invalid("http_send", e),
-        };
-        let baseline = spec.baseline.clone();
-        let r = match ops::send(icpt, &call_ctx(sandbox), spec).await {
-            Ok(r) => r,
-            Err(e) => return op_error("http_send", e),
-        };
-        if let Some(reason) = r.refused {
-            let note = (!r.hops.is_empty()).then(|| {
-                format!(
-                    "redirects followed before the refusal: {}",
-                    serde_json::to_string(&r.hops).unwrap_or_default()
-                )
-            });
-            return op_error("http_send", OpError::Refused { reason, note });
-        }
-        render(icpt, r, baseline.as_deref())
+pub(super) async fn call(
+    icpt: &Interceptor,
+    ctx: &CallCtx,
+    args: &Value,
+) -> Result<Reply, CallError> {
+    let spec = parse_args(args).map_err(|e| CallError::Op(OpError::Invalid(e)))?;
+    let baseline = spec.baseline.clone();
+    let r = ops::send(icpt, ctx, spec).await?;
+    if let Some(reason) = r.refused {
+        let note = (!r.hops.is_empty()).then(|| {
+            format!(
+                "redirects followed before the refusal: {}",
+                serde_json::to_string(&r.hops).unwrap_or_default()
+            )
+        });
+        return Err(CallError::Op(OpError::Refused { reason, note }));
     }
+    Ok(render(icpt, r, baseline.as_deref()))
 }
 
 fn parse_args(a: &Value) -> Result<SendSpec, String> {
@@ -243,7 +222,7 @@ fn structured(r: &Value) -> Result<(RawTarget, Vec<u8>), String> {
 }
 
 /// The bounded `http_send` result.
-fn render(icpt: &Interceptor, r: SendResult, baseline: Option<&str>) -> ToolResult {
+fn render(icpt: &Interceptor, r: SendResult, baseline: Option<&str>) -> Reply {
     let rec = &r.last.record;
     let mut v = json!({
         "id": r.last.exchange_id,
@@ -269,12 +248,9 @@ fn render(icpt: &Interceptor, r: SendResult, baseline: Option<&str>) -> ToolResu
         v["baseline"] = json!(b);
         bound = BOUND_WITH_DIFF;
     }
-    let provenance = Provenance::Remote {
-        source: format!("http:{}", r.last.exchange_id),
-    };
-    let mut res = respond("http_send", icpt, Ok(v), bound, Some(provenance));
-    res.is_error = failed;
-    res
+    let mut reply = Reply::json(&v, bound, Some(format!("http:{}", r.last.exchange_id)));
+    reply.is_error = failed;
+    reply
 }
 
 #[cfg(test)]

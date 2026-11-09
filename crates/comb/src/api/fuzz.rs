@@ -8,39 +8,25 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use crate::intercept::control::RawTarget;
-use crate::intercept::fuzz::{self, Mode, PayloadSet, Template};
-use crate::intercept::ops::{self, FuzzSpec, OpError};
-use crate::intercept::sidecar::Interceptor;
-use crate::provider::ToolSchema;
-use crate::sandbox::Sandbox;
-use crate::tools::http::{call_ctx, invalid, live, op_error, respond};
-use crate::tools::{Provenance, Tool, ToolOutcome, ToolResult, UnavailableReason};
+use super::{invalid, only_keys, CallError, PayloadFiles, Reply, ToolDef};
+use crate::control::RawTarget;
+use crate::fuzz::{self, Mode, PayloadSet, Template};
+use crate::ops::{self, CallCtx, FuzzSpec, OpError};
+use crate::sidecar::Interceptor;
 
 pub const BOUND: usize = 16 * 1024;
 
-pub struct HttpFuzz {
-    pub(crate) icpt: Option<Interceptor>,
-}
-
-#[async_trait::async_trait]
-impl Tool for HttpFuzz {
-    fn name(&self) -> &'static str {
-        "http_fuzz"
-    }
-
-    fn schema(&self) -> ToolSchema {
-        ToolSchema {
-            name: "http_fuzz".into(),
-            description: "Fuzz an in-scope target: a request template with positions marked §…§ \
+pub(super) fn def() -> ToolDef {
+    ToolDef {
+        name: "http_fuzz",
+        description: "Fuzz an in-scope target: a request template with positions marked §…§ \
                           (or a recorded exchange plus `mark`, the literal text(s) to turn into \
                           positions), payload sets (builtin: sqli-basic, xss-basic, path-traversal, \
                           common-paths; range; inline; project_file), and a mode (sniper, \
                           battering_ram, pitchfork, cluster_bomb). Runs within the policy's rate, \
                           concurrency and per-run limits, and returns response clusters with the \
-                          outliers flagged — not every response."
-                .into(),
-            parameters: json!({
+                          outliers flagged — not every response.",
+        parameters: json!({
                 "type": "object",
                 "additionalProperties": false,
                 "required": ["template", "payloads"],
@@ -57,45 +43,34 @@ impl Tool for HttpFuzz {
                     "timeout_ms": { "type": "integer", "minimum": 1 }
                 }
             }),
-        }
     }
+}
 
-    async fn call(&self, args: Value, sandbox: &Sandbox) -> ToolResult {
-        let icpt = match live(&self.icpt).await {
-            Ok(i) => i,
-            Err(r) => return r,
-        };
-        let spec = match parse(icpt, sandbox, &args).await {
-            Ok(s) => s,
-            Err(r) => return r,
-        };
-        let result = ops::fuzz(icpt, &call_ctx(sandbox), spec).await;
-        let provenance = result.as_ref().ok().map(|r| Provenance::Remote {
-            source: format!("http:fuzz:{}", r.run_id),
-        });
-        respond(
-            "http_fuzz",
-            icpt,
-            result.map(|r| r.summary),
-            BOUND,
-            provenance,
-        )
-    }
+pub(super) async fn call(
+    icpt: &Interceptor,
+    ctx: &CallCtx,
+    args: &Value,
+    files: &dyn PayloadFiles,
+) -> Result<Reply, CallError> {
+    let spec = parse(icpt, args, files).await?;
+    let r = ops::fuzz(icpt, ctx, spec).await?;
+    Ok(Reply::json(
+        &r.summary,
+        BOUND,
+        Some(format!("http:fuzz:{}", r.run_id)),
+    ))
 }
 
 /// The arguments as a [`FuzzSpec`]: the template (from `raw`, or a recorded exchange through
 /// [`ops::template_from`]) parsed, and every payload set expanded.
 async fn parse(
     icpt: &Interceptor,
-    sandbox: &Sandbox,
     args: &Value,
-) -> Result<FuzzSpec, ToolResult> {
-    let bad = |e: String| invalid("http_fuzz", e);
-    let obj = args
-        .as_object()
-        .ok_or_else(|| bad("arguments must be an object".into()))?;
-    for k in obj.keys() {
-        if ![
+    files: &dyn PayloadFiles,
+) -> Result<FuzzSpec, CallError> {
+    only_keys(
+        args,
+        &[
             "template",
             "markers",
             "payloads",
@@ -103,41 +78,36 @@ async fn parse(
             "rps",
             "concurrency",
             "timeout_ms",
-        ]
-        .contains(&k.as_str())
-        {
-            return Err(bad(format!("unknown argument `{k}`")));
-        }
-    }
-    let marker = match obj.get("markers").and_then(Value::as_str) {
+        ],
+    )?;
+    let marker = match args.get("markers").and_then(Value::as_str) {
         None => '§',
-        Some(m) if m.chars().count() == 1 => m.chars().next().unwrap(),
-        Some(_) => return Err(bad("markers is a single character".into())),
+        Some(m) if m.chars().count() == 1 => m.chars().next().unwrap_or('§'),
+        Some(_) => return Err(invalid("markers is a single character")),
     };
-    let mode: Mode = match obj.get("mode") {
+    let mode: Mode = match args.get("mode") {
         None => Mode::default(),
-        Some(m) => serde_json::from_value(m.clone()).map_err(|e| bad(format!("mode: {e}")))?,
+        Some(m) => serde_json::from_value(m.clone()).map_err(|e| invalid(format!("mode: {e}")))?,
     };
     let (target, text) = template(
         icpt,
-        obj.get("template")
-            .ok_or_else(|| bad("`template` is required".into()))?,
+        args.get("template")
+            .ok_or_else(|| invalid("`template` is required"))?,
         marker,
-    )
-    .map_err(|e| op_error("http_fuzz", e))?;
-    let template = Template::parse(&text, marker).map_err(bad)?;
+    )?;
+    let template = Template::parse(&text, marker).map_err(invalid)?;
 
     let specs: Vec<PayloadSet> =
-        serde_json::from_value(obj.get("payloads").cloned().unwrap_or(json!([])))
-            .map_err(|e| bad(format!("payloads: {e}")))?;
+        serde_json::from_value(args.get("payloads").cloned().unwrap_or(json!([])))
+            .map_err(|e| invalid(format!("payloads: {e}")))?;
     if specs.is_empty() {
-        return Err(bad("at least one payload set is required".into()));
+        return Err(invalid("at least one payload set is required"));
     }
     let mut sets = Vec::with_capacity(specs.len());
     for s in &specs {
         sets.push(match s {
-            PayloadSet::ProjectFile(path) => read_project_file(sandbox, path).await?,
-            other => fuzz::expand_set(other).map_err(bad)?,
+            PayloadSet::ProjectFile(path) => files.read_lines(path).await?,
+            other => fuzz::expand_set(other).map_err(invalid)?,
         });
     }
     Ok(FuzzSpec {
@@ -145,13 +115,13 @@ async fn parse(
         template,
         mode,
         sets,
-        rps: obj.get("rps").and_then(Value::as_u64).map(|v| v as u32),
-        concurrency: obj
+        rps: args.get("rps").and_then(Value::as_u64).map(|v| v as u32),
+        concurrency: args
             .get("concurrency")
             .and_then(Value::as_u64)
             .map(|v| v as u32),
         timeout: Duration::from_millis(
-            obj.get("timeout_ms")
+            args.get("timeout_ms")
                 .and_then(Value::as_u64)
                 .unwrap_or(15_000)
                 .clamp(1, 120_000),
@@ -200,35 +170,4 @@ fn template(icpt: &Interceptor, t: &Value, marker: char) -> Result<(RawTarget, S
         })
         .unwrap_or_default();
     ops::template_from(icpt, id, &marks, marker)
-}
-
-/// A project payload file, read by a `cat` child in the tool scope (016 rule).
-async fn read_project_file(sandbox: &Sandbox, path: &str) -> Result<Vec<String>, ToolResult> {
-    let r = crate::tools::exec::run_child(
-        sandbox,
-        "cat",
-        &["--".to_string(), path.to_string()],
-        None,
-        fuzz::MAX_FILE_BYTES + 1,
-    )
-    .await;
-    match r.exit_code {
-        Some(0) if !r.truncated => {
-            fuzz::file_lines(&r.content).map_err(|e| invalid("http_fuzz", e))
-        }
-        Some(0) => Err(invalid(
-            "http_fuzz",
-            format!("payload file exceeds {} bytes", fuzz::MAX_FILE_BYTES),
-        )),
-        // No exit code: the child never ran — `cat` is not in this scope's exec allowlist.
-        None | Some(126) | Some(127) => Err(ToolOutcome::<()>::unavailable(
-            UnavailableReason::NotGranted { name: "cat".into() },
-        )
-        .into_tool_result(|_| String::new())),
-        Some(_) => Err(ToolOutcome::<()>::failed(format!(
-            "reading {path} was refused in the tool scope: {}",
-            r.content.lines().last().unwrap_or("")
-        ))
-        .into_tool_result(|_| String::new())),
-    }
 }

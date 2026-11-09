@@ -94,6 +94,8 @@ pub struct ReplConfig {
     /// episode, the operator is present, so consent can be a prompt rather than a pre-authorizing
     /// ceiling file.
     pub escalation: Option<ReplEscalation>,
+    /// Delegation (018), present when the session holds the `task` tool.
+    pub delegation: Option<crate::delegate::Delegation>,
     /// The live HTTP history pane (019 US9). Set only in a session with `[policy.http]`.
     pub http_pane: Option<std::sync::Arc<dyn HttpPane>>,
     /// The context settings below the session (025): user and project `[context]`, and the provider
@@ -217,6 +219,7 @@ impl Default for ReplConfig {
             skills: Arc::new(crate::skills::SkillRegistry::default()),
             visual: crate::config::VisualConfig::default(),
             escalation: None,
+            delegation: None,
             http_pane: None,
             context: crate::context::ContextInputs::default(),
             stuck: crate::stuck::ResolvedStuck::default(),
@@ -1000,7 +1003,11 @@ pub async fn run_exchange(
                 }),
                 _ => None,
             };
-            let outcome = crate::call::run_call(
+            let delegator = config
+                .delegation
+                .as_ref()
+                .map(|config| crate::delegate::Delegator { config, model });
+            let outcome = crate::call::run_call_with(
                 crate::call::CallInput {
                     call: tc,
                     turn: model_turn,
@@ -1012,6 +1019,7 @@ pub async fn run_exchange(
                 sandbox,
                 registry,
                 escalation,
+                delegator.as_ref(),
             )
             .await;
             drop(active_guard);

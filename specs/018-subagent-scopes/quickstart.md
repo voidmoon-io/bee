@@ -41,10 +41,9 @@ turn-limit: 8
 requires:
   filesystem:
     ":project_root": read
-  exec: []
-  net: []
+  net: ["127.0.0.1:9"]     # narrows the parent's egress to one destination; `net: []` is refused
 ---
-Read the dependency manifests and report anything risky. You have no network.
+Read the dependency manifests and report anything risky.
 ```
 
 An agent that asks for more than a read-only parent holds, at

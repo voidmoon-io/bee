@@ -30,6 +30,7 @@ pub mod call;
 #[cfg(feature = "concurrent")]
 pub mod concurrent;
 pub mod config;
+pub mod delegate;
 // Context budget and compaction for long runs (025-long-run-resilience).
 pub mod context;
 pub mod episode;

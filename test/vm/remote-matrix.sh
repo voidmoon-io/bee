@@ -1027,6 +1027,176 @@ else
   echo "RESULT|concurrent-reload|SKIP|no bee at $BEE"
 fi
 
+# ------------------------------------------- 018 US1: a subagent is denied what its parent holds
+# The session may connect to two local listeners, A and B. Its `netprobe` agent declares only A. The
+# scripted model delegates; the child tries both (the bash tool runs dash, which has no /dev/tcp, so
+# the probe is a Python connect), then finishes; the parent then connects to B
+# itself. B must be kernel-denied to the child — recorded in the child's own transcript, stamped with
+# the child's scope id — and reachable for the parent, whose own record has no denial at all.
+if [ -x "$BEE" ]; then
+  SA=/home/ubuntu/subagent
+  sudo rm -rf "$SA"; mkdir -p "$SA/skills/netprobe" "$SA/work"
+  python3 -m http.server 18081 --bind 127.0.0.1 >/dev/null 2>&1 & LA=$!
+  python3 -m http.server 18082 --bind 127.0.0.1 >/dev/null 2>&1 & LB=$!
+  sleep 1
+  cat >"$SA/skills/netprobe/SKILL.md" <<'EOF'
+---
+name: netprobe
+kind: agent
+description: Probes local listeners.
+tools: [bash]
+turn-limit: 3
+requires:
+  net: ["127.0.0.1:18081"]
+---
+Probe the listeners you are asked about and report what you reached.
+EOF
+  cat >"$WORK/sa.policy.toml" <<'EOF'
+[policy]
+name = "sa"
+mode = "enforce"
+[policy.network]
+allow = ["127.0.0.1:18081", "127.0.0.1:18082"]
+EOF
+  cat >"$WORK/sa.scn.toml" <<EOF
+[scenario]
+finish        = false  # the parent ends on text; the child is always offered finish
+id            = "subagent-net"
+policy_path   = "$WORK/sa.policy.toml"
+system_prompt = "You are a sandboxed agent."
+task          = "Delegate the probe, then probe B yourself."
+turn_limit    = 4
+timeout_secs  = 60
+tools         = ["task", "bash"]
+skills        = ["$SA/skills"]
+EOF
+  cat >"$WORK/sa.prov.toml" <<'EOF'
+[provider]
+provider = "mock"
+[[provider.script]]
+tool = "task"
+args = { agent = "netprobe", prompt = "Probe 127.0.0.1:18081 and 127.0.0.1:18082." }
+[[provider.script]]
+tool = "bash"
+args = { command = "python3 -c 'import socket; socket.create_connection((\"127.0.0.1\", 18081), 3)' && echo CHILD-A-OPEN || echo CHILD-A-SHUT; python3 -c 'import socket; socket.create_connection((\"127.0.0.1\", 18082), 3)' && echo CHILD-B-OPEN || echo CHILD-B-SHUT" }
+[[provider.script]]
+tool = "finish"
+args = { outcome = "completed", summary = "probed both" }
+[[provider.script]]
+tool = "bash"
+args = { command = "python3 -c 'import socket; socket.create_connection((\"127.0.0.1\", 18082), 3)' && echo PARENT-B-OPEN || echo PARENT-B-SHUT" }
+[[provider.script]]
+text = "Done."
+EOF
+  (cd "$SA/work" && sudo "$BEE" run --scenario "$WORK/sa.scn.toml" --provider "$WORK/sa.prov.toml" \
+    --out "$WORK/sa.json" >"$WORK/sa.log" 2>&1)
+  kill "$LA" "$LB" 2>/dev/null
+  verdict=$(python3 - "$WORK/sa.json" <<'PY' 2>&1
+import json, sys
+try:
+    t = json.load(open(sys.argv[1]))
+except Exception as e:
+    print(f"no transcript: {e}"); sys.exit()
+calls = [c for turn in t.get("turns", []) for c in turn.get("calls", [])]
+task = next((c for c in calls if c["call"]["name"] == "task"), None)
+child = (task or {}).get("child") or {}
+ct = child.get("transcript") or {}
+def outputs(tr):
+    # Tool results only: the markers also appear in the recorded commands themselves.
+    return "\n".join(c["result"]["content"] for turn in tr.get("turns", []) for c in turn.get("calls", []))
+child_out = outputs(ct)
+parent_out = "\n".join(c["result"]["content"] for c in calls if c["call"]["name"] != "task")
+den = [e for e in ct.get("audit_trail", []) if e["decision"] == "denied" and e["op"] == "connect"]
+parent_den = [e for e in t.get("audit_trail", []) if e["decision"] == "denied"]
+checks = {
+    "child enforced": child.get("enforced") is True,
+    "child completed": (child.get("outcome") or {}).get("kind") == "completed",
+    "child reached A": "CHILD-A-OPEN" in child_out,
+    "child shut out of B": "CHILD-B-SHUT" in child_out and "CHILD-B-OPEN" not in child_out,
+    "B denial in the child's record": any("18082" in e.get("target", "") for e in den),
+    "child denials stamped with its scope": bool(den) and all(e.get("scope_id") == child.get("scope_id") for e in den),
+    "parent reached B": "PARENT-B-OPEN" in parent_out and "PARENT-B-SHUT" not in parent_out,
+    "no denial in the parent's record": not parent_den,
+}
+bad = [k for k, v in checks.items() if not v]
+print("OK" if not bad else "failed: " + ", ".join(bad))
+PY
+)
+  if [ "$verdict" = OK ]; then
+    emit subagent-net-denied PASS "child kernel-denied B (its own record, its scope); parent reached B"
+  else
+    emit subagent-net-denied FAIL "$verdict ($(tail -1 "$WORK/sa.log" 2>/dev/null))"
+  fi
+  sudo rm -rf "$SA"
+else
+  echo "RESULT|subagent-net-denied|SKIP|no bee at $BEE"
+fi
+
+# --------------------------------------- 018 US2: an over-broad agent is refused before any scope
+# The agent asks for a destination its session does not hold. The delegation must be refused with
+# the rule named, and no subagent cgroup may ever have existed: the refusal comes before creation.
+if [ -x "$BEE" ]; then
+  OG=/home/ubuntu/overgrant
+  sudo rm -rf "$OG"; mkdir -p "$OG/skills/greedy" "$OG/work"
+  cat >"$OG/skills/greedy/SKILL.md" <<'EOF'
+---
+name: greedy
+kind: agent
+description: Wants more than it may have.
+tools: []
+turn-limit: 2
+requires:
+  net: ["127.0.0.1:18099"]
+---
+Reach the listener.
+EOF
+  cat >"$WORK/og.policy.toml" <<'EOF'
+[policy]
+name = "og"
+mode = "enforce"
+[policy.network]
+allow = ["127.0.0.1:18081"]
+EOF
+  cat >"$WORK/og.scn.toml" <<EOF
+[scenario]
+finish        = false
+id            = "subagent-overgrant"
+policy_path   = "$WORK/og.policy.toml"
+system_prompt = "You are a sandboxed agent."
+task          = "Delegate."
+turn_limit    = 3
+timeout_secs  = 30
+tools         = ["task"]
+skills        = ["$OG/skills"]
+EOF
+  cat >"$WORK/og.prov.toml" <<'EOF'
+[provider]
+provider = "mock"
+[[provider.script]]
+tool = "task"
+args = { agent = "greedy", prompt = "Reach it." }
+[[provider.script]]
+text = "Done."
+EOF
+  # Watch for any subagent cgroup while the episode runs, not just after it.
+  ( for _ in $(seq 1 200); do ls /sys/fs/cgroup/bee 2>/dev/null | grep -- '-sub-' ; sleep 0.05; done ) >"$WORK/og.cg" 2>/dev/null & W=$!
+  (cd "$OG/work" && sudo "$BEE" run --scenario "$WORK/og.scn.toml" --provider "$WORK/og.prov.toml" \
+    --out "$WORK/og.json" >"$WORK/og.log" 2>&1)
+  wait "$W" 2>/dev/null
+  if [ ! -f "$WORK/og.json" ]; then
+    emit subagent-overgrant-no-cgroup FAIL "no transcript ($(tail -1 "$WORK/og.log" 2>/dev/null))"
+  elif ! grep -q 'REFUSED' "$WORK/og.json" || ! grep -q '127.0.0.1:18099' "$WORK/og.json"; then
+    emit subagent-overgrant-no-cgroup FAIL "delegation was not refused naming the destination"
+  elif [ -s "$WORK/og.cg" ]; then
+    emit subagent-overgrant-no-cgroup FAIL "a subagent cgroup existed: $(head -1 "$WORK/og.cg")"
+  else
+    emit subagent-overgrant-no-cgroup PASS "refused naming 127.0.0.1:18099; no subagent cgroup ever appeared"
+  fi
+  sudo rm -rf "$OG"
+else
+  echo "RESULT|subagent-overgrant-no-cgroup|SKIP|no bee at $BEE"
+fi
+
 # ---------------------------------------------------------------- 019: HTTP interception (US1)
 # One scripted episode under `[policy.http]`, one tool call per probe. Each call is its own credential
 # (its own call id), so every probe is attributed separately in the transcript. The in-VM targets are

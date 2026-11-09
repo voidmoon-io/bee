@@ -208,6 +208,7 @@ fn enforcement_trace_extracts_audit() {
         timed_out: false,
         not_run: false,
         refused_by_hook: None,
+        child: None,
         proxy_events: Vec::new(),
         call: ToolCall {
             id: "c1".into(),

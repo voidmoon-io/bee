@@ -75,8 +75,109 @@ struct Frontmatter {
     /// model-invocable). Named to match the ecosystem convention.
     #[serde(default)]
     disable_model_invocation: Option<bool>,
+    /// `skill` (the default) or `agent` (018): an agent's body is delegated to a child under its own
+    /// scope rather than injected into the current agent.
     #[serde(default)]
-    requires: Option<SkillRequires>,
+    kind: Option<String>,
+    /// An agent's tool set (018). Required for an agent; meaningless for a skill.
+    #[serde(default)]
+    tools: Option<Vec<String>>,
+    /// An agent's own turn limit (018).
+    #[serde(default)]
+    turn_limit: Option<u32>,
+    /// Parsed per kind: a skill's [`SkillRequires`], an agent's [`AgentRequires`].
+    #[serde(default)]
+    requires: Option<serde_yaml_ng::Value>,
+}
+
+/// The capabilities an agent definition declares (018, contracts/agent-definition.md). It is
+/// **subtractive**: the child's policy is the delegating session's active policy narrowed by it, so
+/// a dimension it leaves out is inherited, and nothing here can exceed what the parent holds.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentRequires {
+    /// `path -> read | write | deny`, the bee policy vocabulary.
+    #[serde(default)]
+    pub filesystem: BTreeMap<String, String>,
+    /// Executables, as in a policy's `exec.allow` — a subset of the parent's.
+    #[serde(default)]
+    pub exec: Option<Vec<String>>,
+    /// `host:port` destinations, as in a policy's `network.allow` — a subset of the parent's.
+    #[serde(default)]
+    pub net: Option<Vec<String>>,
+}
+
+/// An operator-authored, delegable agent (018): a `SKILL.md` with `kind: agent`. The model can name
+/// it and hand it a task; it cannot say what the agent may do — this definition does.
+#[derive(Debug, Clone)]
+pub struct Agent {
+    pub name: String,
+    /// The only text the delegating model sees when it chooses an agent.
+    pub description: String,
+    /// Tools the child gets — each must be one the delegating session holds.
+    pub tools: Vec<String>,
+    pub turn_limit: u32,
+    /// `None`: the child inherits the parent's policy unchanged.
+    pub requires: Option<AgentRequires>,
+    pub dir: PathBuf,
+    pub skill_md: PathBuf,
+    pub source: SkillSource,
+}
+
+impl Agent {
+    /// The child's instructions: the body after the frontmatter. Read host-side, never through a
+    /// sandbox.
+    pub fn body(&self) -> std::io::Result<String> {
+        let text = std::fs::read_to_string(&self.skill_md)?;
+        Ok(match split_frontmatter(&text) {
+            Some((_, body)) => body.trim_start_matches('\n').to_string(),
+            None => text,
+        })
+    }
+
+    /// The policy this agent asks for, before attenuation. It is a *request*: `Policy::derive`
+    /// against the parent's active policy decides what the child gets, and refuses it outright if it
+    /// asks for more. Always `enforce` — a mode may only stay as strict or become stricter.
+    pub fn requested_policy(&self) -> bee_core::Policy {
+        let mut policy = bee_core::Policy {
+            name: format!("agent-{}", self.name),
+            defaults: Default::default(),
+            description: Some(self.description.clone()),
+            mode: bee_core::Mode::Enforce,
+            filesystem: BTreeMap::new(),
+            exec: Default::default(),
+            network: Default::default(),
+            exfiltration: Default::default(),
+            http: None,
+        };
+        if let Some(r) = &self.requires {
+            for (path, access) in &r.filesystem {
+                // Validated at discovery, so every value parses.
+                if let Some(a) = parse_access(access) {
+                    policy.filesystem.insert(path.clone(), a);
+                }
+            }
+            policy.exec.allow = r.exec.clone().unwrap_or_default();
+            policy.network.allow = r.net.clone().unwrap_or_default();
+        }
+        policy
+    }
+}
+
+fn parse_access(s: &str) -> Option<bee_core::Access> {
+    match s {
+        "read" => Some(bee_core::Access::Read),
+        "write" => Some(bee_core::Access::Write),
+        "deny" => Some(bee_core::Access::Deny),
+        _ => None,
+    }
+}
+
+/// One `SKILL.md`, by kind.
+#[derive(Debug)]
+enum Loaded {
+    Skill(Skill),
+    Agent(Agent),
 }
 
 /// One discovered skill: its metadata plus the on-disk location of its body (read lazily, so a large
@@ -128,6 +229,10 @@ pub struct SkillLoadError {
 #[derive(Debug, Default)]
 pub struct SkillRegistry {
     skills: BTreeMap<String, Skill>,
+    /// Agent definitions (018), kept apart from skills on purpose: start-up grants and escalation
+    /// read every skill's `requires`, and an agent's must never widen the session that delegates to
+    /// it.
+    agents: BTreeMap<String, Agent>,
     warnings: Vec<SkillLoadError>,
 }
 
@@ -186,7 +291,8 @@ impl SkillRegistry {
                 continue; // not a skill directory
             }
             match load_skill(&dir, &skill_md, source) {
-                Ok(skill) => self.insert(skill),
+                Ok(Loaded::Skill(skill)) => self.insert(skill),
+                Ok(Loaded::Agent(agent)) => self.insert_agent(agent),
                 Err(reason) => self.warnings.push(SkillLoadError {
                     path: skill_md,
                     reason,
@@ -210,6 +316,33 @@ impl SkillRegistry {
             return;
         }
         self.skills.insert(skill.name.clone(), skill);
+    }
+
+    /// As [`insert`](Self::insert), for an agent. The warning names both definitions.
+    fn insert_agent(&mut self, agent: Agent) {
+        if let Some(existing) = self.agents.get(&agent.name) {
+            self.warnings.push(SkillLoadError {
+                path: agent.skill_md.clone(),
+                reason: format!(
+                    "agent '{}' shadowed by higher-precedence {} definition at {}",
+                    agent.name,
+                    existing.source.label(),
+                    existing.skill_md.display()
+                ),
+            });
+            return;
+        }
+        self.agents.insert(agent.name.clone(), agent);
+    }
+
+    /// Agent definitions (018), in stable name order.
+    pub fn agents(&self) -> impl Iterator<Item = &Agent> {
+        self.agents.values()
+    }
+
+    /// Look up an agent definition by name.
+    pub fn agent(&self, name: &str) -> Option<&Agent> {
+        self.agents.get(name)
     }
 
     /// True when no skills were discovered.
@@ -248,8 +381,9 @@ impl SkillRegistry {
     }
 }
 
-/// Parse one `SKILL.md` into a [`Skill`]. Returns a human-readable reason on any failure.
-fn load_skill(dir: &Path, skill_md: &Path, source: SkillSource) -> Result<Skill, String> {
+/// Parse one `SKILL.md` into a [`Skill`] or, with `kind: agent`, an [`Agent`]. Returns a
+/// human-readable reason on any failure.
+fn load_skill(dir: &Path, skill_md: &Path, source: SkillSource) -> Result<Loaded, String> {
     let text = std::fs::read_to_string(skill_md).map_err(|e| format!("read: {e}"))?;
     let (front, _body) = split_frontmatter(&text)
         .ok_or_else(|| "missing YAML frontmatter (`---` fences)".to_string())?;
@@ -268,7 +402,28 @@ fn load_skill(dir: &Path, skill_md: &Path, source: SkillSource) -> Result<Skill,
     // legitimate skill name, description, tool name, or path needs a character that moves a cursor.
     reject_controls("name", &fm.name)?;
     reject_controls("description", &fm.description)?;
-    if let Some(r) = &fm.requires {
+
+    match fm.kind.as_deref().unwrap_or("skill") {
+        "skill" => load_as_skill(fm, dir, skill_md, source).map(Loaded::Skill),
+        "agent" => load_as_agent(fm, dir, skill_md, source).map(Loaded::Agent),
+        other => Err(format!(
+            "frontmatter `kind` is '{other}' (expected `skill` or `agent`)"
+        )),
+    }
+}
+
+fn load_as_skill(
+    fm: Frontmatter,
+    dir: &Path,
+    skill_md: &Path,
+    source: SkillSource,
+) -> Result<Skill, String> {
+    let requires: Option<SkillRequires> = fm
+        .requires
+        .map(serde_yaml_ng::from_value)
+        .transpose()
+        .map_err(|e| format!("frontmatter: requires: {e}"))?;
+    if let Some(r) = &requires {
         for t in &r.tools {
             reject_controls("requires.tools entry", t)?;
         }
@@ -278,7 +433,7 @@ fn load_skill(dir: &Path, skill_md: &Path, source: SkillSource) -> Result<Skill,
         }
     }
 
-    let requires = fm.requires.filter(|r| !r.is_empty());
+    let requires = requires.filter(|r| !r.is_empty());
 
     Ok(Skill {
         name: fm.name,
@@ -289,6 +444,73 @@ fn load_skill(dir: &Path, skill_md: &Path, source: SkillSource) -> Result<Skill,
         // Defaults (matching the ecosystem): user-invocable off, model-invocable on.
         user_invocable: fm.user_invocable.unwrap_or(false),
         model_invocable: !fm.disable_model_invocation.unwrap_or(false),
+        source,
+    })
+}
+
+/// The rules in contracts/agent-definition.md. A definition that fails one is never offered.
+fn load_as_agent(
+    fm: Frontmatter,
+    dir: &Path,
+    skill_md: &Path,
+    source: SkillSource,
+) -> Result<Agent, String> {
+    let tools = fm
+        .tools
+        .ok_or("an agent needs `tools` (it may be empty: `tools: []`)")?;
+    for t in &tools {
+        reject_controls("tools entry", t)?;
+    }
+    let turn_limit = match fm.turn_limit {
+        None => return Err("an agent needs `turn-limit`".into()),
+        Some(0) => return Err("`turn-limit` must be at least 1".into()),
+        Some(n) => n,
+    };
+    let requires: Option<AgentRequires> = fm
+        .requires
+        .map(serde_yaml_ng::from_value)
+        .transpose()
+        .map_err(|e| {
+            format!("frontmatter: requires: {e} (an agent's tools are the top-level `tools` key)")
+        })?;
+    if let Some(r) = &requires {
+        for (path, access) in &r.filesystem {
+            reject_controls("requires.filesystem path", path)?;
+            if parse_access(access).is_none() {
+                return Err(format!(
+                    "requires.filesystem '{path}' is '{access}' (expected read, write or deny)"
+                ));
+            }
+        }
+        // An empty list would read as "none", but a child policy that states no rule for a
+        // dimension inherits the parent's — and bee cannot yet install "no destinations" or "no
+        // executables" in the kernel. Refuse rather than hand out the parent's list under a
+        // declaration that reads as its opposite.
+        for (key, list) in [("exec", &r.exec), ("net", &r.net)] {
+            match list {
+                Some(l) if l.is_empty() => {
+                    return Err(format!(
+                        "requires.{key} is empty, which bee cannot enforce as \"none\" yet: \
+                         omit it to inherit the delegating session's, or list a subset"
+                    ))
+                }
+                Some(l) => {
+                    for e in l {
+                        reject_controls(&format!("requires.{key} entry"), e)?;
+                    }
+                }
+                None => {}
+            }
+        }
+    }
+    Ok(Agent {
+        name: fm.name,
+        description: fm.description,
+        tools,
+        turn_limit,
+        requires,
+        dir: dir.to_path_buf(),
+        skill_md: skill_md.to_path_buf(),
         source,
     })
 }
@@ -406,6 +628,116 @@ mod tests {
                 "refused for the wrong reason ({err}) on: {front}"
             );
         }
+    }
+
+    // 018 (quickstart S1): an agent definition loads as an agent, apart from skills, so start-up
+    // grants and escalation — which read every skill's `requires` — never see an agent's.
+    #[test]
+    fn an_agent_loads_apart_from_skills() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().to_path_buf();
+        write_skill(
+            &dir,
+            "auditor",
+            "---\nname: auditor\nkind: agent\ndescription: audits deps\ntools: [read_file]\n\
+             turn-limit: 5\nrequires:\n  filesystem:\n    /src: read\n  net: [\"127.0.0.1:9\"]\n---\nAudit.\n",
+        );
+        write_skill(
+            &dir,
+            "plain",
+            "---\nname: plain\ndescription: a skill\n---\nDo it.\n",
+        );
+        let reg = SkillRegistry::discover(std::slice::from_ref(&dir));
+        assert!(reg.warnings().is_empty(), "{:?}", reg.warnings());
+        assert!(reg.get("auditor").is_none(), "an agent is not a skill");
+        assert!(reg.get("plain").is_some());
+        let a = reg.agent("auditor").expect("loaded as an agent");
+        assert_eq!(a.tools, vec!["read_file".to_string()]);
+        assert_eq!(a.turn_limit, 5);
+        assert_eq!(a.body().unwrap(), "Audit.\n");
+        let p = a.requested_policy();
+        assert_eq!(p.filesystem.get("/src"), Some(&bee_core::Access::Read));
+        assert_eq!(p.network.allow, vec!["127.0.0.1:9".to_string()]);
+        assert_eq!(p.mode, bee_core::Mode::Enforce);
+    }
+
+    #[test]
+    fn a_project_agent_shadows_a_user_one_and_the_warning_names_both() {
+        let project = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        let def = "---\nname: dup\nkind: agent\ndescription: d\ntools: []\nturn-limit: 1\n---\nb\n";
+        write_skill(project.path(), "dup", def);
+        write_skill(user.path(), "dup", def);
+        let reg = SkillRegistry::discover(&[project.path().into(), user.path().into()]);
+        assert_eq!(reg.agent("dup").unwrap().source, SkillSource::Project);
+        let w = &reg.warnings()[0];
+        assert!(w.path.starts_with(user.path()), "{w:?}");
+        assert!(
+            w.reason.contains(&project.path().display().to_string()),
+            "{}",
+            w.reason
+        );
+    }
+
+    #[test]
+    fn a_malformed_agent_warns_and_is_not_offered() {
+        for (front, why) in [
+            ("tools: []\nturn-limit: 0", "turn-limit"),
+            ("tools: []", "turn-limit"),
+            ("turn-limit: 2", "tools"),
+            (
+                "tools: []\nturn-limit: 2\nrequires:\n  filesystem:\n    /x: rw",
+                "read, write or deny",
+            ),
+            (
+                "tools: []\nturn-limit: 2\nrequires:\n  tools: [bash]",
+                "top-level `tools`",
+            ),
+            // An empty list reads as "none" but would inherit the parent's: refused, not guessed.
+            (
+                "tools: []\nturn-limit: 2\nrequires:\n  net: []",
+                "cannot enforce",
+            ),
+            (
+                "tools: []\nturn-limit: 2\nrequires:\n  exec: []",
+                "cannot enforce",
+            ),
+            ("tools: []\nturn-limit: 2\nkind2: x", ""),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let dir = temp.path().to_path_buf();
+            write_skill(
+                &dir,
+                "bad",
+                &format!("---\nname: bad\nkind: agent\ndescription: d\n{front}\n---\nb\n"),
+            );
+            let reg = SkillRegistry::discover(std::slice::from_ref(&dir));
+            if why.is_empty() {
+                // Unknown keys are tolerated, as for skills.
+                assert!(reg.agent("bad").is_some(), "{front}");
+                continue;
+            }
+            assert!(reg.agent("bad").is_none(), "offered despite: {front}");
+            assert!(
+                reg.warnings().iter().any(|w| w.reason.contains(why)),
+                "{front}: {:?}",
+                reg.warnings()
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_kind_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().to_path_buf();
+        write_skill(
+            &dir,
+            "k",
+            "---\nname: k\nkind: robot\ndescription: d\n---\nb\n",
+        );
+        let reg = SkillRegistry::discover(std::slice::from_ref(&dir));
+        assert!(reg.get("k").is_none() && reg.agent("k").is_none());
+        assert!(reg.warnings()[0].reason.contains("robot"));
     }
 
     /// The body is markdown, not identity — it stays as authored and is escaped where it is shown.

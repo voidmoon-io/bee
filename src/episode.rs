@@ -46,6 +46,9 @@ pub struct LoopOptions {
     pub context: crate::context::ContextInputs,
     /// User and project `[stuck]` (025 US2). The scenario's own `[stuck]` is merged over it.
     pub stuck: crate::stuck::StuckConfig,
+    /// Delegation (018), present when the session holds the `task` tool. `None`: a `task` call is
+    /// refused rather than run.
+    pub delegation: Option<crate::delegate::Delegation>,
 }
 
 impl Default for LoopOptions {
@@ -60,6 +63,7 @@ impl Default for LoopOptions {
             escalation: None,
             context: crate::context::ContextInputs::default(),
             stuck: crate::stuck::StuckConfig::default(),
+            delegation: None,
         }
     }
 }
@@ -232,6 +236,15 @@ pub async fn run_loop(
 ) -> EpisodeTranscript {
     #[cfg(feature = "durable-sessions")]
     if let Some(binding) = &opts.durable {
+        // The durable driver has no delegation path; refuse rather than let a `task` call reach
+        // its executor (018, tasks T054).
+        if registry.contains("task") {
+            return infra_error(
+                scenario,
+                model,
+                "durable sessions do not support the task tool yet".into(),
+            );
+        }
         return crate::session::driver::run_episode(
             model, scenario, registry, sandbox, opts, binding,
         )
@@ -252,6 +265,11 @@ pub async fn run_loop(
     );
 
     let mut convo = Conversation::new(&scenario.system_prompt, &scenario.task);
+    // What a `task` call is fulfilled with (018): the session's agents, and this model.
+    let delegator = opts
+        .delegation
+        .as_ref()
+        .map(|config| crate::delegate::Delegator { config, model });
 
     // The context budget (025): never send a request over it, and cap each result the model sees.
     let mut ctx = match crate::context::ContextManager::for_session(
@@ -532,7 +550,7 @@ pub async fn run_loop(
 
             // The call, start to finish: escalation, the timed attempt, its audit, at most one retry,
             // the proxy and late drains (024, src/call.rs). Rendering the outcome stays here.
-            let outcome = crate::call::run_call(
+            let outcome = crate::call::run_call_with(
                 crate::call::CallInput {
                     call: tc,
                     turn: index,
@@ -549,6 +567,7 @@ pub async fn run_loop(
                     }),
                     _ => None,
                 },
+                delegator.as_ref(),
             )
             .await;
             audit_trail.extend(outcome.audit_trail().cloned());
@@ -771,6 +790,7 @@ fn not_run(call: &crate::provider::ToolCall) -> RecordedCall {
         timed_out: false,
         not_run: true,
         refused_by_hook: None,
+        child: None,
     }
 }
 
@@ -1006,7 +1026,9 @@ async fn run_episode_inner(
     let mut opts = LoopOptions {
         #[cfg(feature = "durable-sessions")]
         durable,
-        progress: progress.map(|p| Box::new(move |line: &str| p(line)) as ProgressSink),
+        progress: progress
+            .clone()
+            .map(|p| Box::new(move |line: &str| p(line)) as ProgressSink),
         metrics: Recorder::new(
             "episode",
             format!("episode:{}:{}", scenario.id, std::process::id()),
@@ -1049,6 +1071,9 @@ async fn run_episode_inner(
     }
     opts.escalation = session.escalation.take();
     opts.tool_refresh = session.tool_refresh.clone();
+    opts.delegation = session.delegation(progress.clone().map(|p| {
+        std::sync::Arc::new(move |line: &str| p(line)) as crate::delegate::SharedProgress
+    }));
 
     // The model is given the session's system prompt: the scenario's, plus the notes for the tools
     // the session holds — the same prompt the REPL builds (024 FR-007).

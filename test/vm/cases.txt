@@ -5,6 +5,8 @@ bee-check
 cgroup-migrate-enforced
 concurrent-audit-isolation
 concurrent-reload
+subagent-net-denied
+subagent-overgrant-no-cgroup
 episode-allow
 episode-file-deny
 exec-allow

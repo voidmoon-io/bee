@@ -117,6 +117,75 @@ pub struct RecordedCall {
     /// A hook refused the call before it ran (024 FR-031); the tool never executed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refused_by_hook: Option<String>,
+    /// The subagent this call delegated to (018), with its own turn-by-turn record. Absent on every
+    /// call that did not delegate, so a session that never delegates records exactly what it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child: Option<Box<DelegationRecord>>,
+}
+
+/// What one delegation left behind (018, contracts/delegation-record.md): which agent ran, in which
+/// scope, how it ended, and its whole transcript. The child's kernel events are in that transcript,
+/// stamped with its scope id, and never in the parent's.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DelegationRecord {
+    pub agent: String,
+    /// The child's scope id; empty when it was refused before a scope existed.
+    pub scope_id: String,
+    /// Whether a kernel scope confined the child. Recorded when it was spawned, so a transcript
+    /// read later tells an enforced delegation from prompt isolation without knowing the build.
+    pub enforced: bool,
+    /// 1 for a subagent of the session itself.
+    pub depth: u32,
+    pub outcome: DelegationOutcome,
+    /// The child's own record. `None` when it never ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<Box<EpisodeTranscript>>,
+    pub turns_used: u32,
+}
+
+/// How a delegation ended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DelegationOutcome {
+    /// The child's loop ended on its own and its scope was torn down cleanly.
+    Completed,
+    /// A shared bound stopped the child before it ended on its own.
+    CutShort { reason: CutShortReason },
+    /// The delegation never got a scope.
+    Refused { reason: RefusalReason },
+    /// The child could not start, failed, or its scope would not tear down.
+    Failed { detail: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CutShortReason {
+    Turns,
+    Deadline,
+}
+
+/// Why a delegation was refused (contracts/task-tool.md). Each names its cause.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RefusalReason {
+    UnknownAgent {
+        name: String,
+    },
+    /// The agent lists a tool the delegating session does not hold, or cannot hand to a child.
+    ToolNotHeld {
+        tool: String,
+    },
+    /// The agent's declaration asks for more than the session holds.
+    OverGrant {
+        detail: String,
+    },
+    DepthExceeded {
+        max_depth: u32,
+    },
+    /// The session cannot delegate at all, and why.
+    Unavailable {
+        detail: String,
+    },
 }
 
 /// The interception session a transcript was recorded under (019 T044): how `[policy.http]` was
@@ -310,9 +379,37 @@ impl EpisodeTranscript {
         serde_json::to_string_pretty(self).expect("EpisodeTranscript is always serializable")
     }
 
-    /// Convenience: every denied audit event across the episode.
+    /// Convenience: every denied audit event across the episode — this scope's own, never a
+    /// subagent's (see [`audit_tree`](Self::audit_tree)).
     pub fn denials(&self) -> impl Iterator<Item = &AuditEvent> {
         self.audit_trail.iter().filter(|e| e.decision == "denied")
+    }
+
+    /// Every delegation in this transcript and its descendants, depth-first (018).
+    pub fn delegations(&self) -> Vec<&DelegationRecord> {
+        let mut out = Vec::new();
+        for call in self.turns.iter().flat_map(|t| &t.calls) {
+            if let Some(child) = &call.child {
+                out.push(child.as_ref());
+                if let Some(t) = &child.transcript {
+                    out.extend(t.delegations());
+                }
+            }
+        }
+        out
+    }
+
+    /// Every kernel event in this transcript and every descendant delegation's, in tree order:
+    /// this scope's first, then each subagent's (018). Each event appears once — it was routed to
+    /// exactly one scope.
+    pub fn audit_tree(&self) -> Vec<&AuditEvent> {
+        let mut out: Vec<&AuditEvent> = self.audit_trail.iter().collect();
+        for call in self.turns.iter().flat_map(|t| &t.calls) {
+            if let Some(t) = call.child.as_ref().and_then(|c| c.transcript.as_ref()) {
+                out.extend(t.audit_tree());
+            }
+        }
+        out
     }
 
     /// Every panel effect across the episode, in turn/call order (008-grid-tui, FR-010). Derived
@@ -556,6 +653,7 @@ pub fn tool_result_from_output(
         panel_ops: Vec::new(),
         inline_effect: None,
         provenance: crate::provider::Provenance::Harness,
+        delegate: None,
     }
 }
 

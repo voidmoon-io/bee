@@ -103,6 +103,17 @@ impl Session {
         self.sandbox.teardown().map_err(|e| e.to_string())
     }
 
+    /// The delegation settings a loop over this session runs with (018): `Some` exactly when the
+    /// session holds the `task` tool.
+    pub fn delegation(
+        &self,
+        progress: Option<crate::delegate::SharedProgress>,
+    ) -> Option<crate::delegate::Delegation> {
+        self.registry
+            .contains("task")
+            .then(|| crate::delegate::Delegation::new(self.skills.clone(), progress))
+    }
+
     /// What every entry point's session must agree on (SC-001): the tools and their dependencies, the
     /// escalation floor and ceiling, how grants are decided, and the system prompt. Serializable, so
     /// two sessions compare as data; the Operator — the one thing allowed to differ — is not in it.
@@ -267,6 +278,8 @@ async fn build_from(
             .next()
             .is_some()
             .then(|| skills.clone()),
+        // 018: `task` is offered only when there is an agent to delegate to.
+        agents: skills.agents().next().is_some().then(|| skills.clone()),
         ..ToolDeps::default()
     }
     .with_security(&spec.security, Some(&grants.policy), &run_id);

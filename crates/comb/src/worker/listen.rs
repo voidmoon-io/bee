@@ -16,7 +16,7 @@ use hyper_util::rt::TokioIo;
 
 use super::scope::Refusal;
 use super::Worker;
-use crate::intercept::control::{ProxyEventKind, WireCtx};
+use crate::control::{ProxyEventKind, WireCtx};
 
 pub type ProxyBody = BoxBody<Bytes, hyper::Error>;
 

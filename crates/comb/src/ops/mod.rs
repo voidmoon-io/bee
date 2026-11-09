@@ -5,7 +5,7 @@
 //! thin adapters over these: they parse JSON arguments into a spec, make one op call, and shape the
 //! result. Ops never see a `Sandbox`; the caller passes the call's attribution as a [`CallCtx`].
 
-pub use comb::bound;
+pub use crate::bound;
 pub mod fuzz_run;
 pub mod read;
 pub mod replay;
@@ -18,12 +18,12 @@ pub use replay::{replay, side_of, stored_request, ReplayResult, ReplaySpec};
 pub use send::{build_request, send, Hop, Preview, SendResult, SendSpec, StructuredRequest};
 pub use sitemap::{sitemap, SitemapQuery};
 
-use crate::intercept::control::{ProxyEventKind, RawTarget};
-use crate::intercept::sidecar::InterceptError;
+use crate::control::{ProxyEventKind, RawTarget};
+use crate::sidecar::InterceptError;
 
 /// Which call an op's traffic is attributed to: call id, turn and origin, as they travel to the
 /// worker with the call's credential.
-pub type CallCtx = crate::intercept::control::WireCtx;
+pub type CallCtx = crate::control::WireCtx;
 
 /// Why an operation did not produce its result.
 #[derive(Debug, Clone, PartialEq, Eq)]

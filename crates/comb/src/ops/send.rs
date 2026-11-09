@@ -11,9 +11,9 @@ use serde_json::Value;
 
 use super::bound::{clip, text_or_binary};
 use super::{CallCtx, OpError, Refusal};
-use crate::intercept::control::{OriginKind, Outcome, RawTarget};
-use crate::intercept::sidecar::{Interceptor, Sent};
-use crate::intercept::worker::scope::ScopeChecker;
+use crate::control::{OriginKind, Outcome, RawTarget};
+use crate::sidecar::{Interceptor, Sent};
+use crate::worker::scope::ScopeChecker;
 
 /// The most redirect hops a send follows.
 pub const MAX_REDIRECTS: u32 = 5;
@@ -316,7 +316,7 @@ fn finish(icpt: &Interceptor, sent: Sent, hops: Vec<Hop>, baseline: Option<&str>
     let diff = baseline.and_then(|b| {
         let base = super::side_of(icpt, b).ok()?;
         let new = super::side_of(icpt, &sent.exchange_id).ok()?;
-        Some(crate::intercept::diff::diff(&base, &new, None))
+        Some(crate::diff::diff(&base, &new, None))
     });
     SendResult {
         last: sent,
@@ -327,7 +327,7 @@ fn finish(icpt: &Interceptor, sent: Sent, hops: Vec<Hop>, baseline: Option<&str>
     }
 }
 
-fn preview(icpt: &Interceptor, e: &crate::intercept::store::StoredExchange) -> Preview {
+fn preview(icpt: &Interceptor, e: &crate::store::StoredExchange) -> Preview {
     let text = String::from_utf8_lossy(&e.resp_head).into_owned();
     let headers: Vec<(String, String)> = text
         .split('\n')
@@ -350,7 +350,7 @@ fn preview(icpt: &Interceptor, e: &crate::intercept::store::StoredExchange) -> P
     }
 }
 
-fn body_preview(icpt: &Interceptor, e: &crate::intercept::store::StoredExchange) -> String {
+fn body_preview(icpt: &Interceptor, e: &crate::store::StoredExchange) -> String {
     let Some(sha) = &e.resp_body else {
         return String::new();
     };
@@ -362,7 +362,7 @@ fn body_preview(icpt: &Interceptor, e: &crate::intercept::store::StoredExchange)
     }) else {
         return "(body evicted)".into();
     };
-    match crate::intercept::slice::decode(&raw, &meta.encoding, 64 * 1024) {
+    match crate::slice::decode(&raw, &meta.encoding, 64 * 1024) {
         Ok(d) => clip(
             &text_or_binary(&d.bytes[..d.bytes.len().min(PREVIEW)]),
             PREVIEW,

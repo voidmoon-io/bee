@@ -23,12 +23,12 @@ use hyper_util::rt::TokioIo;
 use super::listen::{refusal_response, text, ProxyBody};
 use super::rules::{HoldDecision, Verdict};
 use super::Worker;
-use crate::intercept::control::ProxyEventKind;
-use crate::intercept::control::{
+use crate::control::ProxyEventKind;
+use crate::control::{
     now_rfc3339, ExchangeRecord, FromWorker, Origin, OriginKind, Outcome, SendPath, Timing,
     TlsInfo, WireCtx,
 };
-use crate::intercept::diff::Edit;
+use crate::diff::Edit;
 
 /// Request bodies above this are refused rather than buffered without bound.
 const MAX_FORWARD_REQUEST: usize = 64 * 1024 * 1024;
@@ -231,7 +231,7 @@ async fn relay(
     };
     // Intercept rules (US7): modify, drop or hold the request before it goes upstream.
     let mut original: Option<(Vec<u8>, Vec<u8>)> = None;
-    let path = crate::intercept::store::path_of(rec.target.as_deref().unwrap_or("/"));
+    let path = crate::store::path_of(rec.target.as_deref().unwrap_or("/"));
     let verdict = worker.rules.evaluate(&super::rules::Seen {
         host: &rec.host,
         method: rec.method.as_deref().unwrap_or(""),
@@ -257,7 +257,7 @@ async fn relay(
         }
         Verdict::Hold { rule_id, timeout } => {
             let (hold_id, rx) = worker.rules.hold();
-            let deadline = crate::intercept::control::format_ts(
+            let deadline = crate::control::format_ts(
                 time::OffsetDateTime::now_utc() + time::Duration::seconds(timeout.as_secs() as i64),
             );
             worker.emit(
@@ -313,7 +313,7 @@ async fn relay(
         }
     }
     if let Some((rule_ids, edits)) = to_apply {
-        let (h, b) = match crate::intercept::diff::apply_edits(&req_head, &body, &edits) {
+        let (h, b) = match crate::diff::apply_edits(&req_head, &body, &edits) {
             Ok(v) => v,
             Err(e) => {
                 return text(

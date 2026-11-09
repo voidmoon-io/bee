@@ -1,6 +1,6 @@
 # Extract comb's harness-side modules into `crates/comb`
 
-Status: ready-for-agent
+Status: done
 
 Create `crates/comb` (workspace member, depends on `bee-core`). Move, without behaviour change:
 `control`, `store`, `query`, `diff`, `fuzz` (+ `payloads/`), `har`, `slice`, `passive`,

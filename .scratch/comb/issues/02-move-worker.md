@@ -1,6 +1,6 @@
 # Move the proxy worker into comb; `bee proxy-worker` wraps it
 
-Status: ready-for-agent
+Status: done
 
 Move `worker/` (listen, connect, forward, mitm, raw, rules, pace, scope) into comb. The worker
 must not assume a kernel scope: scope checks read `enforced_by` as given. `bee proxy-worker`

@@ -9,9 +9,9 @@ use std::time::Duration;
 use serde_json::Value;
 
 use super::{CallCtx, OpError, Refusal};
-use crate::intercept::control::{OriginKind, Outcome, RawTarget};
-use crate::intercept::diff::{self, Edit, Side};
-use crate::intercept::sidecar::Interceptor;
+use crate::control::{OriginKind, Outcome, RawTarget};
+use crate::diff::{self, Edit, Side};
+use crate::sidecar::Interceptor;
 
 #[derive(Debug, Clone)]
 pub struct ReplaySpec {
@@ -181,7 +181,7 @@ pub fn side_of(icpt: &Interceptor, id: &str) -> Result<Side, OpError> {
                 .flatten()
                 .map(|m| m.encoding)
                 .unwrap_or_else(|| "identity".into());
-            crate::intercept::slice::decode(&raw, &enc, 4 * 1024 * 1024)
+            crate::slice::decode(&raw, &enc, 4 * 1024 * 1024)
                 .map(|d| d.bytes)
                 .unwrap_or(raw)
         }

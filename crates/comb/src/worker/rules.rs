@@ -17,7 +17,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
-use crate::intercept::diff::Edit;
+use crate::diff::Edit;
 
 /// Longest a request may be held.
 pub const MAX_HOLD_S: u32 = 300;

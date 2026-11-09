@@ -3,8 +3,8 @@
 use serde_json::{json, Value};
 
 use super::OpError;
-use crate::intercept::sidecar::{Enforcement, Interceptor};
-use crate::intercept::slice::{self, View, DECODE_CAP};
+use crate::sidecar::{Enforcement, Interceptor};
+use crate::slice::{self, View, DECODE_CAP};
 
 /// Which half of an exchange to read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,7 +50,7 @@ pub fn read_exchange(
     let stored_truncated = meta.as_ref().is_some_and(|m| m.truncated);
     let encoding = match part {
         // A request head's headers read the same way a response head's do.
-        Part::Request => crate::intercept::store::content_encoding(&head),
+        Part::Request => crate::store::content_encoding(&head),
         Part::Response => meta
             .as_ref()
             .map(|m| m.encoding.clone())
@@ -96,7 +96,7 @@ pub fn read_exchange(
 /// FR-011; contracts/http-tools.md#http_scope).
 pub fn scope_view(icpt: &Interceptor) -> Value {
     let scope = icpt.http_scope();
-    let checker = crate::intercept::worker::scope::ScopeChecker::new(scope.clone());
+    let checker = crate::worker::scope::ScopeChecker::new(scope.clone());
     let scope = &scope;
     let enforcement = icpt.enforcement();
     let entries: Vec<Value> = scope

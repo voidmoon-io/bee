@@ -21,11 +21,11 @@ use tokio::sync::oneshot;
 
 use bee_core::compiler::HttpScope;
 
-use super::control::{
+use crate::control::{
     ExchangeRecord, FrameReader, FrameWriter, FromWorker, OriginKind, ProxyEvent, RawTarget,
     ToWorker, WireCtx,
 };
-use super::store::{ExchangeBytes, Store};
+use crate::store::{ExchangeBytes, Store};
 
 /// How long to wait for the worker's `hello`.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
@@ -556,7 +556,7 @@ impl Interceptor {
     }
 
     fn track_rule_event(&self, ev: &ProxyEvent) {
-        use crate::proxy_event::ProxyEventKind as K;
+        use bee_core::proxy_event::ProxyEventKind as K;
         match ev.kind {
             K::RuleFired | K::Held => {
                 let ids: Vec<String> = match (&ev.detail["rule_ids"], &ev.detail["rule_id"]) {
@@ -780,10 +780,10 @@ impl Interceptor {
                 let mut lines = tokio::io::BufReader::new(stderr).lines();
                 while let Ok(Some(l)) = lines.next_line().await {
                     if let Some(i) = inner.upgrade() {
-                        i.notices
-                            .lock()
-                            .expect("notices lock")
-                            .push(format!("proxy worker: {}", crate::safe_text::safe_line(&l)));
+                        i.notices.lock().expect("notices lock").push(format!(
+                            "proxy worker: {}",
+                            bee_core::safe_text::safe_line(&l)
+                        ));
                     }
                 }
             });
@@ -963,7 +963,7 @@ impl Interceptor {
             } => {
                 self.inner.held.lock().expect("held lock").push(HeldInfo {
                     hold_id,
-                    summary: crate::safe_text::safe_line(&summary).into_owned(),
+                    summary: bee_core::safe_text::safe_line(&summary).into_owned(),
                     deadline,
                 });
             }
@@ -1062,12 +1062,12 @@ fn record_leads(store: &mut Store, rec: &ExchangeRecord, bytes: &ExchangeBytes, 
     if bytes.resp_head.is_empty() {
         return;
     }
-    let encoding = super::store::content_encoding(&bytes.resp_head);
-    let decoded = super::slice::decode(&bytes.resp_body, &encoding, super::passive::BODY_CAP)
+    let encoding = crate::store::content_encoding(&bytes.resp_head);
+    let decoded = crate::slice::decode(&bytes.resp_body, &encoding, crate::passive::BODY_CAP)
         .map(|d| d.bytes)
         .unwrap_or_default();
-    let path = super::store::path_of(rec.target.as_deref().unwrap_or("/"));
-    for lead in super::passive::check(rec, bytes, &decoded) {
+    let path = crate::store::path_of(rec.target.as_deref().unwrap_or("/"));
+    for lead in crate::passive::check(rec, bytes, &decoded) {
         let key = format!("{}|{}:{}|{}", lead.kind, rec.host, rec.port, path);
         let _ = store.record_lead(lead.kind, lead.summary, &key, id);
     }

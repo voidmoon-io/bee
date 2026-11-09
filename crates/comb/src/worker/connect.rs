@@ -22,7 +22,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use super::listen::{empty, refusal_response, text, ProxyBody};
 use super::scope::{split_authority, Refusal};
 use super::Worker;
-use crate::intercept::control::{now_rfc3339, FromWorker, ProxyEventKind, TunnelRecord, WireCtx};
+use crate::control::{now_rfc3339, FromWorker, ProxyEventKind, TunnelRecord, WireCtx};
 
 /// Largest ClientHello the worker buffers before deciding.
 const MAX_CLIENT_HELLO: usize = 16 * 1024;

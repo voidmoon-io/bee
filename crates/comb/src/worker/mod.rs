@@ -33,7 +33,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use bee_core::policy::HttpLimits;
 
-use super::control::{
+use crate::control::{
     now_rfc3339, ExchangeRecord, FrameReader, FrameWriter, FromWorker, Origin, OriginKind, Outcome,
     ProxyEvent, RawTarget, SendPath, Timing, TlsInfo, ToWorker, WireCtx, PROTOCOL_VERSION,
 };
@@ -134,7 +134,7 @@ impl Worker {
     /// A rule or hold notice as a proxy event (research R14).
     pub fn rule_event(
         &self,
-        kind: crate::intercept::control::ProxyEventKind,
+        kind: crate::control::ProxyEventKind,
         host: &str,
         port: u16,
         ctx: &WireCtx,
@@ -192,7 +192,7 @@ pub fn run(session: &str) -> ExitCode {
     let listener = match take_fd3() {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("bee proxy-worker: {e}");
+            eprintln!("proxy worker: {e}");
             return ExitCode::from(EXIT_BAD_FD);
         }
     };
@@ -204,7 +204,7 @@ pub fn run(session: &str) -> ExitCode {
     {
         Ok(rt) => rt,
         Err(e) => {
-            eprintln!("bee proxy-worker: runtime: {e}");
+            eprintln!("proxy worker: runtime: {e}");
             return ExitCode::from(1);
         }
     };
@@ -216,7 +216,7 @@ pub fn run(session: &str) -> ExitCode {
     }) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("bee proxy-worker: {e}");
+            eprintln!("proxy worker: {e}");
             ExitCode::from(1)
         }
     }

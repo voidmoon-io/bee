@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::{json, Value};
 
 use super::OpError;
-use crate::intercept::sidecar::Interceptor;
+use crate::sidecar::Interceptor;
 
 /// The `http_sitemap` bound (contracts/http-tools.md#http_sitemap).
 pub const BOUND: usize = 24 * 1024;
@@ -110,7 +110,7 @@ pub fn sitemap(icpt: &Interceptor, q: SitemapQuery, bound: usize) -> Result<Valu
             continue;
         }
         let target = target.unwrap_or_default();
-        let path = crate::intercept::store::path_of(&target);
+        let path = crate::store::path_of(&target);
         if !path.starts_with(&q.path_prefix) {
             continue;
         }

@@ -10,9 +10,9 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use super::{CallCtx, OpError, Refusal};
-use crate::intercept::control::RawTarget;
-use crate::intercept::fuzz::{self, Mode, Observed, Template};
-use crate::intercept::sidecar::Interceptor;
+use crate::control::RawTarget;
+use crate::fuzz::{self, Mode, Observed, Template};
+use crate::sidecar::Interceptor;
 
 /// A fuzz exchange as read back: id, status, response blob, total ms, tags, outcome.
 type FuzzRow = (
@@ -131,7 +131,7 @@ pub async fn fuzz(
                     .flatten()
                     .map(|m| m.encoding)
                     .unwrap_or_else(|| "identity".into());
-                crate::intercept::slice::decode(&raw, &enc, 1024 * 1024)
+                crate::slice::decode(&raw, &enc, 1024 * 1024)
                     .map(|d| d.bytes)
                     .unwrap_or(raw)
             }

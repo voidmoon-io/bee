@@ -12,7 +12,7 @@ use std::net::{IpAddr, SocketAddr};
 use bee_core::compiler::{HttpScope, Role, ScopeEntry};
 use bee_core::pattern::normalize_host;
 
-use crate::intercept::control::ProxyEventKind;
+use crate::control::ProxyEventKind;
 
 /// Why the proxy refused, as recorded and as answered to the client.
 #[derive(Debug, Clone, PartialEq, Eq)]

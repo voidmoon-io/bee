@@ -325,6 +325,17 @@ mod enforce {
         }
     }
 
+    /// A scope no handle refers to can no longer be used or drained, so it goes — children first.
+    /// This is what reclaims a subagent's scope when its delegation is cancelled mid-run (a parent
+    /// call that times out drops the child loop). A scope already torn down is not touched again.
+    impl Drop for ScopeHandle {
+        fn drop(&mut self) {
+            if let Err(e) = self.supervisor.teardown(&self.id) {
+                eprintln!("bee: scope {} could not be torn down: {e}", self.id);
+            }
+        }
+    }
+
     /// Scopes cross into spawned tasks (the concurrent runner, and subagents).
     #[allow(dead_code)]
     fn _assert_send_sync(s: Supervisor, h: ScopeHandle) {

@@ -28,8 +28,7 @@ requires:                            # optional; absent ⇒ inherit the parent's
   filesystem:
     ":project_root": read
     ":project_root/target": write
-  exec: ["/usr/bin/cargo"]
-  net: []
+  exec: ["/usr/bin/cargo"]            # a subset of the parent's; omit to inherit
 ---
 You run the test suite and nothing else. Report failures verbatim, with the
 command that produced them. Do not attempt to fix anything.
@@ -48,8 +47,14 @@ host-side, exactly as a skill body is (`Skill::body`).
 | `tools` | yes | May be empty (an agent that only reasons). Every name must be a tool the **parent holds at delegation time**. |
 | `turn-limit` | yes | `u32 >= 1`. Kebab-case, matching the frontmatter convention already used for `user-invocable`. |
 | `requires.filesystem` | no | `path -> read \| write \| deny`. Same vocabulary as a bee policy. |
-| `requires.exec` | no | Absolute program paths, as in `ExecPolicy.allow`. |
-| `requires.net` | no | `host:port` entries, as in `NetworkPolicy.allow`. |
+| `requires.exec` | no | Absolute program paths, as in `ExecPolicy.allow`. A non-empty subset of the parent's; **an explicit empty list is malformed** (see below). |
+| `requires.net` | no | `host:port` entries, as in `NetworkPolicy.allow`. A non-empty subset of the parent's; **an explicit empty list is malformed**. |
+
+**Why `net: []` is refused (2026-11-09).** A child policy that states no rule for a dimension
+inherits the parent's (`Policy::derive`), and the kernel cannot yet install "no destinations" or "no
+executables" — egress is enforced only when at least one allow rule exists. So `net: []` would
+silently hand the child the parent's network under a declaration that reads as its opposite. Until
+bee can enforce "none", the loader refuses it and says why; omit the key to inherit, or list a subset.
 | `requires.tools` | no | **Ignored for agents.** An agent's tool set is the top-level `tools` key; carrying two sources would let them disagree. Present-and-non-empty is a malformed-definition warning. |
 
 Unknown keys are tolerated, as they are for skills, so definitions authored for other ecosystems load.
@@ -98,11 +103,9 @@ turn-limit: 20
 requires:
   filesystem:
     ":project_root": read
-  exec: []
-  net: []
 ---
 Read the dependency manifests and report anything you would not want in a
-production build. You have no network and no shell; do not ask for them.
+production build. You have no shell; do not ask for one.
 ```
 
 Delegated from a session that *does* hold network access, this child is denied every outbound

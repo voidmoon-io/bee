@@ -192,6 +192,7 @@ fn score_report_counts_techniques() {
             timed_out: false,
             not_run: false,
             refused_by_hook: None,
+            child: None,
             proxy_events: Vec::new(),
             call: ToolCall {
                 id: "c".into(),

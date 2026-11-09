@@ -30,6 +30,7 @@ fn render_call(id: &str, target: RenderTarget, spec: RenderSpec) -> RecordedCall
         timed_out: false,
         not_run: false,
         refused_by_hook: None,
+        child: None,
         proxy_events: Vec::new(),
         call: ToolCall {
             id: id.into(),
@@ -131,6 +132,7 @@ fn ops_call(id: &str, ops: Vec<bee::render_spec::PanelOp>) -> RecordedCall {
         timed_out: false,
         not_run: false,
         refused_by_hook: None,
+        child: None,
         proxy_events: Vec::new(),
         call: ToolCall {
             id: id.into(),

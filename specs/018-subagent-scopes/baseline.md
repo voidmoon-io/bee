@@ -16,3 +16,16 @@
 `concurrent-reload` on main: not executed against a main binary. It fails there by construction —
 `session/spec.rs` refused any concurrent-batch scenario with a ceiling, so both episodes end as setup
 errors and the case's first status check fails.
+
+## PR 2 — MVP delegation (US3 + US1 + US2), 2026-11-09
+
+| Check | Result |
+|---|---|
+| `cargo check` (default, `--no-default-features`, `enforce`, `concurrent,mcp,sec,astgrep-rust,intercept,durable-sessions,test-support`) | OK |
+| clippy (`concurrent,mcp,sec,astgrep-rust,intercept`, all targets, `-A clippy::result_large_err`) | OK |
+| `cargo test --workspace`, CI `test-support`/`intercept` list, `concurrent,sec,intercept --lib` | OK (incl. 9 new `tests/delegation.rs`, 4 new agent unit tests) |
+| VM matrix | **53/53** — new `subagent-net-denied`, `subagent-overgrant-no-cgroup` |
+| Root kernel suites | `hardening` 6/6, `codemode_kernel` 20/20, `durable_kernel` 4/4 |
+
+Negative control: `subagent-net-denied` with the agent declaring both destinations (no narrowing)
+**FAILs** (child reaches B, no denial) — the case tests attenuation, not setup.

@@ -138,7 +138,7 @@ pub(super) type HttpPrepared = Option<crate::intercept::session::Prepared>;
 pub(super) type HttpPrepared = Option<std::convert::Infallible>;
 
 /// `s` reduced to `[A-Za-z0-9-]`, for scope and session names.
-pub(super) fn sanitize(s: &str) -> String {
+pub(crate) fn sanitize(s: &str) -> String {
     s.chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect()

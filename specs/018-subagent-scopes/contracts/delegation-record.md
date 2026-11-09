@@ -53,9 +53,9 @@ built with (FR-034) — a transcript outlives the build that produced it.
 The rule, in one sentence: **every kernel decision appears exactly once in the tree, in the transcript
 of the scope that produced it, stamped with that scope's id.**
 
-- `Sandbox::drain_audit` stamps `AuditEvent.scope_id` with its own scope id before returning. The
-  field has existed since 001 (`crates/core/src/audit.rs:15`) and is `None` on every event emitted
-  today; this feature is what it was reserved for.
+- The supervisor stamps `AuditEvent.scope_id` with the label of the scope it routes the event to,
+  at drain time (plan Refresh §1b). The session's tool scope keeps the label it always had (its
+  scope id; the proxy scope `"proxy"`), and a subagent's scope is labelled with its own scope id.
 - A child's events land in `DelegationRecord.transcript.audit_trail` and in that transcript's
   per-call `audit` vectors. They are **not** copied into the parent's `audit_trail`.
 - No de-duplication is needed, because the demux routes each event to exactly one subscriber by

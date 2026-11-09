@@ -918,6 +918,22 @@ impl Sandbox {
         *self.cleanup_error().lock().expect("cleanup state") = Some(error);
     }
 
+    /// The kernel scope this sandbox's tool children join, when it has its own (018: a subagent's
+    /// scope is created beside it, on the same supervisor).
+    #[cfg(feature = "enforce")]
+    pub fn scope_handle(&self) -> Option<&crate::supervisor::ScopeHandle> {
+        match self {
+            Self::Enforced(e) => Some(&e.scope),
+            _ => None,
+        }
+    }
+
+    /// The environment variables no tool child of this sandbox inherits — what a subagent's sandbox
+    /// must strip too (018).
+    pub fn strip_env(&self) -> Vec<String> {
+        self.child_env().strip_env.clone()
+    }
+
     #[cfg(feature = "enforce")]
     pub(crate) fn scope_path(&self) -> Option<&std::path::Path> {
         match self {

@@ -9,23 +9,18 @@ use serde_json::json;
 use std::path::{Path, PathBuf};
 
 fn sandbox() -> Sandbox {
-    use bee_userspace::{EnforcementPlan, Engine, ScopeMode, SystemResolver};
+    use bee_userspace::{EnforcementPlan, ScopeMode, SystemResolver};
     let policy = bee_core::Policy::from_toml("[policy]\nname='durable-kernel'\n").unwrap();
     let plan = EnforcementPlan::prepare(
         &policy.compile(&SystemResolver::current()).unwrap(),
         ScopeMode::Enforce,
     )
     .unwrap();
-    let mut engine = Engine::init().expect("BPF-LSM kernel and root required");
-    let scope = engine
-        .create_scope(
-            &format!("durable-{}", std::process::id()),
-            bee_userspace::cgroup::DEFAULT_PARENT,
-            &plan,
-        )
-        .unwrap();
-    let reader = engine.take_audit_reader("durable-kernel").unwrap();
-    Sandbox::enforced(engine, scope, reader, vec![])
+    let supervisor =
+        bee::supervisor::Supervisor::start().expect("BPF-LSM kernel and root required");
+    let id = format!("durable-{}", std::process::id());
+    let scope = supervisor.create_scope(&id, &id, None, &plan).unwrap();
+    Sandbox::enforced(scope, vec![])
 }
 struct RetryRead(PathBuf);
 #[async_trait::async_trait]

@@ -13,11 +13,26 @@ changed. Where this section and the body disagree, this section wins.
 **1. The engine is `Send`; the supervisor is not an actor.** R2's premise was "`aya::Ebpf` is not
 `Send`". It is now: `src/call.rs:583` asserts `run_call`'s future is `Send` while it holds
 `&mut Sandbox`, and `Sandbox::Enforced` owns the `Engine` (`src/sandbox.rs:388`). So the supervisor
-is a shared struct — `Supervisor(Arc<Inner>)`, `Inner { engine: Mutex<Engine>, demux: AuditDemux,
-scopes: Mutex<ScopeForest> }` — with methods, not a command channel. The mutex is what serializes BPF
-map writes (the rule `src/concurrent.rs:3` states). Everything else in `contracts/supervisor-api.md`
-(plan-only `create_scope`, subscribe-before-return, flat cgroups, children-first teardown,
-engine-dropped-last via explicit `shutdown`) is unchanged.
+is a shared struct — `Supervisor(Arc<Inner>)`, `Inner { scopes, audit, engine }`, each behind a
+`Mutex` — with methods, not a command channel. The engine mutex is what serializes BPF map writes.
+The rest of `contracts/supervisor-api.md` stands: plan-only `create_scope`, flat cgroups,
+children-first teardown, engine dropped last (by field order; `Engine`'s own `Drop` kills any scope
+still alive before it detaches).
+
+**1a. Audit is routed synchronously, at drain time — not by `AuditDemux`.** (Decided while
+implementing slice 1.) The async demux delivers events through a background task, so a drain right
+after a call may not yet hold that call's events; the concurrent runner papered over this with a
+5 ms `settle` sleep. Moving the *single-session* path onto it would have made reactive escalation —
+which must see a call's denial in that call — racy. Instead the supervisor owns the one sync
+`AuditReader`; a scope's drain reads the whole ring, files every event under its scope's pending
+buffer (stamping `scope_id` with the scope's label), and returns its own. Race-free, and it needs no
+tokio: **R4's feature change and its Complexity Tracking deviation are void.** `concurrent` is now
+just `["enforce"]`; `bee-userspace`'s demux stays in the library for embedders.
+
+**1b. `scope_id` attribution already existed.** `AuditReader` has always stamped every event with
+the session scope's id, and 019 restamped proxy events `"proxy"`. The supervisor keeps exactly that
+(tool scope label = scope id, proxy label = `"proxy"`), so SC-006 holds without special-casing the
+root scope. Concurrent episodes change from the shared `"bee-concurrent"` to their own scope id.
 
 **2. `Sandbox` keeps its enum; the engine-owning variants collapse.** Collapsing to one struct
 (contract §"Sandbox as a handle") would now also have to absorb `Batch` (codemode/durable slots) and
@@ -29,10 +44,10 @@ the MCP `tgid` attribution, for no gain. Instead:
 | `Concurrent { scope, subscription }` (no reload) | removed — a concurrent episode is an `Enforced` on the shared supervisor, and gains reload (SC-007) |
 | `Batch`, `Host` | unchanged |
 
-`ScopeHandle { supervisor, id, cgroup_id, path, audit: AuditSubscription }`. Because every scope has
-its own demux subscription, `drain_into_buffers`/`route_audit`/`tool_audit` (the sidecar sharing one
-ring reader with the tool scope, 019 P4) are deleted rather than ported. `drain_limited` health maps
-to the subscription's `dropped`/`stream_failed` counters.
+`ScopeHandle { supervisor, id, cgroup_id, path }`. Because every scope drains its own pending
+buffer, `drain_into_buffers`/`route_audit`/`tool_audit` (the sidecar sharing one ring reader with the
+tool scope, 019 P4) are deleted rather than ported. A full pending buffer counts into
+`queue_dropped`; an unfinished ring read sets `drain_limited`.
 
 **3. Construction sites moved.** `episode.rs:876` and `app/session.rs:296–347` are gone; 024 put
 sandbox construction in the Session builder:
@@ -45,9 +60,9 @@ sandbox construction in the Session builder:
 | `src/main.rs:421` (`bee exec`) | unchanged — one process, one scope, sync reader |
 | 189 `Sandbox::host(..)` fixtures | unchanged |
 
-**4. Feature wiring (R4) unchanged in substance.** `enforce = ["bee-userspace/enforce",
-"bee-userspace/tokio"]`; `concurrent` becomes an alias. The VM matrix already builds
-`--features concurrent,sec,vm-test`, so the shipped binary's audit path does not change.
+**4. Feature wiring.** See 1a: `enforce` is unchanged, `concurrent = ["enforce"]`. The concurrent
+batch's refusal of a ceiling policy (`session/spec.rs`, 024 FR-008) is lifted, since its episodes
+can now reload.
 
 **5. New seams the August plan predates, and how delegation meets them.** Defaults chosen here; each
 is a named refusal (Constitution I), not a silent omission:

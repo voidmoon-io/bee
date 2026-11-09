@@ -45,7 +45,7 @@ fn policy(root: &Path, worker: bool, cat: bool) -> bee_core::Policy {
     bee_core::Policy::from_toml(&format!("[policy]\nname='codemode-kernel'\nmode='enforce'\n[policy.exec]\nallow={}\n[policy.filesystem]\n{}='deny'\n",json!(allow),json!(root.join("denied").to_string_lossy()))).unwrap()
 }
 fn sandbox(root: &Path, worker: bool, cat: bool) -> Sandbox {
-    use bee_userspace::{EnforcementPlan, Engine, ScopeMode, SystemResolver};
+    use bee_userspace::{EnforcementPlan, ScopeMode, SystemResolver};
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     substrate();
@@ -55,20 +55,14 @@ fn sandbox(root: &Path, worker: bool, cat: bool) -> Sandbox {
         ScopeMode::Enforce,
     )
     .unwrap();
-    let mut engine = Engine::init().unwrap();
-    let scope = engine
-        .create_scope(
-            &format!(
-                "codemode-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ),
-            bee_userspace::cgroup::DEFAULT_PARENT,
-            &plan,
-        )
-        .unwrap();
-    let reader = engine.take_audit_reader("codemode-kernel").unwrap();
-    Sandbox::enforced(engine, scope, reader, vec![])
+    let supervisor = bee::supervisor::Supervisor::start().unwrap();
+    let id = format!(
+        "codemode-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    );
+    let scope = supervisor.create_scope(&id, &id, None, &plan).unwrap();
+    Sandbox::enforced(scope, vec![])
 }
 fn scope(sandbox: &Sandbox) -> PathBuf {
     let Sandbox::Enforced(e) = sandbox else {

@@ -82,6 +82,7 @@ pub mod security;
 pub mod session;
 pub mod skills;
 pub mod stuck;
+pub mod supervisor;
 pub mod tools;
 pub mod transcript;
 // The top of a model turn: lease expiry, release, MCP refresh (024 FR-028–FR-030).

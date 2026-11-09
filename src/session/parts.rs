@@ -185,7 +185,7 @@ pub(crate) fn kernel_sandbox(
     scope_id: &str,
     strip_env: Vec<String>,
 ) -> Result<(Sandbox, HttpPrepared), String> {
-    use bee_userspace::{EnforcementPlan, Engine, ScopeMode, SystemResolver};
+    use bee_userspace::{EnforcementPlan, ScopeMode, SystemResolver};
 
     let resolver = SystemResolver::current();
     // 019: bind the proxy listener and compile the proxy scope *before* the tool policy, whose only
@@ -204,27 +204,22 @@ pub(crate) fn kernel_sandbox(
     }
     let plan = EnforcementPlan::prepare(&compiled, ScopeMode::Enforce)
         .map_err(|e| format!("enforcement plan: {e}"))?;
-    let mut engine = Engine::init().map_err(|e| format!("engine init: {e}"))?;
-    let scope = engine
-        .create_scope(scope_id, bee_userspace::cgroup::DEFAULT_PARENT, &plan)
-        .map_err(|e| format!("create scope: {e}"))?;
-    let reader = engine
-        .take_audit_reader(scope_id)
-        .map_err(|e| format!("audit reader: {e}"))?;
-    // The proxy scope comes from the same engine, before it moves into the sandbox (019 P4).
+    // The session's one enforcement owner (018). The sandbox's scope handle keeps it, and so the
+    // engine's programs, alive for the whole session.
+    let supervisor = crate::supervisor::Supervisor::start()?;
+    let scope = supervisor.create_scope(scope_id, scope_id, None, &plan)?;
+    // The proxy scope is created on the same supervisor, as the tool scope's child (019 P4).
     #[cfg(feature = "intercept")]
     let sidecar = match &prepared {
         Some(p) => Some(
-            crate::intercept::session::attach_sidecar(&mut engine, scope_id, &p.compiled)
-                .inspect_err(|_| {
-                    let _ = scope.teardown();
-                })?,
+            crate::intercept::session::attach_sidecar(&scope, &p.compiled).inspect_err(|_| {
+                let _ = scope.teardown();
+            })?,
         ),
         None => None,
     };
-    // `engine` moves into the sandbox so its eBPF programs stay attached for the whole session.
     #[cfg_attr(not(feature = "intercept"), allow(unused_mut))]
-    let mut sandbox = Sandbox::enforced(engine, scope, reader, strip_env);
+    let mut sandbox = Sandbox::enforced(scope, strip_env);
     #[cfg(feature = "intercept")]
     if let Some(sc) = sidecar {
         sandbox = sandbox.with_sidecar(sc).map_err(|(sb, sc, e)| {

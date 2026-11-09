@@ -371,7 +371,7 @@ fn chat_scrolls_past_u16_rows() {
 mod kernel {
     use super::*;
     use bee_core::{Access, Policy};
-    use bee_userspace::{EnforcementPlan, Engine, ScopeMode, SystemResolver};
+    use bee_userspace::{EnforcementPlan, ScopeMode, SystemResolver};
 
     fn sandbox(policy: &Policy) -> Sandbox {
         let plan = EnforcementPlan::prepare(
@@ -379,16 +379,11 @@ mod kernel {
             ScopeMode::Enforce,
         )
         .unwrap();
-        let mut engine = Engine::init().expect("BPF-LSM kernel and root required");
-        let scope = engine
-            .create_scope(
-                &format!("hardening-{}", std::process::id()),
-                bee_userspace::cgroup::DEFAULT_PARENT,
-                &plan,
-            )
-            .unwrap();
-        let reader = engine.take_audit_reader("hardening").unwrap();
-        Sandbox::enforced(engine, scope, reader, vec![])
+        let supervisor =
+            bee::supervisor::Supervisor::start().expect("BPF-LSM kernel and root required");
+        let id = format!("hardening-{}", std::process::id());
+        let scope = supervisor.create_scope(&id, &id, None, &plan).unwrap();
+        Sandbox::enforced(scope, vec![])
     }
 
     fn policy() -> Policy {

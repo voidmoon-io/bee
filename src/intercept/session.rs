@@ -331,11 +331,11 @@ fn kernel_spawn_fn(_: &Sandbox, _: String, _: Vec<String>) -> Result<SpawnFn, St
     Err("kernel enforcement is not compiled into this bee".into())
 }
 
-/// Create the proxy scope on `engine` and attach it to `sandbox` (enforce builds).
+/// Create the proxy scope on the tool scope's supervisor, as its userspace child so it is torn down
+/// first (enforce builds).
 #[cfg(feature = "enforce")]
 pub fn attach_sidecar(
-    engine: &mut bee_userspace::Engine,
-    sandbox_scope_id: &str,
+    tool_scope: &crate::supervisor::ScopeHandle,
     compiled: &CompiledHttp,
 ) -> Result<crate::sandbox::SidecarScope, String> {
     use bee_userspace::{EnforcementPlan, ScopeMode};
@@ -345,10 +345,12 @@ pub fn attach_sidecar(
     };
     let plan = EnforcementPlan::prepare(&compiled.proxy_scope, mode)
         .map_err(|e| format!("proxy scope plan: {e}"))?;
-    let scope = engine
+    let scope = tool_scope
+        .supervisor()
         .create_scope(
-            &format!("{sandbox_scope_id}-proxy"),
-            bee_userspace::cgroup::DEFAULT_PARENT,
+            &format!("{}-proxy", tool_scope.id),
+            "proxy",
+            Some(tool_scope),
             &plan,
         )
         .map_err(|e| format!("create proxy scope: {e}"))?;

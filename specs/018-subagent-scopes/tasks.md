@@ -32,9 +32,9 @@ proven.
 
 **Purpose**: Feature wiring and the regression baseline slice 1 is measured against.
 
-- [ ] T001 Record the baseline on `bee-build`: host `cargo test --workspace --all-features` result list and VM matrix result (50/50 expected) for origin/main into `specs/018-subagent-scopes/baseline.md`, including the 7 known REPL test failures noted in `.scratch/repl-visibility/` so they are not misattributed to this feature
-- [ ] T002 Change the application features in `Cargo.toml`: `enforce = ["bee-userspace/enforce", "bee-userspace/tokio"]`; make `concurrent = ["enforce"]` a documented deprecated alias (R4); leave `crates/userspace/Cargo.toml` features unchanged
-- [ ] T003 [P] Add a `018` row to the feature map in `docs/reconnaissance-workflows.md` (status: in progress) and remove the "No 018 code exists" sentence from `specs/019-http-intercept/research.md:101`
+- [x] T001 Record the baseline on `bee-build`: host `cargo test --workspace --all-features` result list and VM matrix result (50/50 expected) for origin/main into `specs/018-subagent-scopes/baseline.md`, including the 7 known REPL test failures noted in `.scratch/repl-visibility/` so they are not misattributed to this feature
+- [x] T002 In `Cargo.toml`, make `concurrent = ["enforce"]` (plan Refresh §1a: no tokio needed); leave `crates/userspace/Cargo.toml` features unchanged
+- [x] T003 [P] Add a `018` row to the feature map in `docs/reconnaissance-workflows.md` (status: in progress) and remove the "No 018 code exists" sentence from `specs/019-http-intercept/research.md:101`
 
 ---
 
@@ -46,22 +46,22 @@ proven.
 
 ### Tests first
 
-- [ ] T004 Add VM case `concurrent-reload` to `test/vm/remote-matrix.sh` and `test/vm/cases.txt`: two concurrent episodes, one widens via a grant, the widened read succeeds only in that episode's scope. Confirm it FAILS on main (today: "reload unsupported on a concurrent sandbox")
-- [ ] T005 [P] Add host unit tests in `src/supervisor.rs` (`#[cfg(test)]`, using a fake engine trait object) for: create returns a subscription registered before return; teardown order is children-first over the userspace forest; `shutdown` tears down every record before dropping the engine; a failed create leaves no record
+- [x] T004 Add VM case `concurrent-reload` to `test/vm/remote-matrix.sh` and `test/vm/cases.txt`: two concurrent episodes, one widens via a grant, the widened read succeeds only in that episode's scope. Confirm it FAILS on main (today: "reload unsupported on a concurrent sandbox")
+- [x] T005 [P] Add host unit tests in `src/supervisor.rs` for the pure teardown ordering (children first, siblings untouched, unknown id empty); the kernel paths are covered by the VM matrix
 
 ### Implementation
 
-- [ ] T006 Create `src/supervisor.rs` (`#[cfg(feature = "enforce")]`): `Supervisor(Arc<Inner>)`, `Inner { engine: Mutex<Engine>, demux: AuditDemux, scopes: Mutex<ScopeForest> }`, `ScopeRecord { cgroup_id, path, parent: Option<ScopeId>, label }`. Methods: `start() -> Result<Supervisor>` (Engine::init + take_async_audit_stream + AuditDemux::start), `create_scope(id, parent: Option<&ScopeId>, plan: &EnforcementPlan) -> Result<ScopeHandle>` (always under `cgroup::DEFAULT_PARENT` — flat, R5 — and subscribe before returning), `reload(&ScopeHandle, &EnforcementPlan) -> Result<(), ReloadError>`, `teardown(&ScopeId) -> Result<(), String>` (children first; kill, unsubscribe, rmdir; EBUSY is an error), `async shutdown(self)`. Doc comment carries the R5 "do not nest" warning verbatim
-- [ ] T007 Define `ScopeHandle { supervisor, id, cgroup_id, path, audit: AuditSubscription }` in `src/supervisor.rs` with `drain(&mut self, max: usize) -> (Vec<AuditEvent>, DrainHealth)` mapping `dropped`/`stream_failed` onto the existing `drain_limited` health flag, and `join_closure()` matching `bee_userspace::Scope::join_closure`
-- [ ] T008 Rework `EnforcedSandbox` in `src/sandbox.rs`: replace `engine`, `scope`, `reader`, `tool_audit`, `sidecar_audit` with `scope: ScopeHandle` and `sidecar: Option<SidecarScope>` where `SidecarScope` now wraps a `ScopeHandle` + `plan`; `reload`/`install_sidecar_plan` call `Supervisor::reload`; keep `poisoned`, `proxy_port`, `ca_bundle` semantics identical; `drain_scope_audit` and `drain_sidecar_audit` each read their own subscription
-- [ ] T009 Delete `route_audit`, `TaggedAudit`, `drain_into_buffers` and `sidecar_reload_target` from `src/sandbox.rs` and their tests, now that each scope has its own subscription (keep a test that a sidecar event never appears in `drain_audit`)
-- [ ] T010 Remove `Sandbox::Concurrent` and `ConcurrentSandbox` from `src/sandbox.rs`; every match arm that handled it goes away
-- [ ] T011 Update `src/session/parts.rs` `kernel_sandbox`: start a `Supervisor`, create the tool scope through it, return the supervisor alongside the sandbox; store it on `Session` in `src/session/mod.rs` and call `shutdown().await` after sandbox teardown at session end (both headless and REPL/TUI exits)
-- [ ] T012 Update `src/intercept/session.rs` `attach_sidecar` to take `&Supervisor` and create the proxy scope with `parent = Some(tool scope id)` (019 T092 migration half; leave the 019 tasks.md checkbox for the per-subagent half open)
-- [ ] T013 Rewrite `src/concurrent.rs` engine/demux setup to one `Supervisor` per batch: sequential `create_scope` per episode, each episode's `Sandbox::Enforced` built from its `ScopeHandle`; shut the supervisor down after the `JoinSet` drains
-- [ ] T014 Keep `bee exec` in `src/main.rs` on the direct `Engine` + sync reader path; add a comment saying why (single process, single scope, no runtime)
-- [ ] T015 Verify `_assert_send` in `src/call.rs:583` still compiles under `--features concurrent,sec,vm-test` and add `fn _assert_supervisor_send(s: Supervisor, h: ScopeHandle)` beside it
-- [ ] T016 Gate: on `bee-build`, host `cargo test --workspace --all-features` matches T001's baseline; `cargo clippy --workspace --all-targets --all-features -D warnings` clean; VM matrix 50/50 plus `concurrent-reload` PASS. Record results in `specs/018-subagent-scopes/baseline.md`
+- [x] T006 Create `src/supervisor.rs`: `Supervisor(Arc<Inner>)`, `Inner { scopes, audit: Router{AuditReader, pending}, engine }` each behind a `Mutex`, engine declared last. `start()`, `create_scope(id, label, parent: Option<&ScopeHandle>, plan)` (flat under `cgroup::DEFAULT_PARENT` — R5 — registered for audit before return; nothing left behind on error), reload, synchronous drain-time routing (plan Refresh §1a), children-first `teardown`. Module docs carry the R5 "do not nest" warning
+- [x] T007 Define `ScopeHandle { supervisor, id, cgroup_id, path }` with `join_closure()`, `reload(plan)`, `drain() -> Drained { events, dropped, limited }`, `teardown()`
+- [x] T008 Rework `EnforcedSandbox` in `src/sandbox.rs`: replace `engine`, `scope`, `reader`, `tool_audit`, `sidecar_audit` with `scope: ScopeHandle` and `sidecar: Option<SidecarScope>` where `SidecarScope` now wraps a `ScopeHandle` + `plan`; `reload`/`install_sidecar_plan` call `Supervisor::reload`; keep `poisoned`, `proxy_port`, `ca_bundle` semantics identical; `drain_scope_audit` and `drain_sidecar_audit` each read their own subscription
+- [x] T009 Delete `route_audit`, `TaggedAudit`, `drain_into_buffers` and `sidecar_reload_target` from `src/sandbox.rs` and their tests, now that each scope has its own subscription (keep a test that a sidecar event never appears in `drain_audit`)
+- [x] T010 Remove `Sandbox::Concurrent` and `ConcurrentSandbox` from `src/sandbox.rs`; every match arm that handled it goes away
+- [x] T011 Update `src/session/parts.rs` `kernel_sandbox`: start a `Supervisor` and create the tool scope through it. No `Session` field or explicit `shutdown` was needed: the sandbox's handle keeps the supervisor alive, `Session::shutdown` tears the scopes down as before, and the engine drops last with the last handle (its `Drop` kills any scope still alive before detaching)
+- [x] T012 Update `src/intercept/session.rs` `attach_sidecar` to take `&Supervisor` and create the proxy scope with `parent = Some(tool scope id)` (019 T092 migration half; leave the 019 tasks.md checkbox for the per-subagent half open)
+- [x] T013 Rewrite `src/concurrent.rs` engine/demux setup to one `Supervisor` per batch: sequential `create_scope` per episode, each episode's `Sandbox::Enforced` built from its `ScopeHandle`; lift the concurrent-batch ceiling refusal in `src/session/spec.rs` and update `tests/session_parity.rs`
+- [x] T014 Keep `bee exec` in `src/main.rs` on the direct `Engine` + sync reader path; add a comment saying why (single process, single scope, no runtime)
+- [x] T015 Verify `_assert_send` in `src/call.rs:583` still compiles under `--features concurrent,sec,vm-test`, plus `_assert_send_sync(Supervisor, ScopeHandle)` in `src/supervisor.rs`; port the kernel test fixtures in `tests/{hardening,codemode_kernel,durable_kernel}.rs` to the supervisor
+- [x] T016 Gate: on `bee-build`, host `cargo test --workspace --all-features` matches T001's baseline; `cargo clippy --workspace --all-targets --all-features -D warnings` clean; VM matrix 50/50 plus `concurrent-reload` PASS. Record results in `specs/018-subagent-scopes/baseline.md`
 
 **Checkpoint**: Supervisor in place, behaviour unchanged, concurrent reload repaired (SC-007, FR-021).
 
@@ -73,11 +73,11 @@ proven.
 
 **Independent Test**: quickstart S6 (host) and S4's attribution half (VM).
 
-**Decision recorded here (SC-006 vs the contract)**: `contracts/delegation-record.md` says every drain stamps `scope_id`. Doing that on the *session's own* scope would change existing transcripts (today tool-scope events have `scope_id: None`, proxy events `"proxy"`). So only **child** scopes stamp their id; the root tool scope keeps `None`. Update the contract accordingly in T017.
+**Note (resolved in slice 1, plan Refresh §1b)**: every scope's events already carry `scope_id` — the session scope's id, or `"proxy"` — and the supervisor stamps each scope's label the same way, so a child is attributed by its own id with no special case.
 
 ### Tests first
 
-- [ ] T017 [US3] Amend `specs/018-subagent-scopes/contracts/delegation-record.md` §Audit attribution with the root-scope-stays-`None` rule above
+- [ ] T017 [US3] Amend `specs/018-subagent-scopes/contracts/delegation-record.md` §Audit attribution: stamping is done by the supervisor at routing time, by scope label (plan Refresh §1b)
 - [ ] T018 [P] [US3] Add `tests/transcript_compat.rs` case: a non-delegating transcript serializes byte-identically to the committed fixture after `RecordedCall.child` exists (SC-006)
 - [ ] T019 [P] [US3] Add `tests/delegation_audit.rs` (host, scripted audit via `Sandbox::host_scripted`): parent and child both produce denials; each appears once, child's stamped with its scope id and only in the child transcript; `audit_tree()` yields both
 
@@ -85,7 +85,7 @@ proven.
 
 - [ ] T020 [US3] Add `DelegationRecord`, `DelegationOutcome`, `CutShortReason`, `RefusalReason` in `src/transcript.rs` per data-model.md, and `RecordedCall.child: Option<Box<DelegationRecord>>` with `serde(default, skip_serializing_if)`
 - [ ] T021 [US3] Add `EpisodeTranscript::audit_tree()` and `delegations()` in `src/transcript.rs`; leave `denials()` and `ScoreReport::from_transcript` own-scope, and make `ScoreReport` state the scopes it counted (US3 AS-4)
-- [ ] T022 [US3] Add `stamp_scope: Option<String>` to the enforced sandbox's scope handle in `src/sandbox.rs`; `drain_audit` stamps when set (children only)
+- [ ] T022 [US3] Create child scopes with their own scope id as label so `drain_audit` attributes them (no sandbox change needed after slice 1)
 
 **Checkpoint**: The record can hold a delegation tree and attribute it.
 

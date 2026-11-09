@@ -97,6 +97,9 @@ field starts carrying a value, which keeps SC-006 (existing consumers read uncha
 
 ## R4 — Feature wiring, and why Constitution V still holds
 
+> **Void 2026-11-09** (plan.md Refresh §1a). The supervisor routes audit synchronously from the sync
+> `AuditReader`, so nothing new needs `bee-userspace/tokio`; `concurrent` is `["enforce"]`.
+
 **Problem**: The supervisor needs the async demux, which lives behind `bee-userspace/tokio`. Today the
 app's `enforce` feature deliberately does *not* pull it, so a plain enforce build stays
 async-runtime-free; `concurrent = ["enforce", "bee-userspace/tokio"]` is the only path that does.

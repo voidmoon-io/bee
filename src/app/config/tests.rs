@@ -425,3 +425,49 @@ fn an_unknown_stuck_key_is_refused() {
     let path = f.write("user.toml", "[stuck]\nstop_at = 3\n");
     assert!(load(&path, Origin::User).is_err());
 }
+
+// --- [delegation] (018 US4) ---------------------------------------------------------------------
+
+#[test]
+fn a_project_can_lower_delegation_limits_but_never_raise_them() {
+    let f = Fixture::new();
+    f.provider("p.toml");
+    let user = f.layer(
+        "user.toml",
+        Origin::User,
+        "[provider]\npath = \"p.toml\"\n[delegation]\nmax_depth = 2\nmax_concurrent = 3\n",
+    );
+    let project = f.layer(
+        "project.toml",
+        Origin::Project,
+        "[delegation]\nmax_depth = 4\nmax_concurrent = 1\n",
+    );
+    let cfg = resolve_from_layers(&[user, project], &Flags::default()).unwrap();
+    assert_eq!(
+        cfg.delegation.max_depth,
+        Some(2),
+        "the project cannot raise it"
+    );
+    assert_eq!(cfg.delegation.max_concurrent, Some(1), "but can lower it");
+}
+
+#[test]
+fn a_project_alone_cannot_exceed_the_defaults() {
+    let f = Fixture::new();
+    f.provider("p.toml");
+    let user = f.layer("user.toml", Origin::User, "[provider]\npath = \"p.toml\"\n");
+    let project = f.layer(
+        "project.toml",
+        Origin::Project,
+        "[delegation]\nmax_depth = 3\nmax_concurrent = 9\n",
+    );
+    let cfg = resolve_from_layers(&[user, project], &Flags::default()).unwrap();
+    assert_eq!(cfg.delegation.resolve(), (1, 4));
+}
+
+#[test]
+fn an_unknown_delegation_key_is_refused() {
+    let f = Fixture::new();
+    let path = f.write("user.toml", "[delegation]\nmax_width = 3\n");
+    assert!(load(&path, Origin::User).is_err());
+}

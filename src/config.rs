@@ -64,6 +64,18 @@ pub struct MockStep {
     /// A text-only turn (ends the episode).
     #[serde(default)]
     pub text: Option<String>,
+    /// Several tool calls in one turn, in order — how a script asks for parallel calls (018 US5).
+    /// Used when `tool` is absent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub calls: Vec<MockCall>,
+}
+
+/// One call of a multi-call [`MockStep`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MockCall {
+    pub tool: String,
+    #[serde(default)]
+    pub args: Option<serde_json::Value>,
 }
 
 /// Anthropic **extended thinking** mode (008 / provider config). Maps to the `thinking` request

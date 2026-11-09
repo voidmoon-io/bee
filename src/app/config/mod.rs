@@ -106,6 +106,8 @@ pub struct EffectiveConfig {
     pub context: file::ContextSection,
     /// `[stuck]` from every layer, merged key by key (025 US2). Validated when a session starts.
     pub stuck: file::StuckSection,
+    /// `[delegation]` (018): set by a trusted layer, only ever lowered by a project one.
+    pub delegation: file::DelegationSection,
 }
 
 /// One thing bee needs and does not have, with the places it could come from.
@@ -192,6 +194,7 @@ struct Merged {
     security: Option<file::SecuritySection>,
     context: file::ContextSection,
     stuck: file::StuckSection,
+    delegation: file::DelegationSection,
 }
 
 impl Merged {
@@ -260,6 +263,17 @@ impl Merged {
             }
             if let Some(s) = c.stuck {
                 m.stuck = m.stuck.merge(s);
+            }
+            if let Some(d) = c.delegation {
+                m.delegation = if layer.origin.is_trusted() {
+                    file::DelegationSection {
+                        max_depth: d.max_depth.or(m.delegation.max_depth),
+                        max_concurrent: d.max_concurrent.or(m.delegation.max_concurrent),
+                    }
+                } else {
+                    // An untrusted repository may ask for less delegation, never more.
+                    m.delegation.narrowed_by(d)
+                };
             }
         }
 
@@ -420,6 +434,7 @@ pub fn resolve_from_layers(
         security: m.security.unwrap_or_default(),
         context: m.context,
         stuck: m.stuck,
+        delegation: m.delegation,
     })
 }
 

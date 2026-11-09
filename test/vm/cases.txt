@@ -7,6 +7,7 @@ concurrent-audit-isolation
 concurrent-reload
 subagent-net-denied
 subagent-overgrant-no-cgroup
+subagent-siblings-isolated
 episode-allow
 episode-file-deny
 exec-allow

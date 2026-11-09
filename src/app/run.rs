@@ -299,6 +299,7 @@ async fn run(args: RunArgs) -> ExitCode {
             max_tokens: cfg.provider.max_tokens,
         },
         stuck: cfg.stuck,
+        delegation: cfg.delegation,
     };
     // The policies the tools will run under: the scenario's, and the ceiling a grant may widen it
     // to. `--host` runs them unscoped whatever the scenario says.

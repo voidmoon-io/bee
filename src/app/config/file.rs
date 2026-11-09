@@ -79,7 +79,14 @@ pub struct FileConfig {
     /// end a run sooner or remind the model, never widen what it may do.
     #[serde(default)]
     pub stuck: Option<StuckSection>,
+    /// Delegation limits (018 US4). Not operator-only, but a project layer can only **lower** them:
+    /// they bound how many scopes and how much spend one session can multiply into.
+    #[serde(default)]
+    pub delegation: Option<DelegationSection>,
 }
+
+/// The `[delegation]` table (018): `max_depth`, `max_concurrent`.
+pub use bee::delegate::DelegationLimits as DelegationSection;
 
 /// The `[context]` table (025 contracts/config.md). The shape lives in the library, which also reads
 /// it from a scenario file; every key is optional, and layers merge key by key.

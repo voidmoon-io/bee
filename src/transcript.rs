@@ -74,6 +74,9 @@ pub enum EpisodeStatus {
     },
     /// `finish` was offered, and the model ended with a second text-only turn instead (025 FR-035).
     EndedWithoutFinish,
+    /// The session's shared turn budget ran out (018 FR-023): a subagent drew the last of it, or
+    /// this loop is one.
+    BudgetExhausted,
 }
 
 /// One recorded tool call within a turn: the request, the result, and the audit events the kernel
@@ -137,6 +140,9 @@ pub struct DelegationRecord {
     /// 1 for a subagent of the session itself.
     pub depth: u32,
     pub outcome: DelegationOutcome,
+    /// Tokens the child's model calls used, input plus output, as the provider reported them.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub tokens_used: u64,
     /// The child's own record. `None` when it never ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript: Option<Box<EpisodeTranscript>>,
@@ -160,8 +166,16 @@ pub enum DelegationOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CutShortReason {
+    /// The agent's own turn limit.
     Turns,
+    /// The session's shared turn budget (FR-023).
+    SharedTurns,
+    /// The shared wall-clock deadline.
     Deadline,
+}
+
+fn is_zero_u64(n: &u64) -> bool {
+    *n == 0
 }
 
 /// Why a delegation was refused (contracts/task-tool.md). Each names its cause.

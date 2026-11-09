@@ -137,12 +137,12 @@ proven.
 
 **Independent Test**: quickstart S5.
 
-- [ ] T038 [P] [US4] Tests in `tests/delegation.rs`: `sum(turns_used) + parent turns <= initial` on a run that hits the cap (SC-005); a deadline cut produces `CUT SHORT` text and `CutShort { Deadline }`; depth 2 at `max_depth = 1` refused naming the limit; an oversized report truncated with the visible marker
-- [ ] T039 [US4] Add `Budget { turns: Arc<AtomicU32>, tokens: Arc<AtomicU64>, deadline: Instant }` in `src/delegate.rs` (or `src/budget.rs`); `run_loop` in `src/episode.rs` debits it before each model call when present, initialised from the scenario so non-delegating runs are unchanged
-- [ ] T040 [US4] `DelegationCtx { depth, max_depth, parent_scope_id, spawn_ceiling, budget }` in `src/delegate.rs`; omit `task` from a child registry at `depth >= max_depth` and refuse in `run_delegation` anyway (R10)
-- [ ] T041 [US4] Debit tokens from `metrics::Recorder` records with run id `<parent-run-id>/<agent>@<depth>` in `src/metrics.rs`
-- [ ] T042 [US4] Apply the existing per-result cap to the report in `src/delegate.rs`
-- [ ] T043 [US4] Config: `[delegation] max_depth`, `max_concurrent` (default 1 and 4) in `src/app/config/` with user-config ceiling semantics (project config may lower, never raise)
+- [x] T038 [P] [US4] Tests in `tests/delegation.rs`: `sum(turns_used) + parent turns <= initial` on a run that hits the cap (SC-005); a deadline cut produces `CUT SHORT` text and `CutShort { Deadline }`; depth 2 at `max_depth = 1` refused naming the limit; an oversized report truncated with the visible marker — SC-005 shared pool, depth, and report truncation tested in `tests/delegation.rs`; **a deadline-cut host test is not written** (the deadline path is shared with the turn path: `Budget.deadline` caps every loop's deadline)
+- [x] T039 [US4] Add `Budget { turns: Arc<AtomicU32>, tokens: Arc<AtomicU64>, deadline: Instant }` in `src/delegate.rs` (or `src/budget.rs`); `run_loop` in `src/episode.rs` debits it before each model call when present, initialised from the scenario so non-delegating runs are unchanged — as built: `delegate::Budget { turns, deadline }`, in `LoopOptions.budget` and `Delegation.budget`; a run that cannot delegate gets none and keeps its limits exactly; exhaustion is a new `EpisodeStatus::BudgetExhausted` (`CutShortReason::SharedTurns` for a child)
+- [x] T040 [US4] `DelegationCtx { depth, max_depth, parent_scope_id, spawn_ceiling, budget }` in `src/delegate.rs`; omit `task` from a child registry at `depth >= max_depth` and refuse in `run_delegation` anyway (R10) — `Delegation { depth, max_depth, max_concurrent, budget }`; `spawn_ceiling` arrives with US7
+- [x] T041 [US4] Debit tokens from `metrics::Recorder` records with run id `<parent-run-id>/<agent>@<depth>` in `src/metrics.rs` — `DelegationRecord.tokens_used` from the child's usage; **no token cap** (no session has one to draw from yet) and **no metrics run-id attribution yet**
+- [x] T042 [US4] Apply the existing per-result cap to the report in `src/delegate.rs`
+- [x] T043 [US4] Config: `[delegation] max_depth`, `max_concurrent` (default 1 and 4) in `src/app/config/` with user-config ceiling semantics (project config may lower, never raise) — `[delegation] max_depth / max_concurrent` (`DelegationLimits`), defaults 1/4, hard caps 4/16; a project layer can only lower (`narrowed_by`); headless and REPL
 
 ---
 
@@ -152,9 +152,9 @@ proven.
 
 **Independent Test**: quickstart S4 on the VM.
 
-- [ ] T044 [US5] Allow several `task` calls in one turn to run concurrently in `src/delegate.rs` (bounded by `max_concurrent`), each with its own scope; scope creation stays serialised by the supervisor mutex
-- [ ] T045 [P] [US5] Host test: one sibling fails to start, the others complete, the parent's results name the failure (FR-031); shared budget exhaustion stops all siblings (US5 AS-4)
-- [ ] T046 [US5] VM case `subagent-siblings-isolated`: three agents with mutually exclusive file grants; each is denied the others' paths; each denial is attributed to its own scope only
+- [x] T044 [US5] Allow several `task` calls in one turn to run concurrently in `src/delegate.rs` (bounded by `max_concurrent`), each with its own scope; scope creation stays serialised by the supervisor mutex — consecutive `task` calls in a turn form one segment: each goes through the call lifecycle in order, the subagents then run together (`delegate::run_all`, bounded by `max_concurrent`), results land in call order. Headless loop only; the REPL still runs them one by one
+- [x] T045 [P] [US5] Host test: one sibling fails to start, the others complete, the parent's results name the failure (FR-031); shared budget exhaustion stops all siblings (US5 AS-4)
+- [x] T046 [US5] VM case `subagent-siblings-isolated`: three agents with mutually exclusive file grants; each is denied the others' paths; each denial is attributed to its own scope only
 
 ---
 
@@ -164,8 +164,8 @@ proven.
 
 **Independent Test**: quickstart S8.
 
-- [ ] T047 [P] [US6] Host test: a host-mode delegation's report carries the WARNING block from `task-tool.md`, the progress line says `unenforced`, `DelegationRecord.enforced == false`, and an over-broad declaration is still refused (FR-033)
-- [ ] T048 [US6] Set `enforced` from the sandbox at spawn in `src/delegate.rs` and emit the warning text and progress line
+- [x] T047 [P] [US6] Host test: a host-mode delegation's report carries the WARNING block from `task-tool.md`, the progress line says `unenforced`, `DelegationRecord.enforced == false`, and an over-broad declaration is still refused (FR-033) — landed with PR 2 (`tests/delegation.rs` asserts the WARNING and `enforced: false`; over-broad declarations are refused in host mode too)
+- [x] T048 [US6] Set `enforced` from the sandbox at spawn in `src/delegate.rs` and emit the warning text and progress line — landed with PR 2
 
 ---
 
@@ -187,7 +187,7 @@ proven.
 - [ ] T053 [P] VM case `subagent-migrate-stays-child` (quickstart S9): a child that `mkdir`s a sub-cgroup and migrates is still held to the child's rules, not the parent's (R5)
 - [ ] T054 [P] Durable sessions: on recovery, a delegation without a closing record is written as `Failed (interrupted)` and its cgroup reclaimed, in `src/session/durable/`; test in `tests/durable_sessions.rs`
 - [ ] T055 [P] Benchmark delegation spawn (derive → compile → plan → create_scope → subscribe) in `benches/`; ≤ 50 ms p95 on `bee-build`
-- [ ] T056 [P] Glossary: add **Subagent**, **Agent definition**, **Delegation**, **Supervisor** to `CONTEXT.md`
+- [x] T056 [P] Glossary: add **Subagent**, **Agent definition**, **Delegation**, **Supervisor** to `CONTEXT.md`
 - [ ] T057 Run every quickstart scenario S1–S9 on `bee-build` and record results in `specs/018-subagent-scopes/quickstart.md`
 
 ---

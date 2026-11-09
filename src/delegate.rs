@@ -21,6 +21,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -38,6 +39,94 @@ use crate::transcript::{
 
 /// Delegation depth a session allows by default: its subagents do not delegate further.
 pub const DEFAULT_MAX_DEPTH: u32 = 1;
+/// Subagents a session runs at once by default (US5).
+pub const DEFAULT_MAX_CONCURRENT: u32 = 4;
+/// What no configuration may exceed: recursion and fan-out multiply scopes and spend.
+pub const HARD_MAX_DEPTH: u32 = 4;
+pub const HARD_MAX_CONCURRENT: u32 = 16;
+
+/// The `[delegation]` configuration table (018 US4): how deep and how wide a session may delegate.
+/// Every key is optional; [`DelegationLimits::resolve`] supplies defaults and the hard caps.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DelegationLimits {
+    /// How many levels of subagent below the session (1: subagents do not delegate).
+    pub max_depth: Option<u32>,
+    /// How many subagents one turn may run at once.
+    pub max_concurrent: Option<u32>,
+}
+
+impl DelegationLimits {
+    /// `self` with `lower` applied as a ceiling-respecting layer: a key `lower` sets may only make
+    /// the limit smaller. This is how a project configuration — untrusted input — is folded over the
+    /// operator's: it can ask for less delegation, never more.
+    pub fn narrowed_by(self, lower: DelegationLimits) -> DelegationLimits {
+        let min = |a: Option<u32>, b: Option<u32>, default: u32| match (a, b) {
+            (_, None) => a,
+            (a, Some(b)) => Some(b.min(a.unwrap_or(default))),
+        };
+        DelegationLimits {
+            max_depth: min(self.max_depth, lower.max_depth, DEFAULT_MAX_DEPTH),
+            max_concurrent: min(
+                self.max_concurrent,
+                lower.max_concurrent,
+                DEFAULT_MAX_CONCURRENT,
+            ),
+        }
+    }
+
+    /// `(max_depth, max_concurrent)`, defaulted and clamped to the hard caps (and to at least 1).
+    pub fn resolve(self) -> (u32, usize) {
+        (
+            self.max_depth
+                .unwrap_or(DEFAULT_MAX_DEPTH)
+                .clamp(1, HARD_MAX_DEPTH),
+            self.max_concurrent
+                .unwrap_or(DEFAULT_MAX_CONCURRENT)
+                .clamp(1, HARD_MAX_CONCURRENT) as usize,
+        )
+    }
+}
+
+/// The session's shared budget (018 FR-023, research R8): one pool of model turns and one
+/// deadline, drawn from by the session's loop and every subagent's. A child never gets a fresh
+/// allocation, so delegating cannot make a session outspend the budget it started with (SC-005).
+#[derive(Debug, Clone)]
+pub struct Budget {
+    turns: Arc<AtomicU32>,
+    /// The shared wall clock. Every loop in the tree stops at it.
+    pub deadline: Instant,
+}
+
+impl Budget {
+    pub fn new(turns: u32, deadline: Instant) -> Self {
+        Budget {
+            turns: Arc::new(AtomicU32::new(turns)),
+            deadline,
+        }
+    }
+
+    /// Spend one model turn. `false` when none are left — and then nothing is spent.
+    pub fn take_turn(&self) -> bool {
+        let mut n = self.turns.load(Ordering::SeqCst);
+        loop {
+            let Some(left) = n.checked_sub(1) else {
+                return false;
+            };
+            match self
+                .turns
+                .compare_exchange_weak(n, left, Ordering::SeqCst, Ordering::SeqCst)
+            {
+                Ok(_) => return true,
+                Err(now) => n = now,
+            }
+        }
+    }
+
+    pub fn turns_left(&self) -> u32 {
+        self.turns.load(Ordering::SeqCst)
+    }
+}
 
 /// A progress sink that can be shared with a child loop.
 pub type SharedProgress = Arc<dyn Fn(&str) + Send + Sync>;
@@ -51,6 +140,10 @@ pub struct Delegation {
     /// The depth of the loop holding this: 0 for the session itself.
     pub depth: u32,
     pub max_depth: u32,
+    /// How many `task` calls of one turn run their subagents together (US5).
+    pub max_concurrent: usize,
+    /// The session's shared budget, when it has one; every child draws from the same.
+    pub budget: Option<Budget>,
     /// Where delegation lines and the child's own progress go, indented by depth.
     pub progress: Option<SharedProgress>,
 }
@@ -58,12 +151,27 @@ pub struct Delegation {
 impl Delegation {
     /// Settings for a session over `agents`.
     pub fn new(agents: Arc<SkillRegistry>, progress: Option<SharedProgress>) -> Self {
+        let (max_depth, max_concurrent) = DelegationLimits::default().resolve();
         Delegation {
             agents,
             depth: 0,
-            max_depth: DEFAULT_MAX_DEPTH,
+            max_depth,
+            max_concurrent,
+            budget: None,
             progress,
         }
+    }
+
+    /// These settings under `limits` (the `[delegation]` table).
+    pub fn with_limits(mut self, limits: DelegationLimits) -> Self {
+        (self.max_depth, self.max_concurrent) = limits.resolve();
+        self
+    }
+
+    /// These settings drawing from `budget`.
+    pub fn with_budget(mut self, budget: Budget) -> Self {
+        self.budget = Some(budget);
+        self
     }
 
     fn emit(&self, line: &str) {
@@ -78,6 +186,70 @@ impl Delegation {
 pub struct Delegator<'a> {
     pub config: &'a Delegation,
     pub model: &'a dyn Model,
+    /// Leave a delegation on the call's outcome instead of running it, so the loop can run several
+    /// together (US5). Set only by a loop that will resolve them.
+    pub defer: bool,
+}
+
+impl<'a> Delegator<'a> {
+    pub fn new(config: &'a Delegation, model: &'a dyn Model) -> Self {
+        Delegator {
+            config,
+            model,
+            defer: false,
+        }
+    }
+
+    /// This delegator, deferring (or not).
+    pub fn deferring(&self, defer: bool) -> Delegator<'a> {
+        Delegator {
+            config: self.config,
+            model: self.model,
+            defer,
+        }
+    }
+}
+
+/// A delegation a call asked for and left for the loop to run (US5): the request, and the
+/// delegating session's active policy when the call ran — what the child is derived from.
+#[derive(Debug, Clone)]
+pub struct PendingDelegation {
+    pub request: Box<DelegationRequest>,
+    pub policy: Option<bee_core::Policy>,
+}
+
+/// Run every pending delegation of one turn, at most `max_concurrent` at a time, and return each
+/// result in the order given. Every child gets its own scope, so they cannot see one another, and
+/// the supervisor routes each one's kernel events to it alone (US5 AS-1, AS-2).
+pub async fn run_all<'a>(
+    d: &'a Delegator<'a>,
+    pending: &'a [PendingDelegation],
+    registry: &'a ToolRegistry,
+    sandbox: &'a Sandbox,
+    deadline: Instant,
+) -> Vec<Delegated> {
+    use futures_util::StreamExt;
+    // Built before the first await: a closure-mapped stream held across one makes the future's
+    // `Send` bound unprovable (rustc's higher-ranked lifetime limitation).
+    let futures: Vec<DelegationFuture<'a>> = pending
+        .iter()
+        .map(|p| {
+            run(
+                d,
+                &p.request,
+                ParentView {
+                    policy: p.policy.as_ref(),
+                    registry,
+                    sandbox,
+                    deadline,
+                },
+            )
+        })
+        .collect();
+    futures_util::stream::iter(futures)
+        .buffered(d.config.max_concurrent.max(1))
+        .collect()
+        .await
 }
 
 /// What the delegating loop holds when the `task` call returns.
@@ -206,7 +378,11 @@ async fn run_inner(
         if enforced { "enforced" } else { "UNENFORCED" },
     ));
 
-    let remaining = parent.deadline.saturating_duration_since(Instant::now());
+    let deadline = match &cfg.budget {
+        Some(b) => parent.deadline.min(b.deadline),
+        None => parent.deadline,
+    };
+    let remaining = deadline.saturating_duration_since(Instant::now());
     let scenario = Scenario {
         id: format!("subagent-{}", req.agent),
         policy_path: Default::default(),
@@ -232,10 +408,12 @@ async fn run_inner(
         ..cfg.clone()
     };
     let opts = LoopOptions {
+        // Prefixed with the agent: siblings run together, and their lines interleave.
         progress: cfg.progress.clone().map(|p| {
-            let indent = "  ".repeat(depth as usize + 1);
-            Box::new(move |line: &str| p(&format!("{indent}{line}"))) as ProgressSink
+            let prefix = format!("{}[{}] ", "  ".repeat(depth as usize + 1), req.agent);
+            Box::new(move |line: &str| p(&format!("{prefix}{line}"))) as ProgressSink
         }),
+        budget: cfg.budget.clone(),
         delegation: child_may_delegate.then_some(child_cfg),
         ..LoopOptions::default()
     };
@@ -243,6 +421,9 @@ async fn run_inner(
 
     let teardown = sandbox.teardown();
     let turns_used = transcript.turns.len() as u32;
+    let tokens_used = transcript.usage.as_ref().map_or(0, |u| {
+        u64::from(u.input_tokens) + u64::from(u.output_tokens)
+    });
     let (outcome, header) = match teardown {
         Err(e) => (
             DelegationOutcome::Failed {
@@ -269,8 +450,13 @@ async fn run_inner(
     content.push('\n');
     content.push_str(&body);
     let is_error = !matches!(outcome, DelegationOutcome::Completed);
+    // FR-026: the same per-result cap as every other tool result, with the cut visible.
+    let (content, truncated, original_len) =
+        crate::transcript::truncate(content, crate::transcript::DEFAULT_OUTPUT_CAP);
     let result = ToolResult {
         is_error,
+        truncated,
+        original_len,
         // The report is the child model's words about what it read: data, not instructions.
         provenance: Provenance::Remote {
             source: format!("subagent:{}", req.agent),
@@ -285,6 +471,7 @@ async fn run_inner(
             enforced,
             depth,
             outcome,
+            tokens_used,
             transcript: Some(Box::new(transcript)),
             turns_used,
         },
@@ -301,7 +488,7 @@ fn child_sandbox(
     #[cfg(feature = "enforce")]
     if let Some(parent_scope) = parent.scope_handle() {
         use bee_userspace::{EnforcementPlan, ScopeMode, SystemResolver};
-        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::atomic::AtomicU64;
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let compiled = policy
             .compile(&SystemResolver::current())
@@ -345,6 +532,15 @@ fn judge(t: &EpisodeTranscript, turn_limit: u32) -> (DelegationOutcome, String) 
             DelegationOutcome::Completed,
             format!("ended without finish ({turns})"),
         ),
+        EpisodeStatus::BudgetExhausted => (
+            DelegationOutcome::CutShort {
+                reason: CutShortReason::SharedTurns,
+            },
+            format!(
+                "CUT SHORT: the session's shared turn budget ran out after {turns}. The task was \
+                 NOT completed."
+            ),
+        ),
         EpisodeStatus::Timeout => {
             let reason = if n as u32 >= turn_limit {
                 CutShortReason::Turns
@@ -353,6 +549,7 @@ fn judge(t: &EpisodeTranscript, turn_limit: u32) -> (DelegationOutcome, String) 
             };
             let why = match reason {
                 CutShortReason::Turns => "its turn limit was reached",
+                CutShortReason::SharedTurns => "the session's shared turn budget ran out",
                 CutShortReason::Deadline => "the shared deadline was reached",
             };
             (
@@ -421,6 +618,7 @@ fn refused(agent: &str, depth: u32, reason: RefusalReason) -> Delegated {
             enforced: false,
             depth,
             outcome: DelegationOutcome::Refused { reason },
+            tokens_used: 0,
             transcript: None,
             turns_used: 0,
         },
@@ -436,6 +634,7 @@ fn failed(agent: &str, depth: u32, scope_id: String, enforced: bool, detail: Str
             enforced,
             depth,
             outcome: DelegationOutcome::Failed { detail },
+            tokens_used: 0,
             transcript: None,
             turns_used: 0,
         },

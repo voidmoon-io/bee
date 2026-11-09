@@ -318,6 +318,7 @@ mod tests {
             escalations: Vec::new(),
             refused_by_hook: None,
             delegation: None,
+            pending_delegation: None,
         }
     }
 

@@ -113,6 +113,9 @@ pub struct CallOutcome {
     pub refused_by_hook: Option<String>,
     /// The delegation this call ran (018); `result` is then its report.
     pub delegation: Option<Box<crate::transcript::DelegationRecord>>,
+    /// A delegation this call asked for and a deferring delegator left for the loop to run with
+    /// its siblings (018 US5). The loop resolves it before the result is used.
+    pub pending_delegation: Option<Box<crate::delegate::PendingDelegation>>,
 }
 
 impl CallOutcome {
@@ -174,6 +177,7 @@ fn stopped(reason: String, timed_out: bool, terminate: bool) -> CallOutcome {
         escalations: Vec::new(),
         refused_by_hook: None,
         delegation: None,
+        pending_delegation: None,
     }
 }
 
@@ -369,6 +373,13 @@ async fn run_call_inner(
     //    the child does can land in it.
     if let Some(req) = outcome.result.delegate.take() {
         match delegator {
+            Some(d) if d.defer => {
+                // The child is derived from what the session holds now, as if it ran now.
+                outcome.pending_delegation = Some(Box::new(crate::delegate::PendingDelegation {
+                    request: req,
+                    policy: esc.as_ref().map(|e| e.active.active().clone()),
+                }));
+            }
             Some(d) => {
                 let done = crate::delegate::run(
                     d,

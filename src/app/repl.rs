@@ -356,7 +356,9 @@ async fn repl(args: ReplArgs) -> ExitCode {
         tool_refresh: built.tool_refresh.clone(),
         skills: built.skills.clone(),
         // The REPL shows a delegation's report, not the child's live progress (018).
-        delegation: built.delegation(None),
+        delegation: built
+            .delegation(None)
+            .map(|d| d.with_limits(cfg.delegation)),
         visual: cfg.visual,
         escalation: match built
             .escalation

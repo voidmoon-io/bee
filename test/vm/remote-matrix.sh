@@ -1197,6 +1197,112 @@ else
   echo "RESULT|subagent-overgrant-no-cgroup|SKIP|no bee at $BEE"
 fi
 
+# ------------------------------------------- 018 US5: siblings run together and stay apart
+# One turn delegates to three agents at once. The session may read all three files; each agent
+# denies itself the other two. All three children run the same command (one turn each, so which
+# scripted step a child takes cannot matter) — what each may read comes from its own scope alone.
+# Each must read its own file, be kernel-denied the other two, with those denials in its own record
+# and stamped with its own scope, and the parent's record must hold none of them.
+if [ -x "$BEE" ]; then
+  SB=/home/ubuntu/siblings
+  sudo rm -rf "$SB"; mkdir -p "$SB/data" "$SB/skills" "$SB/work"
+  for x in a b c; do echo "SECRET-$x" >"$SB/data/$x.txt"; done
+  for x in a b c; do
+    others=$(for y in a b c; do [ "$y" = "$x" ] || printf '    %s: deny\n' "$SB/data/$y.txt"; done)
+    mkdir -p "$SB/skills/sib-$x"
+    cat >"$SB/skills/sib-$x/SKILL.md" <<EOF
+---
+name: sib-$x
+kind: agent
+description: Reads file $x only.
+tools: [bash]
+turn-limit: 1
+requires:
+  filesystem:
+$others
+---
+Read the files you are asked to.
+EOF
+  done
+  cat >"$WORK/sib.policy.toml" <<EOF
+[policy]
+name = "sib"
+mode = "enforce"
+[policy.filesystem]
+"$SB/data" = "read"
+EOF
+  cat >"$WORK/sib.scn.toml" <<EOF
+[scenario]
+finish        = false
+id            = "subagent-siblings"
+policy_path   = "$WORK/sib.policy.toml"
+system_prompt = "You are a sandboxed agent."
+task          = "Fan out."
+turn_limit    = 10
+timeout_secs  = 60
+tools         = ["task", "bash"]
+skills        = ["$SB/skills"]
+EOF
+  probe="cat $SB/data/a.txt; cat $SB/data/b.txt; cat $SB/data/c.txt; true"
+  {
+    echo '[provider]'
+    echo 'provider = "mock"'
+    echo '[[provider.script]]'
+    echo 'calls = ['
+    for x in a b c; do echo "  { tool = \"task\", args = { agent = \"sib-$x\", prompt = \"Read the files.\" } },"; done
+    echo ']'
+    for _ in 1 2 3; do
+      echo '[[provider.script]]'
+      echo 'tool = "bash"'
+      echo "args = { command = \"$probe\" }"
+    done
+    echo '[[provider.script]]'
+    echo 'text = "Done."'
+  } >"$WORK/sib.prov.toml"
+  (cd "$SB/work" && sudo "$BEE" run --scenario "$WORK/sib.scn.toml" --provider "$WORK/sib.prov.toml" \
+    --out "$WORK/sib.json" >"$WORK/sib.log" 2>&1)
+  verdict=$(python3 - "$WORK/sib.json" "$SB/data" <<'PY' 2>&1
+import json, sys
+try:
+    t = json.load(open(sys.argv[1]))
+except Exception as e:
+    print(f"no transcript: {e}"); sys.exit()
+data = sys.argv[2]
+calls = [c for turn in t.get("turns", []) for c in turn.get("calls", []) if c["call"]["name"] == "task"]
+problems = []
+if len(calls) != 3:
+    problems.append(f"{len(calls)} task calls")
+scopes = set()
+for c in calls:
+    ch = c.get("child") or {}
+    agent = ch.get("agent", "?"); me = agent[-1:]
+    ct = ch.get("transcript") or {}
+    out = "\n".join(k["result"]["content"] for turn in ct.get("turns", []) for k in turn.get("calls", []))
+    den = [e for e in ct.get("audit_trail", []) if e["decision"] == "denied" and e["op"] == "file_open"]
+    denied = sorted(e["target"].rsplit("/", 1)[-1] for e in den)
+    others = sorted(f"{y}.txt" for y in "abc" if y != me)
+    if not ch.get("enforced"): problems.append(f"{agent} unenforced")
+    if f"SECRET-{me}" not in out: problems.append(f"{agent} could not read its own file")
+    for y in "abc":
+        if y != me and f"SECRET-{y}" in out: problems.append(f"{agent} read {y}.txt")
+    if sorted(set(denied)) != others: problems.append(f"{agent} denials {denied} != {others}")
+    if any(e.get("scope_id") != ch.get("scope_id") for e in den): problems.append(f"{agent} denial under another scope")
+    scopes.add(ch.get("scope_id"))
+if len(scopes) != 3: problems.append(f"scopes not distinct: {scopes}")
+if any(e["decision"] == "denied" for e in t.get("audit_trail", [])): problems.append("a denial in the parent's record")
+print("OK" if not problems else "; ".join(problems))
+PY
+)
+  if [ "$verdict" = OK ]; then
+    emit subagent-siblings-isolated PASS "3 siblings in one turn: each read only its own file; denials in its own record and scope"
+  else
+    emit subagent-siblings-isolated FAIL "$verdict ($(tail -1 "$WORK/sib.log" 2>/dev/null))"
+  fi
+  sudo rm -rf "$SB"
+else
+  echo "RESULT|subagent-siblings-isolated|SKIP|no bee at $BEE"
+fi
+
 # ---------------------------------------------------------------- 019: HTTP interception (US1)
 # One scripted episode under `[policy.http]`, one tool call per probe. Each call is its own credential
 # (its own call id), so every probe is attributed separately in the transcript. The in-VM targets are

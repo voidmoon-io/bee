@@ -34,7 +34,8 @@ impl Status {
             | EpisodeStatus::ContextExhausted { .. }
             | EpisodeStatus::Stuck { .. }
             | EpisodeStatus::Finished { .. }
-            | EpisodeStatus::EndedWithoutFinish => Status::Fail,
+            | EpisodeStatus::EndedWithoutFinish
+            | EpisodeStatus::BudgetExhausted => Status::Fail,
         }
     }
 }

@@ -1006,7 +1006,7 @@ pub async fn run_exchange(
             let delegator = config
                 .delegation
                 .as_ref()
-                .map(|config| crate::delegate::Delegator { config, model });
+                .map(|config| crate::delegate::Delegator::new(config, model));
             let outcome = crate::call::run_call_with(
                 crate::call::CallInput {
                     call: tc,

@@ -107,3 +107,19 @@ _Avoid_: Loop, repetition
 **Finish tool**:
 How an autonomous run ends: the model calls `finish` with an outcome (completed, blocked, abandoned) and a summary. Offered to headless standard-mode runs only; without it, prose ends such a run only after one reminder, as "ended without finish".
 _Avoid_: Done tool, stop tool, submit
+
+**Supervisor**:
+The one owner of a session's enforcement engine and kernel audit ring. Every kernel scope the session uses — its tool scope, the proxy scope, a concurrent batch's episodes, its subagents — is created, reloaded, drained and torn down through it; scopes are flat cgroups whose parent relation lives only in the supervisor.
+_Avoid_: Engine manager, scope manager
+
+**Agent definition**:
+An operator-authored `SKILL.md` with `kind: agent`: a name, the description the model chooses by, the tools the subagent gets, its turn limit, and the capabilities it asks for. It is a request: the subagent receives the delegating session's active policy narrowed by it, and an agent asking for more is refused.
+_Avoid_: Agent config, subagent type
+
+**Subagent**:
+An agent run by a session through the `task` tool, in its own kernel scope, under a policy proven to be a subset of the session's. It sees only its instructions and the task it was given, draws from the session's shared turn budget, and returns a bounded report; its whole record is kept under the delegating call.
+_Avoid_: Child agent, worker, sub-session
+
+**Delegation**:
+One `task` call and everything it caused: the derivation, the subagent's scope, its run, its teardown and its report — or a refusal naming why none of that happened. A delegation with no kernel scope behind it says so.
+_Avoid_: Spawn, handoff

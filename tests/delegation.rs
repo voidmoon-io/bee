@@ -11,7 +11,7 @@ mod fixtures;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use bee::delegate::Delegation;
+use bee::delegate::{Budget, Delegation, DelegationLimits};
 use bee::episode::{run_loop, LoopOptions};
 use bee::grants::escalate::LoopEscalation;
 use bee::grants::Ttl;
@@ -21,7 +21,9 @@ use bee::provider::{StopReason, ToolCall, Turn};
 use bee::sandbox::Sandbox;
 use bee::skills::SkillRegistry;
 use bee::tools::ToolRegistry;
-use bee::transcript::{DelegationOutcome, EpisodeTranscript, RefusalReason};
+use bee::transcript::{
+    CutShortReason, DelegationOutcome, EpisodeStatus, EpisodeTranscript, RefusalReason,
+};
 use bee_core::{Access, Policy};
 use fixtures::*;
 use serde_json::{json, Value};
@@ -118,6 +120,18 @@ struct Run {
 
 /// Run the parent loop: `task` and `read_file` on its surface, `policy` as its active policy.
 async fn run(s: &Setup, turns: Vec<Turn>, policy: Policy, delegation: Option<Delegation>) -> Run {
+    run_with(s, turns, policy, delegation, None, 5).await
+}
+
+/// [`run`], drawing from `budget` with the parent's own `turn_limit`.
+async fn run_with(
+    s: &Setup,
+    turns: Vec<Turn>,
+    policy: Policy,
+    delegation: Option<Delegation>,
+    budget: Option<Budget>,
+    turn_limit: u32,
+) -> Run {
     let mut registry = ToolRegistry::with_deps(Arc::new(bee::tools::ToolDeps {
         agents: Some(s.agents.clone()),
         ..Default::default()
@@ -129,7 +143,11 @@ async fn run(s: &Setup, turns: Vec<Turn>, policy: Policy, delegation: Option<Del
     let sink = lines.clone();
     let opts = LoopOptions {
         escalation: Some(escalation(policy)),
-        delegation,
+        delegation: delegation.map(|d| match &budget {
+            Some(b) => d.with_budget(b.clone()),
+            None => d,
+        }),
+        budget,
         progress: Some(Box::new(move |l: &str| {
             sink.lock().unwrap().push(l.to_string())
         })),
@@ -137,7 +155,7 @@ async fn run(s: &Setup, turns: Vec<Turn>, policy: Policy, delegation: Option<Del
     };
     let t = run_loop(
         &MockModel::scripted(turns),
-        &scenario("parent", &["task", "read_file"], 5, 60),
+        &scenario("parent", &["task", "read_file"], turn_limit, 60),
         &mut registry,
         &mut sb,
         &opts,
@@ -426,4 +444,228 @@ fn an_agent_inherits_what_its_parent_denies() {
     // And an agent reaching *over* a parent deny is refused outright, not narrowed (FR-013).
     let over = policy(&[("/work", Access::Write), ("/work/secret", Access::Deny)]);
     assert!(over.derive(a.requested_policy()).is_err());
+}
+
+// US4 / SC-005: a subagent draws from the session's turns; delegating cannot buy more. The parent
+// has 5; it spends one delegating, the child gets the 4 left and is cut short, and the parent then
+// has none for itself.
+#[tokio::test]
+async fn a_subagent_draws_from_the_sessions_turns_and_cannot_exceed_them() {
+    let s = setup("tools: [read_file]\nturn-limit: 20\n");
+    let bugs = s.work.join("bugs.txt");
+    let mut script = vec![turn(vec![task("p1", "reader")])];
+    for i in 0..10 {
+        script.push(turn(vec![call(
+            &format!("c{i}"),
+            "read_file",
+            json!({"path": bugs}),
+        )]));
+    }
+    let budget = Budget::new(
+        5,
+        std::time::Instant::now() + std::time::Duration::from_secs(60),
+    );
+    let r = run_with(
+        &s,
+        script,
+        open_policy(),
+        delegation(&s),
+        Some(budget.clone()),
+        10,
+    )
+    .await;
+
+    let rec = &r.t.turns[0].calls[0];
+    let child = rec.child.as_ref().unwrap();
+    assert_eq!(
+        child.outcome,
+        DelegationOutcome::CutShort {
+            reason: CutShortReason::SharedTurns
+        }
+    );
+    assert!(
+        rec.result.content.contains("shared turn budget"),
+        "{}",
+        rec.result.content
+    );
+    assert_eq!(child.turns_used, 4);
+    assert_eq!(
+        r.t.turns.len() as u32 + child.turns_used,
+        5,
+        "parent and child together spent exactly the pool"
+    );
+    assert_eq!(r.t.status, EpisodeStatus::BudgetExhausted);
+    assert_eq!(budget.turns_left(), 0);
+}
+
+// US5: several `task` calls in one turn each run their own subagent, and each result lands on its
+// own call, in call order.
+#[tokio::test]
+async fn task_calls_in_one_turn_each_get_their_own_subagent() {
+    let s = setup("tools: [read_file]\nturn-limit: 4\n");
+    let r = run(
+        &s,
+        vec![
+            turn(vec![
+                task("p1", "reader"),
+                task("p2", "reader"),
+                task("p3", "reader"),
+            ]),
+            // The children share the scripted model, so which takes which `finish` is not fixed;
+            // each summary is unique, and each must land on exactly one call.
+            turn(vec![finish("c1", "summary one")]),
+            turn(vec![finish("c2", "summary two")]),
+            turn(vec![finish("c3", "summary three")]),
+            text("done"),
+        ],
+        open_policy(),
+        delegation(&s),
+    )
+    .await;
+    let calls = &r.t.turns[0].calls;
+    assert_eq!(calls.len(), 3);
+    let ids: Vec<&str> = calls.iter().map(|c| c.call.id.as_str()).collect();
+    assert_eq!(ids, vec!["p1", "p2", "p3"], "results stay in call order");
+    let mut summaries: Vec<String> = calls
+        .iter()
+        .map(|c| {
+            assert_eq!(
+                c.child.as_ref().unwrap().outcome,
+                DelegationOutcome::Completed
+            );
+            c.result.content.lines().last().unwrap().to_string()
+        })
+        .collect();
+    summaries.sort();
+    assert_eq!(
+        summaries,
+        vec!["summary one", "summary three", "summary two"]
+    );
+    assert_eq!(r.t.delegations().len(), 3);
+}
+
+// US5: one sibling failing to start leaves the others running, and says which failed and why.
+#[tokio::test]
+async fn one_sibling_refused_does_not_stop_the_others() {
+    let root = tempfile::tempdir().unwrap();
+    let skills = root.path().join("skills");
+    agent(&skills, "good", "tools: [read_file]\nturn-limit: 3\n");
+    agent(&skills, "needs-bash", "tools: [bash]\nturn-limit: 3\n");
+    let s = Setup {
+        agents: Arc::new(SkillRegistry::discover(&[skills])),
+        work: root.path().to_path_buf(),
+        _root: root,
+    };
+    let r = run(
+        &s,
+        vec![
+            turn(vec![task("p1", "needs-bash"), task("p2", "good")]),
+            turn(vec![finish("c1", "fine")]),
+            text("done"),
+        ],
+        open_policy(),
+        delegation(&s),
+    )
+    .await;
+    let calls = &r.t.turns[0].calls;
+    assert!(
+        calls[0].result.content.contains("REFUSED") && calls[0].result.content.contains("'bash'")
+    );
+    assert_eq!(
+        calls[1].child.as_ref().unwrap().outcome,
+        DelegationOutcome::Completed
+    );
+}
+
+// US4: `max_concurrent` bounds a segment; calls beyond it still run, in the next segment.
+#[tokio::test]
+async fn max_concurrent_bounds_a_segment_and_every_call_still_runs() {
+    let s = setup("tools: [read_file]\nturn-limit: 4\n");
+    let d = Delegation::new(s.agents.clone(), None).with_limits(DelegationLimits {
+        max_depth: None,
+        max_concurrent: Some(1),
+    });
+    let r = run(
+        &s,
+        vec![
+            turn(vec![task("p1", "reader"), task("p2", "reader")]),
+            turn(vec![finish("c1", "first")]),
+            turn(vec![finish("c2", "second")]),
+            text("done"),
+        ],
+        open_policy(),
+        Some(d),
+    )
+    .await;
+    let calls = &r.t.turns[0].calls;
+    // With one at a time the order is fixed: the first call's child takes the first `finish`.
+    assert!(
+        calls[0].result.content.ends_with("first"),
+        "{}",
+        calls[0].result.content
+    );
+    assert!(
+        calls[1].result.content.ends_with("second"),
+        "{}",
+        calls[1].result.content
+    );
+}
+
+// The `[delegation]` limits: defaults, hard caps, and a project layer that can only lower them.
+#[test]
+fn delegation_limits_resolve_and_only_narrow() {
+    assert_eq!(DelegationLimits::default().resolve(), (1, 4));
+    let huge = DelegationLimits {
+        max_depth: Some(99),
+        max_concurrent: Some(999),
+    };
+    assert_eq!(huge.resolve(), (4, 16), "hard caps");
+    let operator = DelegationLimits {
+        max_depth: Some(2),
+        max_concurrent: Some(8),
+    };
+    let wider = DelegationLimits {
+        max_depth: Some(3),
+        max_concurrent: Some(12),
+    };
+    assert_eq!(
+        operator.narrowed_by(wider),
+        operator,
+        "a project cannot raise them"
+    );
+    let narrower = DelegationLimits {
+        max_depth: Some(1),
+        max_concurrent: None,
+    };
+    assert_eq!(operator.narrowed_by(narrower).resolve(), (1, 8));
+    // Over defaults the project still only lowers.
+    assert_eq!(
+        DelegationLimits::default().narrowed_by(wider).resolve(),
+        (1, 4)
+    );
+}
+
+// US4 / FR-026: a report is capped like any other tool result, and says so.
+#[tokio::test]
+async fn an_oversized_report_is_truncated_visibly() {
+    let s = setup("tools: [read_file]\nturn-limit: 3\n");
+    let huge = "x".repeat(150 * 1024);
+    let r = run(
+        &s,
+        vec![
+            turn(vec![task("p1", "reader")]),
+            // `finish` caps a summary at 4000 characters; a child that ends in prose instead (a
+            // reminder, then a second text turn) reports its last words, which are not capped.
+            text(&huge),
+            text(&huge),
+            text("done"),
+        ],
+        open_policy(),
+        delegation(&s),
+    )
+    .await;
+    let res = &r.t.turns[0].calls[0].result;
+    assert!(res.truncated);
+    assert!(res.original_len.unwrap() > res.content.len());
+    assert!(res.content.len() <= bee::transcript::DEFAULT_OUTPUT_CAP + 512);
 }

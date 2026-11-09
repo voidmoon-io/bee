@@ -29,3 +29,12 @@ errors and the case's first status check fails.
 
 Negative control: `subagent-net-denied` with the agent declaring both destinations (no narrowing)
 **FAILs** (child reaches B, no denial) — the case tests attenuation, not setup.
+
+## PR 3 — bounds and fan-out (US4 + US5, US6 closed), 2026-11-09
+
+| Check | Result |
+|---|---|
+| `cargo check` (`enforce`, `concurrent,mcp,sec,astgrep-rust,intercept,durable-sessions`) | OK |
+| clippy (`concurrent,mcp,sec,astgrep-rust,intercept` and default, all targets, `-A clippy::result_large_err`) | OK |
+| host suites (workspace, CI `test-support`/`intercept` list, `concurrent` lib) | OK — `tests/delegation.rs` 15/15, 3 new `[delegation]` config tests |
+| VM matrix | **54/54** — new `subagent-siblings-isolated` |

@@ -175,10 +175,12 @@ proven.
 
 **Independent Test**: quickstart S7-style host test plus a VM reload in a child scope.
 
-- [ ] T049 [US7] Add `GrantOrigin::Subagent { agent: String, inner: Box<GrantOrigin> }` in `src/grants/mod.rs`; render it in the REPL/TUI consent prompt as "subagent '<agent>' asks: …"
-- [ ] T050 [US7] Give the child a `LoopEscalation` whose ceiling is `DelegationCtx.spawn_ceiling` and whose reload goes through the child's `ScopeHandle`; consent through the session's one `Operator`
-- [ ] T051 [P] [US7] Tests in `tests/dynamic_grants.rs`: child escalation within spawn ceiling granted; beyond it refused without consulting the operator; parent narrowing after spawn leaves the child unchanged (FR-016)
-- [ ] T052 [US7] Extend the 007 property test in `src/grants/mod.rs` to a delegation tree (FR-014, SC-003)
+- [x] T049 [US7] Add `GrantOrigin::Subagent { agent: String, inner: Box<GrantOrigin> }` in `src/grants/mod.rs`; render it in the REPL/TUI consent prompt as "subagent '<agent>' asks: …"
+- [x] T050 [US7] Give the child a `LoopEscalation` whose ceiling is `DelegationCtx.spawn_ceiling` and whose reload goes through the child's `ScopeHandle`; consent through the session's one `Operator`
+- [x] T051 [P] [US7] Tests in `tests/dynamic_grants.rs`: child escalation within spawn ceiling granted; beyond it refused without consulting the operator; parent narrowing after spawn leaves the child unchanged (FR-016)
+- [x] T052 [US7] Extend the 007 property test in `src/grants/mod.rs` to a delegation tree (FR-014, SC-003)
+
+  > **As built (US7).** The subagent is named by the operator, not by each call site: `Operator::for_subagent(agent)` shares the session's adapter, output, timeout and log, and `escalate()` wraps every origin through `Operator::attribute`, so the request, the consent record and the lease all carry `Subagent { agent, inner }` (nested for a grandchild). `ConsentRequest::render_lines` heads the prompt with `subagent 'a' › 'b' asks:`, which both the REPL and the TUI render. A child widens on a kernel denial only when its parent would (a parent hook observes `KernelDenial`); otherwise its ceiling is its floor. Either way the child now carries a `LoopEscalation`, so a subagent allowed to delegate derives its own subagents from what it holds — before this, every depth-2 delegation was refused as having no policy. T051's tests live in `src/delegate.rs` (they drive `child_escalation` through the real `escalate()`), not `tests/dynamic_grants.rs`: a host child cannot be handed scripted kernel audit. The kernel half is the VM pair `subagent-escalate` / `subagent-escalate-beyond`.
 
 ---
 

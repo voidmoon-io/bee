@@ -26,6 +26,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::episode::{run_loop, LoopOptions, ProgressSink};
+use crate::grants::escalate::{DenialEscalationHook, LoopEscalation};
+use crate::hooks::{LoopHook, StepEventKind};
 use crate::provider::{Model, Provenance};
 use crate::sandbox::Sandbox;
 use crate::scenario::{Scenario, ScoringMode};
@@ -189,6 +191,9 @@ pub struct Delegator<'a> {
     /// Leave a delegation on the call's outcome instead of running it, so the loop can run several
     /// together (US5). Set only by a loop that will resolve them.
     pub defer: bool,
+    /// The delegating loop's escalation, when it has one: a child escalates through the same
+    /// operator, bounded by what the parent holds at spawn (US7).
+    pub escalation: Option<&'a LoopEscalation>,
 }
 
 impl<'a> Delegator<'a> {
@@ -197,7 +202,14 @@ impl<'a> Delegator<'a> {
             config,
             model,
             defer: false,
+            escalation: None,
         }
+    }
+
+    /// This delegator, lending its children the delegating loop's escalation (US7).
+    pub fn with_escalation(mut self, escalation: Option<&'a LoopEscalation>) -> Self {
+        self.escalation = escalation;
+        self
     }
 
     /// This delegator, deferring (or not).
@@ -206,6 +218,7 @@ impl<'a> Delegator<'a> {
             config: self.config,
             model: self.model,
             defer,
+            escalation: self.escalation,
         }
     }
 }
@@ -415,6 +428,9 @@ async fn run_inner(
         }),
         budget: cfg.budget.clone(),
         delegation: child_may_delegate.then_some(child_cfg),
+        escalation: d
+            .escalation
+            .map(|parent| child_escalation(parent, &req.agent, parent_policy, &derived)),
         ..LoopOptions::default()
     };
     let transcript = run_loop(d.model, &scenario, &mut registry, &mut sandbox, &opts).await;
@@ -475,6 +491,36 @@ async fn run_inner(
             transcript: Some(Box::new(transcript)),
             turns_used,
         },
+    }
+}
+
+/// The child's escalation (US7). Its floor is its derived policy; its ceiling is what the parent
+/// holds *now*, at spawn — never the session's ceiling (FR-015) — and it is a copy, so a parent that
+/// narrows later does not reach into a running child (FR-016). A child widens on a kernel denial only
+/// when its parent would; otherwise the ceiling is the floor and the escalation only carries the
+/// child's policy, which its own subagents are derived from. It asks the session's one operator,
+/// which names it on every request; its reloads go through its own sandbox, so its own scope.
+fn child_escalation(
+    parent: &LoopEscalation,
+    agent: &str,
+    parent_policy: &bee_core::Policy,
+    derived: &bee_core::Policy,
+) -> LoopEscalation {
+    let widening = parent
+        .hooks
+        .iter()
+        .any(|h| h.observes(StepEventKind::KernelDenial));
+    let hooks: Vec<Box<dyn LoopHook>> = vec![Box::new(DenialEscalationHook { enabled: widening })];
+    LoopEscalation {
+        base: derived.clone(),
+        ceiling: if widening {
+            parent_policy.clone()
+        } else {
+            derived.clone()
+        },
+        hooks,
+        operator: parent.operator.for_subagent(agent),
+        default_ttl: parent.default_ttl,
     }
 }
 
@@ -638,5 +684,194 @@ fn failed(agent: &str, depth: u32, scope_id: String, enforced: bool, detail: Str
             transcript: None,
             turns_used: 0,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! US7 (T051): a subagent's escalation, driven through the real widen cycle on a host sandbox.
+    //! The kernel half — a real denial inside a child scope, widened by a reload of that scope — is
+    //! the VM case `subagent-escalate`.
+    use super::*;
+    use crate::grants::escalate::{escalate, EscalateOutcome};
+    use crate::grants::{ActivePolicy, GrantDelta, GrantOrigin, Ttl};
+    use crate::operator::{
+        AllowWithinCeiling, Consent, ConsentRequest, Decision, Operator, OperatorKind, Reason,
+    };
+    use bee_core::{Access, Mode, Policy};
+    use std::collections::BTreeMap;
+    use std::sync::atomic::AtomicBool;
+
+    fn policy(fs: &[(&str, Access)]) -> Policy {
+        Policy {
+            defaults: Default::default(),
+            name: "p".into(),
+            description: None,
+            mode: Mode::Enforce,
+            filesystem: fs.iter().map(|(p, a)| (p.to_string(), *a)).collect(),
+            exec: Default::default(),
+            network: Default::default(),
+            exfiltration: Default::default(),
+            http: None,
+        }
+    }
+
+    fn write(path: &str) -> GrantDelta {
+        GrantDelta {
+            filesystem: BTreeMap::from([(path.to_string(), Access::Write)]),
+            ..Default::default()
+        }
+    }
+
+    /// Counts the times it is asked, and grants.
+    #[derive(Default)]
+    struct Spy(AtomicBool);
+    #[async_trait::async_trait]
+    impl Consent for Spy {
+        async fn decide(&self, _r: &ConsentRequest) -> Decision {
+            self.0.store(true, Ordering::SeqCst);
+            Decision::Granted
+        }
+    }
+
+    /// The session's escalation: `widening` says whether a kernel denial may widen at all.
+    fn session(widening: bool, consent: Arc<dyn Consent>) -> LoopEscalation {
+        let p = policy(&[]);
+        LoopEscalation {
+            base: p.clone(),
+            ceiling: p,
+            hooks: vec![Box::new(DenialEscalationHook { enabled: widening })],
+            operator: Operator::with_consent(OperatorKind::Autonomous, consent),
+            default_ttl: Ttl::Forever,
+        }
+    }
+
+    /// The parent holds `/data` = write; the agent asks only to read `/data/in`.
+    fn spawn(parent: &LoopEscalation, parent_policy: &Policy) -> (LoopEscalation, ActivePolicy) {
+        let derived = parent_policy
+            .derive(policy(&[("/data/in", Access::Read)]))
+            .expect("the agent asks for less than the parent holds");
+        let child = child_escalation(parent, "scout", parent_policy, &derived);
+        let active = ActivePolicy::new(child.base.clone(), child.ceiling.clone()).unwrap();
+        (child, active)
+    }
+
+    async fn ask(
+        child: &LoopEscalation,
+        active: &mut ActivePolicy,
+        delta: GrantDelta,
+    ) -> EscalateOutcome {
+        let origin = GrantOrigin::ReactiveDenial {
+            op: "file_open".into(),
+            target: "x".into(),
+        };
+        escalate(
+            active,
+            origin,
+            delta,
+            child.default_ttl,
+            1,
+            &child.operator,
+            &mut Sandbox::host(Vec::new()),
+            &mut ToolRegistry::new(),
+        )
+        .await
+    }
+
+    // AS-1, AS-3: within what the parent held at spawn, the request goes to the session's operator,
+    // named as the subagent's, and is granted.
+    #[tokio::test]
+    async fn a_child_widens_up_to_its_parents_authority() {
+        let parent = session(true, Arc::new(AllowWithinCeiling));
+        let parent_policy = policy(&[("/data", Access::Write)]);
+        let (child, mut active) = spawn(&parent, &parent_policy);
+        assert_eq!(
+            child.ceiling, parent_policy,
+            "the ceiling is the parent at spawn (FR-015)"
+        );
+
+        let out = ask(&child, &mut active, write("/data/out")).await;
+        assert!(out.is_granted(), "{out:?}");
+        assert!(active.active().filesystem.contains_key("/data/out"));
+
+        let log = parent.operator.log();
+        assert_eq!(
+            log.len(),
+            1,
+            "the decision is in the session's one consent log"
+        );
+        assert!(matches!(
+            &log[0].request.origin,
+            GrantOrigin::Subagent { agent, inner }
+                if agent == "scout" && matches!(**inner, GrantOrigin::ReactiveDenial { .. })
+        ));
+        assert!(log[0].request.render_lines()[0].starts_with("subagent 'scout' asks:"));
+        assert!(matches!(
+            &active.leases()[0].origin,
+            GrantOrigin::Subagent { .. }
+        ));
+    }
+
+    // AS-2: beyond the parent's authority, refused without consulting any approver — even though the
+    // session's own ceiling would allow it.
+    #[tokio::test]
+    async fn beyond_the_parent_is_refused_unasked() {
+        let spy = Arc::new(Spy::default());
+        let mut parent = session(true, spy.clone());
+        // The session could widen to /etc; the parent does not hold it.
+        parent.ceiling = policy(&[("/etc", Access::Write), ("/data", Access::Write)]);
+        let parent_policy = policy(&[("/data", Access::Write)]);
+        let (child, mut active) = spawn(&parent, &parent_policy);
+
+        let out = ask(&child, &mut active, write("/etc/x")).await;
+        assert!(
+            matches!(&out, EscalateOutcome::Refused(r) if r.contains("exceeds capability ceiling")),
+            "{out:?}"
+        );
+        assert!(!spy.0.load(Ordering::SeqCst), "no approver was consulted");
+        let log = parent.operator.log();
+        assert_eq!(log[0].reason, Reason::BeyondCeiling);
+        assert_eq!(log[0].request.subagents(), vec!["scout"]);
+        assert!(active.leases().is_empty());
+    }
+
+    // FR-016: a parent that narrows after spawn does not reach into the running child.
+    #[tokio::test]
+    async fn a_parent_narrowing_after_spawn_leaves_the_child_unchanged() {
+        let parent = session(true, Arc::new(AllowWithinCeiling));
+        // The parent starts reading only /data/in, and holds /data through a lease when it spawns.
+        let mut parent_active = ActivePolicy::new(
+            policy(&[("/data/in", Access::Read)]),
+            policy(&[("/data", Access::Write)]),
+        )
+        .unwrap();
+        let lease = parent_active
+            .try_apply(GrantOrigin::Explicit, write("/data"), Ttl::Forever, 0)
+            .unwrap();
+        let (child, mut active) = spawn(&parent, parent_active.active());
+
+        assert!(parent_active.release(&lease).unwrap());
+        assert!(!parent_active.active().filesystem.contains_key("/data"));
+
+        let out = ask(&child, &mut active, write("/data/out")).await;
+        assert!(
+            out.is_granted(),
+            "the child keeps its spawn-time ceiling: {out:?}"
+        );
+    }
+
+    // A session that does not widen on a denial gives its subagents no more room than that.
+    #[tokio::test]
+    async fn a_session_that_does_not_widen_has_children_that_do_not() {
+        let spy = Arc::new(Spy::default());
+        let parent = session(false, spy.clone());
+        let parent_policy = policy(&[("/data", Access::Write)]);
+        let (child, mut active) = spawn(&parent, &parent_policy);
+        assert_eq!(child.ceiling, child.base);
+        assert!(!child.hooks[0].observes(StepEventKind::KernelDenial));
+
+        let out = ask(&child, &mut active, write("/data/out")).await;
+        assert!(matches!(out, EscalateOutcome::Refused(_)), "{out:?}");
+        assert!(!spy.0.load(Ordering::SeqCst));
     }
 }

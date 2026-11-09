@@ -8,6 +8,8 @@ concurrent-reload
 subagent-net-denied
 subagent-overgrant-no-cgroup
 subagent-siblings-isolated
+subagent-escalate
+subagent-escalate-beyond
 episode-allow
 episode-file-deny
 exec-allow

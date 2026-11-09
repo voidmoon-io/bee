@@ -374,6 +374,43 @@ async fn a_delegation_past_the_depth_limit_is_refused() {
     ));
 }
 
+// US7: a subagent carries its own escalation — its policy, under a ceiling of its parent's at spawn —
+// so a subagent allowed to delegate derives its own subagent from what *it* holds. Before US7 the
+// child loop had no policy and every nested delegation was refused as having none to derive from.
+#[tokio::test]
+async fn a_subagent_delegates_from_its_own_policy() {
+    let s = setup("tools: [read_file, task]\nturn-limit: 4\n");
+    let d = delegation(&s).unwrap().with_limits(DelegationLimits {
+        max_depth: Some(2),
+        max_concurrent: None,
+    });
+    let r = run(
+        &s,
+        vec![
+            turn(vec![task("p1", "reader")]),
+            turn(vec![task("c1", "reader")]),
+            turn(vec![finish("g1", "deep")]),
+            turn(vec![finish("c2", "mid")]),
+            text("ok"),
+        ],
+        open_policy(),
+        Some(d),
+    )
+    .await;
+    let child = r.t.turns[0].calls[0].child.as_ref().unwrap();
+    assert_eq!(child.outcome, DelegationOutcome::Completed, "{child:?}");
+    let grandchild = child.transcript.as_ref().unwrap().turns[0].calls[0]
+        .child
+        .as_ref()
+        .expect("the subagent's own task call delegated");
+    assert_eq!(grandchild.depth, 2);
+    assert_eq!(
+        grandchild.outcome,
+        DelegationOutcome::Completed,
+        "{grandchild:?}"
+    );
+}
+
 // A loop that lends no delegator refuses the call rather than answer it with an empty result.
 #[tokio::test]
 async fn without_delegation_a_task_call_is_refused_not_answered_empty() {

@@ -1003,10 +1003,10 @@ pub async fn run_exchange(
                 }),
                 _ => None,
             };
-            let delegator = config
-                .delegation
-                .as_ref()
-                .map(|config| crate::delegate::Delegator::new(config, model));
+            let parent_escalation = config.escalation.as_ref().map(|e| &e.config);
+            let delegator = config.delegation.as_ref().map(|config| {
+                crate::delegate::Delegator::new(config, model).with_escalation(parent_escalation)
+            });
             let outcome = crate::call::run_call_with(
                 crate::call::CallInput {
                     call: tc,

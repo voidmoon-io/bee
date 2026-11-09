@@ -406,6 +406,8 @@ fn cmd_exec(
     let _ = &plan;
 
     // Fail-closed: refuse to run if the kernel cannot enforce (SC-007).
+    // `bee exec` keeps the engine and its sync audit reader to itself rather than going through a
+    // Supervisor (018): one process, one scope, no async runtime, nothing created beside it.
     match Engine::init() {
         Ok(engine) => {
             #[cfg(feature = "enforce")]

@@ -119,11 +119,6 @@ pub fn refuse_unsupported(spec: &SessionSpec) -> Result<(), BuildError> {
                 "[policy.http] interception is {unsupported}"
             )));
         }
-        if spec.ceiling.is_some() {
-            return Err(BuildError(format!(
-                "widening escalation (a ceiling policy) is {unsupported}"
-            )));
-        }
         // Skill directories widen the policy, and a concurrent batch compiles each scope before the
         // session is built.
         if !spec.skill_roots.is_empty() {

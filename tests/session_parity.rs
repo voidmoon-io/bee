@@ -143,7 +143,14 @@ async fn a_concurrent_batch_refuses_what_it_cannot_provide() {
     with_http.policy = Some(http_policy(&["127.0.0.1:9"]));
     assert!(refused(with_http).await.contains("[policy.http]"));
 
-    assert!(refused(spec(batch)).await.contains("ceiling"));
+    // A ceiling is not refused: since 018 every scope, a concurrent episode's included, reloads
+    // through the batch's one supervisor (SC-007).
+    let widening = spec(batch);
+    assert!(widening.ceiling.is_some());
+    let mut s = build(widening, &|_| {})
+        .await
+        .expect("a concurrent batch session with a ceiling builds");
+    s.shutdown().await.unwrap();
 
     let mut with_skills = spec(batch);
     with_skills.ceiling = None;

@@ -98,8 +98,9 @@ Constitution I) with a message pointing at 018.
 
 **After 018**: the sidecar becomes an ordinary `ScopeRecord` under the Supervisor
 (`specs/018-subagent-scopes/data-model.md:104-136`); the sidecar field is deleted. M4's per-subagent
-proxy scopes (FR-031) are built only on the Supervisor and are blocked on 018. No 018 code exists
-on any branch today; 019 M1 does not wait for it.
+proxy scopes (FR-031) are built only on the Supervisor and are blocked on 018. Since 018's slice 1
+the proxy scope is created on the Supervisor as the tool scope's child, but `EnforcedSandbox.sidecar`
+remains; the per-subagent half of T092 is still open.
 
 **Alternatives considered**:
 - **Proxy inside the harness process**: no kernel confinement on the component with the most

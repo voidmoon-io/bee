@@ -57,7 +57,7 @@ pub struct RunArgs {
     #[arg(long, requires = "batch")]
     pub providers: Option<String>,
     /// Run the batch episodes concurrently. Requires building with `--features concurrent`
-    /// (async audit demux + shared engine); an error otherwise.
+    /// (one shared supervisor for every episode's scope); an error otherwise.
     #[arg(long, requires = "batch")]
     pub concurrent: bool,
 
@@ -601,8 +601,8 @@ fn emit_transcripts(
     Ok(())
 }
 
-/// Concurrent batch: every pair against one shared engine. Only available with the `concurrent`
-/// feature, which brings the async audit demux the shared engine needs.
+/// Concurrent batch: every pair against one shared supervisor (018). Only available with the
+/// `concurrent` feature, which brings the concurrent runner.
 #[cfg(feature = "concurrent")]
 async fn run_concurrent_mode(
     scenario_paths: Vec<PathBuf>,
@@ -664,7 +664,7 @@ async fn run_concurrent_mode(
 ) -> ExitCode {
     eprintln!(
         "{CMD}: --concurrent requires building with --features concurrent \
-         (async audit demux + shared engine)"
+         (one shared supervisor for every episode)"
     );
     ExitCode::from(EX_USAGE)
 }

@@ -955,6 +955,78 @@ else
   echo "RESULT|concurrent-audit-isolation|SKIP|no bee at $BEE"
 fi
 
+# ------------------------------------------------- 018 SC-007: reload under concurrency
+# Two scenarios run concurrently on one supervisor, each episode in its own scope, both writing a
+# path their base policy denies. Scenario A's ceiling covers it: denial → escalate → reload of A's
+# scope → retry writes. Scenario B's ceiling does not: its write stays kernel-denied even though A's
+# scope was widened beside it. Before 018 a concurrent batch refused a ceiling outright (the runner
+# owned the engine, so no episode could reload), and both episodes ended as setup errors.
+if [ -x "$BEE" ]; then
+  CR=/home/ubuntu/creload
+  sudo rm -rf "$CR"; mkdir -p "$CR/work" "$CR/grant" "$WORK/cr-scn" "$WORK/cr-prov"
+  rm -rf "$WORK/cr-out"
+  cat >"$WORK/cr-base.policy.toml" <<'EOF'
+[policy]
+name = "cr-base"
+mode = "enforce"
+[policy.filesystem]
+"/home/ubuntu/creload/work" = "write"
+EOF
+  cat >"$WORK/cr-ceiling.policy.toml" <<'EOF'
+[policy]
+name = "cr-ceiling"
+mode = "enforce"
+[policy.filesystem]
+"/home/ubuntu/creload/work" = "write"
+"/home/ubuntu/creload/grant" = "write"
+EOF
+  for x in a b; do
+    if [ "$x" = a ]; then ceil="$WORK/cr-ceiling.policy.toml"; else ceil="$WORK/cr-base.policy.toml"; fi
+    cat >"$WORK/cr-scn/cr-$x.scn.toml" <<EOF
+[scenario]
+finish        = false  # 025: these cases pin the pre-finish ending ("completed")
+id            = "cr-$x"
+policy_path   = "$WORK/cr-base.policy.toml"
+ceiling_policy_path = "$ceil"
+system_prompt = "You are a sandboxed agent."
+task          = "Write the output."
+turn_limit    = 4
+timeout_secs  = 30
+tools         = ["write_file"]
+EOF
+  done
+  cat >"$WORK/cr-prov/m.toml" <<'EOF'
+[provider]
+provider = "mock"
+model    = "m"
+[[provider.script]]
+tool = "write_file"
+args = { path = "/home/ubuntu/creload/grant/out.txt", content = "written after reload\n" }
+[[provider.script]]
+text = "Done."
+EOF
+  sudo "$BEE" run --batch --concurrent \
+    --scenarios "$WORK/cr-scn" --providers "$WORK/cr-prov" \
+    --out "$WORK/cr-out" --quiet >"$WORK/cr.log" 2>&1
+  a="$WORK/cr-out/cr-a_mock_m.json"; b="$WORK/cr-out/cr-b_mock_m.json"
+  if grep -q 'requires building with --features concurrent' "$WORK/cr.log"; then
+    echo "RESULT|concurrent-reload|SKIP|bee built without --features concurrent"
+  elif [ ! -f "$a" ] || [ ! -f "$b" ]; then
+    emit concurrent-reload FAIL "missing transcript ($(tail -1 "$WORK/cr.log" 2>/dev/null))"
+  elif ! grep -q '"status": "completed"' "$a" || ! grep -q '"decision": "granted"' "$a"; then
+    emit concurrent-reload FAIL "episode A did not escalate to completion ($(grep -o '"detail": "[^"]*"' "$a" | head -1))"
+  elif [ "$(cat "$CR/grant/out.txt" 2>/dev/null)" != "written after reload" ]; then
+    emit concurrent-reload FAIL "A's grant did not reach the kernel: the retried write was not written"
+  elif grep -q '"decision": "granted"' "$b" || ! grep -q '"decision": "denied"' "$b"; then
+    emit concurrent-reload FAIL "B was widened or never denied: a reload crossed scopes"
+  else
+    emit concurrent-reload PASS "A's scope reloaded mid-run under concurrency; B's stayed denied"
+  fi
+  sudo rm -rf "$CR"
+else
+  echo "RESULT|concurrent-reload|SKIP|no bee at $BEE"
+fi
+
 # ---------------------------------------------------------------- 019: HTTP interception (US1)
 # One scripted episode under `[policy.http]`, one tool call per probe. Each call is its own credential
 # (its own call id), so every probe is attributed separately in the transcript. The in-VM targets are

@@ -4,6 +4,7 @@ atten-subset-deny
 bee-check
 cgroup-migrate-enforced
 concurrent-audit-isolation
+concurrent-reload
 episode-allow
 episode-file-deny
 exec-allow

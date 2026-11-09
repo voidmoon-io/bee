@@ -105,11 +105,10 @@ durable-sessions = ["durable-store", "findings", "tokio/signal"]
 # stripped host processes with NO scope — enough for offline (MockModel) tests and live-provider
 # smoke, and keeping the default workspace build runtime-/bpf-toolchain-free (Constitution V, SC-005).
 enforce = ["bee-userspace/enforce"]
-# Concurrent batch episodes: the async audit demux + shared-engine runner.
-# Concurrent episodes (US4): the async audit demux + shared-engine runner. Pulls bee-userspace's
-# `tokio` feature (which implies `enforce`) and turns on the harness `enforce` path it builds on.
-# Kept separate from `enforce` so the plain enforce build stays async-runtime-free (SC-005).
-concurrent = ["enforce", "bee-userspace/tokio"]
+# Concurrent batch episodes (US4): `bee run --batch --concurrent`, one shared Supervisor for every
+# episode's scope. Since 018 every enforced session audits through the Supervisor's synchronous
+# per-scope routing, so this adds only the runner; bee-userspace's async demux is no longer used here.
+concurrent = ["enforce"]
 # MCP client (004-mcp-client). Default-off so the plain build stays rmcp-free (NFR-004/006, SC-026/027):
 # no MCP code compiles and `rmcp` never enters bee-core/bee-common's tree unless this is enabled. Gates
 # the optional `rmcp` dep below. Stdio (`transport-child-process`) ships first; the remote

@@ -1303,6 +1303,136 @@ else
   echo "RESULT|subagent-siblings-isolated|SKIP|no bee at $BEE"
 fi
 
+# ------------------------------------------- 018 US7: a subagent widens within its parent, no further
+# The `writer` agent asks only for its work directory and then writes to a grant directory. Both runs
+# share a session ceiling that covers the grant directory; they differ only in whether the PARENT
+# holds it when it spawns the child. Holding it, the child's kernel denial escalates to a grant —
+# decided by the session's one operator and recorded as the subagent's — its own scope is reloaded,
+# and the retried write lands. Not holding it, the request is refused beyond the child's ceiling
+# without being offered, although the session ceiling would allow it (FR-015), and the write stays
+# kernel-denied. Same child, same op; only the parent's authority at spawn differs.
+if [ -x "$BEE" ]; then
+  SE=/home/ubuntu/subesc
+  sudo rm -rf "$SE"; mkdir -p "$SE/skills/writer" "$SE/work" "$SE/grant"
+  cat >"$SE/skills/writer/SKILL.md" <<EOF
+---
+name: writer
+kind: agent
+description: Writes the output.
+tools: [write_file]
+turn-limit: 3
+requires:
+  filesystem:
+    "$SE/work": write
+---
+Write the output you are asked for.
+EOF
+  cat >"$WORK/se-ceiling.policy.toml" <<EOF
+[policy]
+name = "se-ceiling"
+mode = "enforce"
+[policy.filesystem]
+"$SE/work" = "write"
+"$SE/grant" = "write"
+EOF
+  cat >"$WORK/se-held.policy.toml" <<EOF
+[policy]
+name = "se-held"
+mode = "enforce"
+[policy.filesystem]
+"$SE/work" = "write"
+"$SE/grant" = "write"
+EOF
+  cat >"$WORK/se-unheld.policy.toml" <<EOF
+[policy]
+name = "se-unheld"
+mode = "enforce"
+[policy.filesystem]
+"$SE/work" = "write"
+EOF
+  cat >"$WORK/se.prov.toml" <<EOF
+[provider]
+provider = "mock"
+[[provider.script]]
+tool = "task"
+args = { agent = "writer", prompt = "Write the output." }
+[[provider.script]]
+tool = "write_file"
+args = { path = "$SE/grant/out.txt", content = "written by the subagent\n" }
+[[provider.script]]
+tool = "finish"
+args = { outcome = "completed", summary = "wrote it" }
+[[provider.script]]
+text = "Done."
+EOF
+  se_run() { # <case> <base policy>
+    rm -f "$SE/grant/out.txt"
+    cat >"$WORK/$1.scn.toml" <<EOF
+[scenario]
+finish        = false
+id            = "$1"
+policy_path   = "$2"
+ceiling_policy_path = "$WORK/se-ceiling.policy.toml"
+system_prompt = "You are a sandboxed agent."
+task          = "Delegate the write."
+turn_limit    = 4
+timeout_secs  = 60
+tools         = ["task", "write_file"]
+skills        = ["$SE/skills"]
+EOF
+    (cd "$SE/work" && sudo "$BEE" run --scenario "$WORK/$1.scn.toml" --provider "$WORK/se.prov.toml" \
+      --out "$WORK/$1.json" >"$WORK/$1.log" 2>&1)
+    python3 - "$WORK/$1.json" "$3" "$(cat "$SE/grant/out.txt" 2>/dev/null)" <<'PY' 2>&1
+import json, sys
+path, want, written = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    t = json.load(open(path))
+except Exception as e:
+    print(f"no transcript: {e}"); sys.exit()
+calls = [c for turn in t.get("turns", []) for c in turn.get("calls", [])]
+task = next((c for c in calls if c["call"]["name"] == "task"), None)
+child = (task or {}).get("child") or {}
+ct = child.get("transcript") or {}
+den = [e for e in ct.get("audit_trail", []) if e["decision"] == "denied" and e["op"] == "file_open"]
+consents = t.get("consents", [])
+c = consents[0] if len(consents) == 1 else {}
+origin = (c.get("request") or {}).get("origin") or {}
+checks = {
+    "child enforced": child.get("enforced") is True,
+    "child kernel-denied the write": any("/grant/" in e.get("target", "") for e in den),
+    "child denials stamped with its scope": bool(den) and all(e.get("scope_id") == child.get("scope_id") for e in den),
+    "one decision, in the session's record": len(consents) == 1,
+    "decision attributed to the subagent": origin.get("kind") == "subagent" and origin.get("agent") == "writer"
+        and (origin.get("inner") or {}).get("kind") == "reactive_denial",
+}
+if want == "granted":
+    checks["granted"] = c.get("decision") == "granted"
+    checks["retried write landed"] = written == "written by the subagent"
+else:
+    checks["refused beyond the parent, unasked"] = c.get("decision") == "refused" and c.get("reason") == "beyond_ceiling"
+    checks["write stayed denied"] = written == ""
+bad = [k for k, v in checks.items() if not v]
+print("OK" if not bad else "failed: " + ", ".join(bad))
+PY
+  }
+  verdict=$(se_run subagent-escalate "$WORK/se-held.policy.toml" granted)
+  if [ "$verdict" = OK ]; then
+    emit subagent-escalate PASS "child denial → session operator (named) → child scope reloaded → write landed"
+  else
+    emit subagent-escalate FAIL "$verdict ($(tail -1 "$WORK/subagent-escalate.log" 2>/dev/null))"
+  fi
+  verdict=$(se_run subagent-escalate-beyond "$WORK/se-unheld.policy.toml" refused)
+  if [ "$verdict" = OK ]; then
+    emit subagent-escalate-beyond PASS "beyond the parent at spawn: refused unasked though the session ceiling allows it"
+  else
+    emit subagent-escalate-beyond FAIL "$verdict ($(tail -1 "$WORK/subagent-escalate-beyond.log" 2>/dev/null))"
+  fi
+  sudo rm -rf "$SE"
+else
+  echo "RESULT|subagent-escalate|SKIP|no bee at $BEE"
+  echo "RESULT|subagent-escalate-beyond|SKIP|no bee at $BEE"
+fi
+
 # ---------------------------------------------------------------- 019: HTTP interception (US1)
 # One scripted episode under `[policy.http]`, one tool call per probe. Each call is its own credential
 # (its own call id), so every probe is attributed separately in the transcript. The in-VM targets are

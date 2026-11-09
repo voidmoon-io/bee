@@ -96,6 +96,8 @@ pub async fn escalate(
     if delta.is_empty() {
         return EscalateOutcome::Refused("empty grant".to_string());
     }
+    // A subagent's operator names it on the request, the record and the lease (018 US7).
+    let origin = operator.attribute(origin);
 
     // 0. Ask only for what is not already held. A skill's `requires` is resolved at startup and
     //    re-proposed on every `skill` call, so without this the operator is prompted again for

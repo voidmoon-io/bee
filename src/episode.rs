@@ -276,10 +276,9 @@ pub async fn run_loop(
 
     let mut convo = Conversation::new(&scenario.system_prompt, &scenario.task);
     // What a `task` call is fulfilled with (018): the session's agents, and this model.
-    let delegator = opts
-        .delegation
-        .as_ref()
-        .map(|config| crate::delegate::Delegator::new(config, model));
+    let delegator = opts.delegation.as_ref().map(|config| {
+        crate::delegate::Delegator::new(config, model).with_escalation(opts.escalation.as_ref())
+    });
 
     // The context budget (025): never send a request over it, and cap each result the model sees.
     let mut ctx = match crate::context::ContextManager::for_session(

@@ -38,3 +38,17 @@ Negative control: `subagent-net-denied` with the agent declaring both destinatio
 | clippy (`concurrent,mcp,sec,astgrep-rust,intercept` and default, all targets, `-A clippy::result_large_err`) | OK |
 | host suites (workspace, CI `test-support`/`intercept` list, `concurrent` lib) | OK — `tests/delegation.rs` 15/15, 3 new `[delegation]` config tests |
 | VM matrix | **54/54** — new `subagent-siblings-isolated` |
+
+## PR 4 — child escalation (US7), 2026-11-09
+
+| Check | Result |
+|---|---|
+| `cargo check` (`enforce`, `concurrent,mcp,sec,astgrep-rust,intercept,durable-sessions`) | OK |
+| clippy (`concurrent,mcp,sec,astgrep-rust,intercept,durable-sessions,test-support`, all targets, `-D warnings -A clippy::result_large_err`) | OK |
+| host suites (workspace, headless, CI `test-support`/`intercept` list) | OK — 4 new `delegate::tests`, 2 new `operator` tests, the delegation-tree property test, and `a_subagent_delegates_from_its_own_policy` |
+| `--features mcp,sec,astgrep-rust` | 1 failure, environmental: `mcp_stdio::the_builder_registers_each_servers_process_with_the_sandbox` needs `node` on PATH, which `bee-build` lacks |
+| VM matrix | **56/56** — new `subagent-escalate`, `subagent-escalate-beyond` |
+
+Negative control: with the child's ceiling set to the *session* ceiling instead of the parent's
+policy at spawn, `subagent-escalate-beyond` **FAILs** (the grant is given and the write lands), so
+the case tests FR-015 rather than its setup.

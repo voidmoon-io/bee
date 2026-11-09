@@ -915,16 +915,40 @@ dependencies = [
  "bee-core",
  "brotli-decompressor",
  "flate2",
+ "http-body-util",
+ "httparse",
+ "hyper",
+ "hyper-util",
  "json-patch",
+ "libc",
+ "rcgen",
  "regex",
  "rusqlite",
+ "rustls",
  "ruzstd",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "similar",
+ "tempfile",
  "thiserror",
  "time",
+ "tokio",
+ "tokio-rustls",
+ "webpki-roots 1.0.11",
+]
+
+[[package]]
+name = "comb-cli"
+version = "0.1.0"
+dependencies = [
+ "bee-core",
+ "clap",
+ "comb",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
  "tokio",
 ]
 

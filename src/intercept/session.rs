@@ -182,36 +182,7 @@ fn ca_bundle_dir() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-/// System roots plus the session CA. The roots matter: tunnelled hosts present their real
-/// certificates, and a bundle of the session CA alone would break every one of them (research R7).
-pub fn write_ca_bundle(path: &Path, ca_pem: &str) -> Result<(), String> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let system = [
-        "/etc/ssl/certs/ca-certificates.crt",
-        "/etc/pki/tls/certs/ca-bundle.crt",
-        "/etc/ssl/cert.pem",
-    ]
-    .iter()
-    .find_map(|p| std::fs::read_to_string(p).ok())
-    .unwrap_or_default();
-    let tmp = path.with_extension("pem.tmp");
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o644)
-        .open(&tmp)
-        .map_err(|e| format!("CA bundle {}: {e}", tmp.display()))?;
-    f.write_all(system.as_bytes())
-        .and_then(|_| {
-            if !system.is_empty() && !system.ends_with('\n') {
-                f.write_all(b"\n")?;
-            }
-            f.write_all(ca_pem.as_bytes())
-        })
-        .map_err(|e| format!("CA bundle: {e}"))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("CA bundle: {e}"))
-}
+pub use comb::client::write_ca_bundle;
 
 /// The system resolver, with `hosts` answered first. Only a test names hosts (024 T048).
 pub(crate) struct WithHosts<'a> {

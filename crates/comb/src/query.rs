@@ -3,6 +3,10 @@
 //! Every field is optional and the fields AND together; a list field ORs its values. Unknown keys
 //! are an error naming the key (`deny_unknown_fields`) — a typo'd filter must not silently match
 //! everything. No value is ever spliced into the SQL text: every one is a bound parameter.
+//!
+//! `q` is a [combq](crate::combq) query, ANDed with the other fields. Its column clauses join the
+//! SQL; when it also reads headers, bodies or raw bytes, the SQL candidates are decided one by one
+//! in Rust, at most [`MAX_SCAN`] of them, and the result says how many it looked at.
 
 use rusqlite::types::Value as SqlValue;
 use serde::Deserialize;
@@ -12,6 +16,8 @@ use crate::store::{Store, StoreError};
 
 /// Most rows one query returns.
 pub const MAX_LIMIT: u32 = 200;
+/// Most candidates a `q` that reads beyond the indexed columns decides in Rust.
+pub const MAX_SCAN: usize = 2_000;
 
 /// A single value or a list of them.
 #[derive(Debug, Clone, Deserialize)]
@@ -56,6 +62,8 @@ pub struct HistoryFilter {
     pub order: Option<String>,
     /// Include earlier sessions' exchanges in this project's store (default: this session only).
     pub all_sessions: Option<bool>,
+    /// A combq query, ANDed with the fields above.
+    pub q: Option<String>,
 }
 
 /// One compact row.
@@ -78,15 +86,24 @@ pub struct Row {
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct HistoryResult {
+    /// With `scan_truncated`, the matches among the candidates scanned: a lower bound.
     pub total_matched: u64,
     pub returned: usize,
     pub rows: Vec<Row>,
+    /// Candidates decided in Rust, when `q` reads beyond the indexed columns.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scanned: Option<u64>,
+    /// More candidates existed than [`MAX_SCAN`]; the oldest (or newest, by `order`) went unread.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub scan_truncated: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum QueryError {
     #[error("invalid filter: {0}")]
     Invalid(String),
+    #[error("invalid q: {}", .0.render(.1))]
+    Query(crate::combq::ParseError, String),
     #[error(transparent)]
     Store(#[from] StoreError),
 }
@@ -241,6 +258,16 @@ pub fn history(store: &Store, f: &HistoryFilter) -> Result<HistoryResult, QueryE
         push(format!("({})", ors.join(" OR ")), vals, &mut params);
     }
 
+    let parsed = match f.q.as_deref() {
+        Some(q) => crate::combq::parse(q).map_err(|e| QueryError::Query(e, q.to_string()))?,
+        None => None,
+    };
+    let plan = parsed.as_ref().map(crate::combq::eval::plan);
+    if let Some(sql) = plan.as_ref().and_then(|p| p.prefilter.clone()) {
+        clauses.push(sql.text);
+        params.extend(sql.params);
+    }
+
     let where_sql = if clauses.is_empty() {
         String::new()
     } else {
@@ -254,11 +281,52 @@ pub fn history(store: &Store, f: &HistoryFilter) -> Result<HistoryResult, QueryE
     let limit = f.limit.unwrap_or(50).clamp(1, MAX_LIMIT);
 
     let conn = store.conn();
-    let total: i64 = conn.query_row(
-        &format!("SELECT COUNT(*) FROM exchanges {where_sql}"),
-        rusqlite::params_from_iter(params.iter()),
-        |r| r.get(0),
-    )?;
+    let mut scanned = None;
+    let mut scan_truncated = false;
+    let (total, where_sql, params) = match (&parsed, &plan) {
+        (Some(expr), Some(p)) if !p.exact => {
+            // Decide candidates in Rust, in result order, and keep the ids that match.
+            let mut stmt = conn.prepare(&format!(
+                "SELECT id FROM exchanges {where_sql} ORDER BY started {order}, seq {order} LIMIT {}",
+                MAX_SCAN + 1
+            ))?;
+            let mut ids: Vec<String> = stmt
+                .query_map(rusqlite::params_from_iter(params.iter()), |r| r.get(0))?
+                .collect::<Result<_, _>>()?;
+            if ids.len() > MAX_SCAN {
+                ids.truncate(MAX_SCAN);
+                scan_truncated = true;
+            }
+            scanned = Some(ids.len() as u64);
+            let mut hits = Vec::new();
+            for id in &ids {
+                let Some(ex) = store.get_exchange(id)? else {
+                    continue;
+                };
+                let mut view = crate::combq::eval::View::new(&ex, store);
+                if crate::combq::eval::eval(expr, &mut view) {
+                    hits.push(SqlValue::Text(id.clone()));
+                }
+            }
+            let total = hits.len() as i64;
+            hits.truncate(limit as usize);
+            let list = vec!["?"; hits.len()].join(", ");
+            let w = if hits.is_empty() {
+                "WHERE 0".to_string()
+            } else {
+                format!("WHERE id IN ({list})")
+            };
+            (total, w, hits)
+        }
+        _ => {
+            let total: i64 = conn.query_row(
+                &format!("SELECT COUNT(*) FROM exchanges {where_sql}"),
+                rusqlite::params_from_iter(params.iter()),
+                |r| r.get(0),
+            )?;
+            (total, where_sql, params)
+        }
+    };
     let sql = format!(
         "SELECT id, started, method, host, path, status, resp_bytes, total_ms, origin_kind,
                 call_id, tags, outcome
@@ -291,6 +359,8 @@ pub fn history(store: &Store, f: &HistoryFilter) -> Result<HistoryResult, QueryE
         total_matched: total as u64,
         returned: rows.len(),
         rows,
+        scanned,
+        scan_truncated,
     })
 }
 

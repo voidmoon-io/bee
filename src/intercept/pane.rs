@@ -6,7 +6,7 @@
 //! inert text, never as terminal control (the same rule as every other untrusted string bee shows).
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::render_spec::{RenderSpec, Row};
 
@@ -63,19 +63,35 @@ pub fn history_spec(rows: &[PaneRow]) -> RenderSpec {
     }
 }
 
-/// A pane source for a session: returns a new spec when exchanges arrived since the last call.
-pub fn pane_source(icpt: Interceptor) -> Arc<dyn Fn() -> Option<RenderSpec> + Send + Sync> {
-    let seen = AtomicU64::new(u64::MAX);
-    Arc::new(move || {
-        let now = icpt.with_store(|s| s.count_exchanges()).unwrap_or(0);
-        if seen.swap(now, Ordering::Relaxed) == now {
+/// The pane for a session: a new table when exchanges arrive or the filter changes.
+pub struct PaneSource {
+    icpt: Interceptor,
+    seen: AtomicU64,
+    /// The combq filter, if any.
+    filter: Mutex<Option<String>>,
+}
+
+pub fn pane_source(icpt: Interceptor) -> Arc<dyn crate::repl::HttpPane> {
+    Arc::new(PaneSource {
+        icpt,
+        seen: AtomicU64::new(u64::MAX),
+        filter: Mutex::new(None),
+    })
+}
+
+impl crate::repl::HttpPane for PaneSource {
+    fn refresh(&self) -> Option<RenderSpec> {
+        let now = self.icpt.with_store(|s| s.count_exchanges()).unwrap_or(0);
+        if self.seen.swap(now, Ordering::Relaxed) == now {
             return None;
         }
+        let q = self.filter.lock().expect("pane filter lock").clone();
         let filter = HistoryFilter {
             limit: Some(PANE_ROWS),
+            q: q.clone(),
             ..Default::default()
         };
-        let res = icpt.with_store(|s| history(s, &filter)).ok()?;
+        let res = self.icpt.with_store(|s| history(s, &filter)).ok()?;
         let rows: Vec<PaneRow> = res
             .rows
             .into_iter()
@@ -93,6 +109,25 @@ pub fn pane_source(icpt: Interceptor) -> Arc<dyn Fn() -> Option<RenderSpec> + Se
                 origin: r.origin,
             })
             .collect();
-        Some(history_spec(&rows))
-    })
+        let mut spec = history_spec(&rows);
+        if let (Some(q), RenderSpec::Table { title, .. }) = (&q, &mut spec) {
+            *title = format!("http history — {}", crate::safe_text::safe_line(q));
+        }
+        Some(spec)
+    }
+
+    fn set_filter(&self, q: Option<&str>) -> Result<String, String> {
+        let msg = match q {
+            Some(q) => {
+                // Parse here for a caret under the mistake; the query runs on the next refresh.
+                comb::combq::parse(q).map_err(|e| format!("http filter: {}", e.render(q)))?;
+                format!("http pane filtered: {q}")
+            }
+            None => "http pane filter cleared".to_string(),
+        };
+        *self.filter.lock().expect("pane filter lock") = q.map(str::to_string);
+        // Force the next refresh to redraw.
+        self.seen.store(u64::MAX, Ordering::Relaxed);
+        Ok(msg)
+    }
 }

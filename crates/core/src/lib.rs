@@ -15,6 +15,8 @@ pub mod pattern;
 pub mod policy;
 // Proxy-layer events (019): kept apart from kernel `AuditEvent`s on purpose (FR-009, FR-011).
 pub mod proxy_event;
+// Escaping for untrusted text shown in a terminal; shared by the harness and comb.
+pub mod safe_text;
 
 pub use audit::AuditEvent;
 pub use compiler::{

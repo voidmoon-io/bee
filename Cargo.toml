@@ -4,6 +4,7 @@ members = [
     "crates/common",
     "crates/core",
     "crates/comb",
+    "crates/comb-cli",
     "crates/userspace",
 ]
 # crates/ebpf targets bpfel-unknown-none (nightly + bpf-linker) and is built out-of-band

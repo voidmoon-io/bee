@@ -139,6 +139,13 @@ pub async fn run(
 
         // A submitted line starts a model turn; drive it to completion while still pumping the UI.
         if let Some(text) = queued.pop_front().or_else(|| app.take_outbox()) {
+            // `/http …` drives the HTTP pane; it never reaches the model.
+            if let Some(cmd) = crate::repl::parse_http_command(&text) {
+                let (msg, is_err) = crate::repl::run_http_command(config.http_pane.as_deref(), cmd);
+                app.system_line(if is_err { format!("error: {msg}") } else { msg });
+                refresh_http_pane(&mut app, config);
+                continue;
+            }
             #[allow(clippy::too_many_arguments)]
             run_turn(
                 &mut app,
@@ -508,7 +515,7 @@ pub async fn serve_startup<F: std::future::Future>(fut: F, rx: &mut ConsentRecei
 /// without `[policy.http]`, and between arrivals.
 fn refresh_http_pane(app: &mut App, config: &ReplConfig) {
     if let Some(source) = &config.http_pane {
-        if let Some(spec) = source() {
+        if let Some(spec) = source.refresh() {
             app.panels.upsert("http", spec);
         }
     }

@@ -18,7 +18,8 @@ pub(super) fn def() -> ToolDef {
         name: "http_intercept",
         description: "Shape traffic that other tools send through the proxy with session-only \
                           rules. add_rule {matcher: {host, method, path_prefix, path_regex, \
-                          header_present, body_contains}, action: {modify: [edits]} | \"drop\" | \
+                          header_present, body_contains, when} (`when` is a combq query over \
+                          req.* fields, e.g. req.header[\"x-debug\"] eq \"1\"), action: {modify: [edits]} | \"drop\" | \
                           {hold: {timeout_s ≤ 300}}}; remove_rule {rule_id}; list; release {hold_id, \
                           decision: \"forward\" | \"drop\" | {forward_edited: [edits]}}. Held requests \
                           go through unchanged at their deadline. Rules cannot move traffic out of scope.",

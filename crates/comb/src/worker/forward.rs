@@ -233,9 +233,12 @@ async fn relay(
     let mut original: Option<(Vec<u8>, Vec<u8>)> = None;
     let path = crate::store::path_of(rec.target.as_deref().unwrap_or("/"));
     let verdict = worker.rules.evaluate(&super::rules::Seen {
+        scheme: &rec.scheme,
         host: &rec.host,
+        port: rec.port,
         method: rec.method.as_deref().unwrap_or(""),
         path: &path,
+        target: rec.target.as_deref().unwrap_or("/"),
         head: &req_head,
         body: &body,
     });

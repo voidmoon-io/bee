@@ -1,6 +1,6 @@
 # combq: lexer, parser, AST
 
-Status: ready-for-agent
+Status: done
 
 Pure module `comb::combq`. Grammar and fields per PRD. Spanned errors naming what was expected;
 limits on length, depth and regex size. Field typing checked at parse time (`resp.code cont "x"`

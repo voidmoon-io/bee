@@ -15,6 +15,7 @@
 pub mod api;
 pub mod bound;
 pub mod client;
+pub mod combq;
 pub mod control;
 pub mod diff;
 pub mod fuzz;

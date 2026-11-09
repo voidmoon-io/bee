@@ -1,6 +1,6 @@
 # combq in `http_history` (and `comb query`)
 
-Status: ready-for-agent
+Status: done
 
 Split the AST: indexed conjuncts → parameterised SQL; the rest → a Rust predicate over
 candidates, decoding stored bodies, under a scan cap. Result gains `scanned` and

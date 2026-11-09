@@ -16,7 +16,8 @@ pub(super) fn def() -> ToolDef {
         name: "http_history",
         description: "List recorded exchanges as compact rows (id, time, method, host, path, \
                           status, size, ms, origin, call id). Filters AND together; list values OR. \
-                          Unknown filter keys are refused. Use `http_get` to read one.",
+                          `q` takes a combq query for anything else — headers, bodies, regex, \
+                          and/or/not. Unknown filter keys are refused. Use `http_get` to read one.",
         parameters: json!({
                 "type": "object",
                 "additionalProperties": false,
@@ -37,7 +38,8 @@ pub(super) fn def() -> ToolDef {
                     "outcome": { "type": ["string", "array"], "description": "completed | refused | failed | truncated" },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 200 },
                     "order": { "type": "string", "enum": ["newest", "oldest"] },
-                    "all_sessions": { "type": "boolean" }
+                    "all_sessions": { "type": "boolean" },
+                "q": { "type": "string", "description": "combq query, ANDed with the fields above: `namespace.field op value` joined by and/or/not, e.g. req.method eq \"POST\" and resp.code gte 500 and resp.body cont \"error\". Fields: req.{method,host,port,path,query,ext,tls,len,created_at,header,header[\"name\"],body,raw}, resp.{code,len,roundtrip,ttfb,header,body,raw}, origin, call, tag, outcome, fuzz, id, session, turn. Ops: eq ne gt gte lt lte cont ncont like nlike regex nregex. A bare \"string\" searches raw requests and responses." }
                 }
             }),
     }
@@ -50,6 +52,7 @@ pub(super) fn call(icpt: &Interceptor, args: Value) -> Result<Reply, CallError> 
         .with_store(|s| query::history(s, &filter))
         .map_err(|e| match e {
             QueryError::Invalid(e) => OpError::Invalid(e),
+            e @ QueryError::Query(..) => OpError::Invalid(e.to_string()),
             e => OpError::Failed(e.to_string()),
         })?;
     // Keep within the bound by dropping rows from the end, and say how many.

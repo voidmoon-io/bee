@@ -38,6 +38,9 @@ pub struct Matcher {
     pub header_present: Option<String>,
     #[serde(default)]
     pub body_contains: Option<String>,
+    /// A combq query over the request (`req.*` fields only), ANDed with the fields above.
+    #[serde(default)]
+    pub when: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -78,13 +81,25 @@ impl RuleSpec {
                 .build()
                 .map_err(|e| format!("path_regex: {e}"))?;
         }
+        compile_when(self.matcher.when.as_deref())?;
         Ok(())
     }
+}
+
+/// A rule's `when`, parsed and limited to what a request carries before it is sent.
+fn compile_when(when: Option<&str>) -> Result<Option<crate::combq::Expr>, String> {
+    let Some(q) = when else { return Ok(None) };
+    let expr = crate::combq::parse(q).map_err(|e| format!("when: {}", e.render(q)))?;
+    if let Some(e) = &expr {
+        crate::combq::eval::request_only(e).map_err(|e| format!("when: {}", e.render(q)))?;
+    }
+    Ok(expr)
 }
 
 struct Rule {
     spec: RuleSpec,
     path_re: Option<regex::Regex>,
+    when: Option<crate::combq::Expr>,
     hits: AtomicU32,
 }
 
@@ -107,9 +122,13 @@ pub struct Rules {
 
 /// A request as the rules see it.
 pub struct Seen<'a> {
+    pub scheme: &'a str,
     pub host: &'a str,
+    pub port: u16,
     pub method: &'a str,
     pub path: &'a str,
+    /// The request target as sent: path and query.
+    pub target: &'a str,
     pub head: &'a [u8],
     pub body: &'a [u8],
 }
@@ -141,9 +160,11 @@ impl Rules {
         if rules.iter().any(|r| r.spec.id == spec.id) {
             return Err(format!("rule {} already exists", spec.id));
         }
+        let when = compile_when(spec.matcher.when.as_deref())?;
         rules.push(Arc::new(Rule {
             spec,
             path_re,
+            when,
             hits: AtomicU32::new(0),
         }));
         Ok(())
@@ -270,6 +291,20 @@ fn matches(r: &Rule, req: &Seen<'_>) -> bool {
             return false;
         }
     }
+    if let Some(e) = &r.when {
+        let mut view = crate::combq::eval::Request {
+            scheme: req.scheme,
+            host: req.host,
+            port: req.port,
+            method: req.method,
+            target: req.target,
+            head: req.head,
+            body: req.body,
+        };
+        if !crate::combq::eval::eval(e, &mut view) {
+            return false;
+        }
+    }
     true
 }
 
@@ -279,12 +314,63 @@ mod tests {
 
     fn seen<'a>(path: &'a str, head: &'a [u8]) -> Seen<'a> {
         Seen {
+            scheme: "http",
             host: "app.test",
+            port: 80,
             method: "GET",
             path,
+            target: path,
             head,
             body: b"",
         }
+    }
+
+    fn when(q: &str) -> RuleSpec {
+        RuleSpec {
+            id: "W".into(),
+            matcher: Matcher {
+                when: Some(q.into()),
+                ..Default::default()
+            },
+            action: Action::Drop,
+        }
+    }
+
+    #[test]
+    fn a_when_query_decides_the_request() {
+        let r = Rules::default();
+        r.add(when(
+            r#"req.header["x-debug"] eq "1" and (req.query cont "admin" or req.ext eq ".php")"#,
+        ))
+        .unwrap();
+        let drop = |target: &str, head: &[u8]| {
+            let mut s = seen(target, head);
+            s.path = "/ignored";
+            matches!(r.evaluate(&s), Verdict::Drop { .. })
+        };
+        let dbg = b"GET / HTTP/1.1\r\nX-Debug: 1\r\n\r\n";
+        assert!(drop("/x?role=ADMIN", dbg));
+        assert!(drop("/index.php", dbg));
+        assert!(!drop("/x?role=user", dbg));
+        assert!(!drop("/x?role=admin", b"GET / HTTP/1.1\r\n\r\n"));
+    }
+
+    #[test]
+    fn a_when_query_may_only_read_the_request() {
+        for q in [
+            "resp.code eq 200",
+            r#""token""#,
+            r#"origin eq "tool""#,
+            "req.created_at gt -1m",
+        ] {
+            let e = when(q).validate().unwrap_err();
+            assert!(e.starts_with("when: "), "{q}: {e}");
+        }
+        let e = when("req.port cont 1").validate().unwrap_err();
+        assert!(e.contains("does not apply") && e.contains('^'), "{e}");
+        when(r#"req.body regex "pass(word)?=" and req.tls eq false"#)
+            .validate()
+            .unwrap();
     }
 
     #[test]

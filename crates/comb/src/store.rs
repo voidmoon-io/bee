@@ -20,6 +20,26 @@ use crate::control::{ExchangeRecord, ProxyEvent, TlsInfo, TunnelRecord};
 /// The schema this build writes. A store carrying a newer one is opened read-only.
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// How long any statement waits on another writer's lock.
+const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Run `f` until it stops failing with `SQLITE_BUSY`, for at most [`BUSY_TIMEOUT`]. For the few
+/// statements SQLite answers with an immediate `SQLITE_BUSY` instead of calling the busy handler.
+fn retry_busy<T>(mut f: impl FnMut() -> rusqlite::Result<T>) -> rusqlite::Result<T> {
+    let deadline = std::time::Instant::now() + BUSY_TIMEOUT;
+    loop {
+        match f() {
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.code == rusqlite::ErrorCode::DatabaseBusy
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            r => return r,
+        }
+    }
+}
+
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS meta      (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS sessions  (id TEXT PRIMARY KEY, started TEXT, enforcement TEXT, policy_digest TEXT);
@@ -175,14 +195,21 @@ impl Store {
         let db = dir.join("index.sqlite");
 
         let conn = Connection::open(&db)?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.busy_timeout(BUSY_TIMEOUT)?;
+        // Two sessions opening one project's store at once is normal (two writers, R8). SQLite does
+        // not run the busy handler for a journal-mode change, so a concurrent first open gets
+        // SQLITE_BUSY at once; retry it within the same budget the busy timeout gives everything else.
+        retry_busy(|| conn.pragma_update(None, "journal_mode", "WAL"))?;
         // WAL + NORMAL: durable across a process crash, and only the last transactions at risk on
         // power loss — the standard pairing. FULL fsyncs every insert, which capped a fuzz run at
         // ~50 exchanges/s no matter the policy's rate.
         conn.pragma_update(None, "synchronous", "NORMAL")?;
 
-        // Version check before touching the schema: a newer store is never migrated down.
+        // Version check and schema creation in one IMMEDIATE transaction: it takes the write lock up
+        // front, where the busy timeout applies. Read-then-write in a deferred transaction would have
+        // to upgrade its lock, and SQLite answers that with SQLITE_BUSY instead of waiting.
+        // A newer store is never migrated down.
+        conn.execute_batch("BEGIN IMMEDIATE")?;
         let existing: Option<u32> = conn
             .query_row(
                 "SELECT value FROM meta WHERE key = 'schema_version'",
@@ -194,17 +221,26 @@ impl Store {
             .and_then(|v| v.parse().ok());
         let (conn, read_only) = match existing {
             Some(v) if v > SCHEMA_VERSION => {
+                conn.execute_batch("ROLLBACK")?;
                 drop(conn);
                 let ro = Connection::open_with_flags(&db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-                ro.busy_timeout(std::time::Duration::from_secs(5))?;
+                ro.busy_timeout(BUSY_TIMEOUT)?;
                 (ro, Some(v))
             }
             _ => {
-                conn.execute_batch(SCHEMA)?;
-                conn.execute(
-                    "INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?1)",
-                    params![SCHEMA_VERSION.to_string()],
-                )?;
+                let init = conn.execute_batch(SCHEMA).and_then(|()| {
+                    conn.execute(
+                        "INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?1)",
+                        params![SCHEMA_VERSION.to_string()],
+                    )
+                });
+                match init {
+                    Ok(_) => conn.execute_batch("COMMIT")?,
+                    Err(e) => {
+                        let _ = conn.execute_batch("ROLLBACK");
+                        return Err(e.into());
+                    }
+                }
                 (conn, None)
             }
         };
@@ -248,7 +284,7 @@ impl Store {
             )));
         }
         let conn = Connection::open_with_flags(&db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        conn.busy_timeout(BUSY_TIMEOUT)?;
         Ok(Store {
             conn,
             dir,
@@ -815,7 +851,7 @@ pub fn resolve_ref(project_root: &Path, exchange_id: &str) -> RefState {
     let Ok(conn) = Connection::open_with_flags(&db, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
         return RefState::Missing;
     };
-    let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+    let _ = conn.busy_timeout(BUSY_TIMEOUT);
     let row: Option<i64> = conn
         .query_row(
             "SELECT COALESCE(b.evicted, 0) FROM exchanges e

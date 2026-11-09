@@ -14,17 +14,17 @@
 //! role and pacing are user-space checks in the worker, and are labelled as such wherever they are
 //! shown (Constitution III, FR-011).
 
-pub mod control;
+pub use comb::control;
 pub mod creds;
-pub mod diff;
-pub mod fuzz;
-pub mod har;
+pub use comb::diff;
+pub use comb::fuzz;
+pub use comb::har;
 pub mod ops;
 pub mod pane;
-pub mod passive;
-pub mod query;
+pub use comb::passive;
+pub use comb::query;
 pub mod session;
 pub mod sidecar;
-pub mod slice;
-pub mod store;
+pub use comb::slice;
+pub use comb::store;
 pub mod worker;

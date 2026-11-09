@@ -8,8 +8,8 @@
 //! header text or body snippets — so a hostile response cannot speak through a lead; the model reads
 //! the exchange itself, as data, when it follows one up.
 
-use super::control::ExchangeRecord;
-use super::store::ExchangeBytes;
+use crate::control::ExchangeRecord;
+use crate::store::ExchangeBytes;
 
 /// Most bytes of a body any check reads.
 pub const BODY_CAP: usize = 1024 * 1024;
@@ -165,9 +165,7 @@ fn url_decode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::intercept::control::{
-        now_rfc3339, Origin, OriginKind, Outcome, SendPath, Timing, TlsInfo,
-    };
+    use crate::control::{now_rfc3339, Origin, OriginKind, Outcome, SendPath, Timing, TlsInfo};
 
     fn rec(target: &str) -> ExchangeRecord {
         ExchangeRecord {

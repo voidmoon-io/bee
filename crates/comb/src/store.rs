@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 
 use bee_core::policy::HttpLimits;
 
-use super::control::{ExchangeRecord, ProxyEvent, TlsInfo, TunnelRecord};
+use crate::control::{ExchangeRecord, ProxyEvent, TlsInfo, TunnelRecord};
 
 /// The schema this build writes. A store carrying a newer one is opened read-only.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -230,7 +230,7 @@ impl Store {
         if store.read_only.is_none() {
             store.conn.execute(
                 "INSERT OR IGNORE INTO sessions (id, started) VALUES (?1, ?2)",
-                params![session_id, super::control::now_rfc3339()],
+                params![session_id, crate::control::now_rfc3339()],
             )?;
         }
         Ok(store)
@@ -456,7 +456,7 @@ impl Store {
                 kind,
                 summary,
                 serde_json::to_string(&[exchange_id]).unwrap_or_default(),
-                super::control::now_rfc3339(),
+                crate::control::now_rfc3339(),
                 dedupe_key
             ],
         )?;
@@ -739,7 +739,7 @@ impl Store {
                 stored.len() as i64,
                 encoding,
                 truncated as i64,
-                super::control::now_rfc3339()
+                crate::control::now_rfc3339()
             ],
         )?;
         Ok(Some(sha))

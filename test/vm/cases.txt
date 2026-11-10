@@ -58,3 +58,5 @@ http-sni-mismatch
 http-store-protected
 http-proxy-fs-deny
 http-latency
+proxy-admit-on-resolve
+subagent-intercept-attributed

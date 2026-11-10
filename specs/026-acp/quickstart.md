@@ -86,3 +86,5 @@ declared hosts; nothing survives; report in the parent's conversation.
 
 | Scenario | Date | Result |
 |---|---|---|
+| S8 (session half) — `proxy-admit-on-resolve` | 2026-11-10 | PASS on bee-build. `prov.test` moved from 127.0.0.2 to 127.0.0.3 mid-session, and the old listener was killed. Both fetches got 200. One admit adding 127.0.0.3 was recorded, with no proxy-scope denial. Negative control (no admit hook): the second fetch got `000` and no admit was recorded. |
+| S9(b) — `subagent-intercept-attributed` | 2026-11-10 | PASS on bee-build. Two children, both enforced and completed, each with its own proxy session attributed to its scope and `task` call. A's exchange is A's, and the parent has no exchanges or tunnels. B's proxy refused A's credential (407, `refused_bad_credential`). The parent's proxy port was kernel-denied to B, with the denial in B's record under B's scope. Negative control (no attribution): FAIL. Full matrix 62/62. |

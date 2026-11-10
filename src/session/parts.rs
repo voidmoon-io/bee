@@ -238,7 +238,7 @@ pub(crate) fn kernel_sandbox(
     #[cfg(feature = "intercept")]
     if let Some(sc) = sidecar {
         sandbox = sandbox.with_sidecar(sc).map_err(|(sb, sc, e)| {
-            let _ = sc.scope.teardown();
+            let _ = sc.handle().teardown();
             let _ = sb.teardown();
             e.to_string()
         })?;

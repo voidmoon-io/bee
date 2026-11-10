@@ -73,6 +73,13 @@ CREATE TABLE IF NOT EXISTS leads     (id TEXT PRIMARY KEY, session_id TEXT, kind
                                       exchange_ids TEXT, created TEXT, announced INTEGER DEFAULT 0,
                                       listed INTEGER DEFAULT 0, dedupe_key TEXT);
 CREATE INDEX IF NOT EXISTS lead_key ON leads(session_id, dedupe_key);
+CREATE TABLE IF NOT EXISTS attribution (session_id TEXT PRIMARY KEY, scope_id TEXT NOT NULL,
+                                        delegation_id TEXT NOT NULL, parent_session TEXT NOT NULL,
+                                        agent TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS attr_scope      ON attribution(scope_id);
+CREATE INDEX IF NOT EXISTS attr_delegation ON attribution(delegation_id);
+CREATE TABLE IF NOT EXISTS admits    (id INTEGER PRIMARY KEY, session_id TEXT, ts TEXT, host TEXT,
+                                      added TEXT, evicted TEXT, now_holds TEXT);
 "#;
 
 /// The bytes of one exchange, as the worker's segments carry them.
@@ -605,6 +612,72 @@ impl Store {
         Ok(())
     }
 
+    /// Record which subagent this session's proxy belongs to (026 T051). Once per session; a
+    /// restarted worker re-records nothing.
+    pub fn insert_attribution(
+        &mut self,
+        a: &crate::sidecar::Attribution,
+    ) -> Result<(), StoreError> {
+        self.writable()?;
+        self.conn.execute(
+            "INSERT OR REPLACE INTO attribution (session_id, scope_id, delegation_id,
+                                                 parent_session, agent)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                self.session_id,
+                a.scope_id,
+                a.delegation_id,
+                a.parent_session,
+                a.agent
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The proxy sessions recorded for kernel scope `scope_id` (026 T051): a subagent's exchanges,
+    /// tunnels and refusals are those rows carrying one of these session ids.
+    pub fn sessions_for_scope(&self, scope_id: &str) -> Result<Vec<String>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT session_id FROM attribution WHERE scope_id = ?1 ORDER BY session_id",
+        )?;
+        let rows = stmt.query_map(params![scope_id], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Record one resolve-and-admit reload of this session's proxy scope (026 R9).
+    pub fn insert_admit(
+        &mut self,
+        host: &str,
+        o: &crate::sidecar::AdmitOutcome,
+    ) -> Result<(), StoreError> {
+        self.writable()?;
+        let list =
+            |v: &[std::net::IpAddr]| serde_json::to_string(v).unwrap_or_else(|_| "[]".to_string());
+        self.conn.execute(
+            "INSERT INTO admits (session_id, ts, host, added, evicted, now_holds)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                self.session_id,
+                crate::control::now_rfc3339(),
+                host,
+                list(&o.added),
+                list(&o.evicted),
+                list(&o.addrs)
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// How many admit reloads this session's proxy scope has had for `host`.
+    pub fn admit_count(&self, host: &str) -> Result<u64, StoreError> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM admits WHERE session_id = ?1 AND host = ?2",
+            params![self.session_id, host],
+            |r| r.get(0),
+        )?;
+        Ok(n as u64)
+    }
+
     pub fn get_exchange(&self, id: &str) -> Result<Option<StoredExchange>, StoreError> {
         Ok(self
             .conn
@@ -947,6 +1020,79 @@ fn create_dir(p: &Path, private: bool) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tunnel(host: &str) -> TunnelRecord {
+        TunnelRecord {
+            call_id: Some("c1".into()),
+            host: host.into(),
+            port: 443,
+            sni: Some(host.into()),
+            started: "t0".into(),
+            ended: "t1".into(),
+            bytes_up: 1,
+            bytes_down: 2,
+            outcome: "closed".into(),
+        }
+    }
+
+    // 026 T051: a subagent's proxy records under its own session id, and the attribution row maps
+    // that id to the subagent's scope and delegation; nothing lands on the parent's session.
+    #[test]
+    fn a_subagents_records_are_attributed_to_its_scope_not_its_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let limits = HttpLimits::default();
+        let _parent = Store::open(dir.path(), "parent", &limits).unwrap();
+        let mut child = Store::open(dir.path(), "parent-sub-a-0", &limits).unwrap();
+        child
+            .insert_attribution(&crate::sidecar::Attribution {
+                scope_id: "bee-x-sub-a-0".into(),
+                delegation_id: "call-7".into(),
+                parent_session: "parent".into(),
+                agent: "a".into(),
+            })
+            .unwrap();
+        child.insert_tunnel(&tunnel("app.test")).unwrap();
+
+        let read = Store::open_read(dir.path()).unwrap();
+        assert_eq!(
+            read.sessions_for_scope("bee-x-sub-a-0").unwrap(),
+            vec!["parent-sub-a-0".to_string()]
+        );
+        let count = |sid: &str| -> i64 {
+            read.conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM tunnels WHERE session_id = ?1",
+                    params![sid],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(count("parent-sub-a-0"), 1);
+        assert_eq!(count("parent"), 0);
+        let delegation: String = read
+            .conn()
+            .query_row(
+                "SELECT delegation_id FROM attribution WHERE session_id = 'parent-sub-a-0'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(delegation, "call-7");
+    }
+
+    #[test]
+    fn an_admit_is_recorded_per_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Store::open(dir.path(), "s", &HttpLimits::default()).unwrap();
+        let o = crate::sidecar::AdmitOutcome {
+            addrs: vec!["127.0.0.2".parse().unwrap(), "127.0.0.3".parse().unwrap()],
+            added: vec!["127.0.0.3".parse().unwrap()],
+            evicted: vec![],
+        };
+        s.insert_admit("prov.test", &o).unwrap();
+        assert_eq!(s.admit_count("prov.test").unwrap(), 1);
+        assert_eq!(s.admit_count("other.test").unwrap(), 0);
+    }
 
     #[test]
     fn path_of_strips_query_and_authority() {

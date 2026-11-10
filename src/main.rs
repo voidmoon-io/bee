@@ -51,6 +51,10 @@ enum Cmd {
     Run(Box<app::run::RunArgs>),
     /// Chat interactively with a sandboxed coding agent, inline or full-screen.
     Repl(Box<app::repl::ReplArgs>),
+    /// Serve the Agent Client Protocol on stdin/stdout, so an ACP client (t3code, Zed) can run bee
+    /// sessions — each in its own kernel scope.
+    #[cfg(feature = "acp")]
+    Acp(Box<app::acp::AcpArgs>),
     /// Report on recorded LLM usage, cost, and latency.
     Metrics(app::metrics::MetricsArgs),
     /// Read the project's finding ledger, and adjudicate what is in it.
@@ -145,6 +149,8 @@ fn main() -> ExitCode {
         Cmd::PythonWorker { parent } => bee::python::worker_main(parent),
         Cmd::Run(args) => app::run::main(*args),
         Cmd::Repl(args) => app::repl::main(*args),
+        #[cfg(feature = "acp")]
+        Cmd::Acp(args) => app::acp::main(*args),
         Cmd::Metrics(args) => app::metrics::main(args),
         #[cfg(feature = "findings")]
         Cmd::Findings(args) => app::findings::main(args),

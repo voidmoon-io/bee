@@ -55,6 +55,8 @@ jobs:
         run: cargo clippy --features mcp,sec,astgrep-rust --locked --all-targets -- -D warnings
       - name: clippy (headless)
         run: cargo clippy --no-default-features --locked --all-targets -- -D warnings
+      - name: clippy (acp)
+        run: cargo clippy --features acp,mcp,test-support --locked --all-targets -- -D warnings
 
   test:
     name: build & test
@@ -75,6 +77,12 @@ jobs:
         run: cargo test --no-default-features --locked
       - name: test (MCP and security tools)
         run: cargo test --features mcp,sec,astgrep-rust --locked
+      - name: test (ACP agent)
+        # 026: `bee acp` against a scripted ACP client; the consent cases use the scripted-audit
+        # host sandbox (`test-support`).
+        run: |
+          cargo test --features acp,test-support --locked --test acp_agent
+          cargo test --features acp --locked --bin bee acp
       - name: VM result parser fixtures
         run: python3 -m unittest discover -s test/vm -p 'test_*.py'
       - name: test (test-support targets)

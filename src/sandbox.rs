@@ -185,7 +185,11 @@ impl AuditState {
 struct ChildEnv {
     cleanup_error: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     audit_state: Box<std::sync::Mutex<AuditState>>,
-    strip_env: Vec<String>,
+    // Shared slices rather than owned buffers keep `ChildEnv` — carried unboxed by
+    // `Sandbox::Host` — as small as it was before `cwd` joined it.
+    strip_env: std::sync::Arc<[String]>,
+    /// The directory every child starts in (026: an ACP session's `cwd`). `None`: bee's own.
+    cwd: Option<std::sync::Arc<std::path::Path>>,
     call: Option<CallContext>,
     provider: Option<EnvProvider>,
     hooks: Option<std::sync::Arc<dyn CallHooks>>,
@@ -236,7 +240,7 @@ impl McpAttribution {
 impl ChildEnv {
     fn new(strip_env: Vec<String>) -> Self {
         ChildEnv {
-            strip_env,
+            strip_env: strip_env.into(),
             ..Default::default()
         }
     }
@@ -245,6 +249,9 @@ impl ChildEnv {
     /// current tool call unless one is named).
     fn apply(&self, cmd: &mut Command, call: Option<&CallContext>) -> Result<(), SpawnError> {
         restrict_env(cmd, &self.strip_env);
+        if let Some(dir) = &self.cwd {
+            cmd.current_dir(&**dir);
+        }
         if let (Some(provider), Some(call)) = (&self.provider, call.or(self.call.as_ref())) {
             for (k, v) in provider(call).vars() {
                 refused_overlay_key(k, &self.strip_env)
@@ -931,7 +938,18 @@ impl Sandbox {
     /// The environment variables no tool child of this sandbox inherits — what a subagent's sandbox
     /// must strip too (018).
     pub fn strip_env(&self) -> Vec<String> {
-        self.child_env().strip_env.clone()
+        self.child_env().strip_env.to_vec()
+    }
+
+    /// The directory children start in, when one is set (026).
+    pub fn cwd(&self) -> Option<&std::path::Path> {
+        self.child_env().cwd.as_deref()
+    }
+
+    /// Start every child in `dir` (an ACP session's working directory). A tool that names its own
+    /// directory still overrides it.
+    pub fn set_cwd(&mut self, dir: Option<std::path::PathBuf>) {
+        self.child_env_mut().cwd = dir.map(Into::into);
     }
 
     #[cfg(feature = "enforce")]
@@ -963,12 +981,14 @@ impl Sandbox {
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
             std::fs::create_dir(&path)?;
-            let mut env = ChildEnv::new(self.child_env().strip_env.clone());
+            let mut env = ChildEnv::new(self.child_env().strip_env.to_vec());
             env.cleanup_error = self.child_env().cleanup_error.clone();
+            env.cwd = self.child_env().cwd.clone();
             return Ok(Self::Batch(Box::new(BatchSandbox { path, env })));
         }
-        let mut slot = Self::host(self.child_env().strip_env.clone());
+        let mut slot = Self::host(self.child_env().strip_env.to_vec());
         slot.child_env_mut().cleanup_error = self.child_env().cleanup_error.clone();
+        slot.child_env_mut().cwd = self.child_env().cwd.clone();
         Ok(slot)
     }
 
@@ -1146,6 +1166,36 @@ mod tests {
         first.cleanup_failed("descendant remains".into());
         assert!(sandbox.tool_command("true", &[]).is_err());
         assert!(second.tool_command("true", &[]).is_err());
+    }
+
+    // 026 T005: every child starts in the session's directory when one is set, else in bee's.
+    #[test]
+    fn children_start_in_the_sandbox_cwd_when_one_is_set() {
+        let mut sb = Sandbox::host(Vec::new());
+        assert_eq!(
+            sb.tool_command("true", &[]).unwrap().get_current_dir(),
+            None
+        );
+        let dir = std::env::temp_dir();
+        sb.set_cwd(Some(dir.clone()));
+        assert_eq!(sb.cwd(), Some(dir.as_path()));
+        let cmd = sb.tool_command("true", &[]).unwrap();
+        assert_eq!(cmd.get_current_dir(), Some(dir.as_path()));
+        let (cmd, _) = sb.invocation_command("true", &[]).unwrap();
+        assert_eq!(cmd.get_current_dir(), Some(dir.as_path()));
+    }
+
+    #[test]
+    fn a_child_reports_the_sandbox_cwd_as_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut sb = Sandbox::host(Vec::new());
+        sb.set_cwd(Some(dir.path().to_path_buf()));
+        let out = sb.tool_command("pwd", &[]).unwrap().output().unwrap();
+        let got = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        assert_eq!(
+            std::fs::canonicalize(got).unwrap(),
+            std::fs::canonicalize(dir.path()).unwrap()
+        );
     }
 
     // T018: the host sandbox refuses a sidecar — fail closed rather than run

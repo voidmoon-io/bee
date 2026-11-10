@@ -58,6 +58,8 @@ pub mod operator;
 pub mod provider;
 // Proxy-layer events (019). Ungated: transcripts carry them in every build.
 pub use bee_core::proxy_event;
+#[cfg(feature = "acp")]
+pub mod acp;
 pub mod render_api;
 pub mod render_spec;
 pub mod repl;

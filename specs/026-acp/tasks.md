@@ -28,18 +28,18 @@ harness tasks (US3+US4), **PR4** = Phase 8.
 
 ## Phase 1: Setup
 
-- [ ] T001 Add `agent-client-protocol = "5.1"` (default-features = false) and `tokio-util` (`compat`) to `[dependencies]` in `Cargo.toml`, behind a new feature `acp = ["dep:agent-client-protocol", "dep:tokio-util", "tokio/io-std"]`; add `acp` to the CI feature lists in `.github/workflows/ci.yml` (check + clippy + test steps)
-- [ ] T002 [P] Create `src/acp/mod.rs` (module docs naming both directions, `PROTOCOL_VERSION = 1`) and wire `#[cfg(feature = "acp")] pub mod acp;` in `src/lib.rs`
+- [x] T001 Add `agent-client-protocol = "5.1"` (default-features = false) and `tokio-util` (`compat`) to `[dependencies]` in `Cargo.toml`, behind a new feature `acp = ["dep:agent-client-protocol", "dep:tokio-util", "tokio/io-std"]`; add `acp` to the CI feature lists in `.github/workflows/ci.yml` (check + clippy + test steps)
+- [x] T002 [P] Create `src/acp/mod.rs` (module docs naming both directions, `PROTOCOL_VERSION = 1`) and wire `#[cfg(feature = "acp")] pub mod acp;` in `src/lib.rs`
 - [ ] T003 [P] Create the test binary `tests/bin/acp_fake_harness.rs` (registered as `[[bin]] required-features = ["acp", "test-support"]` or a `[[test]]` helper per repo convention): an ACP v1 agent that, on `session/prompt`, executes the action script in env `FAKE_HARNESS_SCRIPT` (JSON list: `write`, `read`, `connect_via_proxy {host,port}`, `fork_sleeper`, `call_fs_read`, `ask_permission`, `say {text}`, `sleep {secs}`) and reports each action's outcome as an `agent_message_chunk`
 
 ---
 
 ## Phase 2: Foundational (blocks US1–US5)
 
-- [ ] T004 Add `cwd: Option<PathBuf>` to `ChildEnv` in `src/sandbox.rs`, applied via `Command::current_dir` in `tool_command_for` and `invocation_command`; a child sandbox inherits it in `delegate::child_sandbox` (`src/delegate.rs`); `None` keeps today's behaviour
-- [ ] T005 [P] Unit test in `src/sandbox.rs` tests: a host sandbox with `cwd = Some(tmp)` runs `pwd` → `tmp`; `None` → bee's cwd
-- [ ] T006 Add `EntryPoint::Acp` in `src/session/spec.rs`; in `src/session/mod.rs` derive the scope id and run id from `SessionSpec.label` for `Acp` (not `bee-session-{pid}`), and allow `prebuilt_sandbox` for `Acp` (the concurrent-batch path, `src/concurrent.rs:112`); keep `refuse_unsupported` permitting MCP for `Acp`
-- [ ] T007 [P] Add the operator-only `[acp]` section (`client_mcp: bool`, `max_sessions: u32` default 8 clamp 1..=32, `harness_env_passthrough: Vec<String>`) to `src/app/config/file.rs` and `EffectiveConfig` in `src/app/config/mod.rs`; reject `[acp]` in a project layer in `FileConfig::user_only_sections`; tests beside the existing `[mcp]` rejection test
+- [x] T004 Add `cwd: Option<PathBuf>` to `ChildEnv` in `src/sandbox.rs`, applied via `Command::current_dir` in `tool_command_for` and `invocation_command`; a child sandbox inherits it in `delegate::child_sandbox` (`src/delegate.rs`); `None` keeps today's behaviour
+- [x] T005 [P] Unit test in `src/sandbox.rs` tests: a host sandbox with `cwd = Some(tmp)` runs `pwd` → `tmp`; `None` → bee's cwd
+- [x] T006 Add `EntryPoint::Acp` in `src/session/spec.rs`; in `src/session/mod.rs` derive the scope id and run id from `SessionSpec.label` for `Acp` (not `bee-session-{pid}`), and allow `prebuilt_sandbox` for `Acp` (the concurrent-batch path, `src/concurrent.rs:112`); keep `refuse_unsupported` permitting MCP for `Acp`
+- [x] T007 [P] Add the operator-only `[acp]` section (`client_mcp: bool`, `max_sessions: u32` default 8 clamp 1..=32, `harness_env_passthrough: Vec<String>`) to `src/app/config/file.rs` and `EffectiveConfig` in `src/app/config/mod.rs`; reject `[acp]` in a project layer in `FileConfig::user_only_sections`; tests beside the existing `[mcp]` rejection test
 - [ ] T008 Make `DelegationRecord.turns_used` and `tokens_used` `Option<_>` (`None` = not counted) in `src/transcript.rs`, with `skip_serializing_if`; keep reading old records (add a round-trip test with a pre-026 JSON fixture in `tests/transcript_compat.rs`); update `src/delegate.rs` and the progress line to print "not counted"
 
 **Checkpoint**: foundation ready — US1/US2 and US3 can proceed in parallel.
@@ -54,22 +54,22 @@ harness tasks (US3+US4), **PR4** = Phase 8.
 
 ### Tests (write first, must fail)
 
-- [ ] T009 [P] [US1] Host test `tests/acp_agent.rs::initialize_advertises_v1_and_no_client_methods`: a scripted client over in-memory duplex pipes calls `initialize`; assert the response fields in contracts/acp-agent.md (protocolVersion 1, loadSession false, mcp http/sse false, authMethods empty)
-- [ ] T010 [P] [US1] Host test `tests/acp_agent.rs::a_prompt_streams_and_reports_its_tool_call`: `MockModel` script = one `write_file` then text; assert the update order (tool_call in_progress → tool_call_update completed → agent_message_chunk) and `stopReason: end_turn`; assert bee sent no `fs/*`/`terminal/*` request though the client advertised both (SC-002)
-- [ ] T011 [P] [US1] Host test `tests/acp_agent.rs::session_new_refuses_a_bad_cwd`: relative, missing and file cwd → error naming the cause; no scope created
-- [ ] T012 [P] [US1] Host test `tests/acp_agent.rs::client_mcp_servers_are_dropped_unless_allowed`: stdio + http servers in `session/new`; default config → both dropped and announced; `client_mcp = true` → stdio admitted (fixture server), http still dropped
-- [ ] T013 [P] [US1] Host test `tests/acp_agent.rs::cancel_ends_the_turn_cancelled`: a tool call that sleeps; `session/cancel` → `stopReason: cancelled` within 2 s, conversation truncated (next prompt's model input lacks the cancelled user message)
-- [ ] T014 [P] [US1] VM cases in `test/vm/remote-matrix.sh` + `test/vm/cases.txt`: `acp-denial-reported` (S3), `acp-two-sessions-isolated` (S5), `acp-cancel` (S6), using a small Python ACP client script embedded in the case (newline-delimited JSON over the `bee acp` process's pipes)
+- [x] T009 [P] [US1] Host test `tests/acp_agent.rs::initialize_advertises_v1_and_no_client_methods`: a scripted client over in-memory duplex pipes calls `initialize`; assert the response fields in contracts/acp-agent.md (protocolVersion 1, loadSession false, mcp http/sse false, authMethods empty)
+- [x] T010 [P] [US1] Host test `tests/acp_agent.rs::a_prompt_streams_and_reports_its_tool_call`: `MockModel` script = one `write_file` then text; assert the update order (tool_call in_progress → tool_call_update completed → agent_message_chunk) and `stopReason: end_turn`; assert bee sent no `fs/*`/`terminal/*` request though the client advertised both (SC-002)
+- [x] T011 [P] [US1] Host test `tests/acp_agent.rs::session_new_refuses_a_bad_cwd`: relative, missing and file cwd → error naming the cause; no scope created
+- [x] T012 [P] [US1] Host test `tests/acp_agent.rs::client_mcp_servers_are_dropped_unless_allowed`: stdio + http servers in `session/new`; default config → both dropped and announced; `client_mcp = true` → stdio admitted (fixture server), http still dropped
+- [x] T013 [P] [US1] Host test `tests/acp_agent.rs::cancel_ends_the_turn_cancelled`: a tool call that sleeps; `session/cancel` → `stopReason: cancelled` within 2 s, conversation truncated (next prompt's model input lacks the cancelled user message)
+- [x] T014 [P] [US1] VM cases in `test/vm/remote-matrix.sh` + `test/vm/cases.txt`: `acp-denial-reported` (S3), `acp-two-sessions-isolated` (S5), `acp-cancel` (S6), using a small Python ACP client script embedded in the case (newline-delimited JSON over the `bee acp` process's pipes)
 
 ### Implementation
 
-- [ ] T015 [US1] `src/acp/output.rs`: `AcpOutput` implementing `ReplOutput` by sending `SessionNotification`s on an mpsc to the connection task, mapping per contracts/acp-agent.md (`kind` table, denial lines from audit, `info`/`error` as `bee: ` chunks, all text through `safe_text`); `tool_call` ids = bee call ids
-- [ ] T016 [US1] `src/acp/agent.rs`: the connection (`Agent.v1()` over `tokio::io::stdin/stdout` via `tokio-util` compat), handlers for `initialize`, `session/new`, `session/prompt` (spawned with `cx.spawn`, responder kept — research R1 ordering trap), `session/cancel`; `method_not_found` for the rest; session table bounded by `max_sessions`
-- [ ] T017 [US1] `session/new` in `src/acp/agent.rs`: validate cwd (absolute, exists, dir); `config::resolve(cwd, flags)`; build the session with `EntryPoint::Acp`, label `acp-<id>`, `prebuilt_sandbox` from the process supervisor (T018), `ChildEnv.cwd = cwd`; check the policy can read cwd (else shutdown + refuse); client MCP per `[acp] client_mcp` (convert stdio entries to `McpServerConfig`, merge into the session's `McpPolicy`); announce dropped servers
-- [ ] T018 [US1] `src/app/acp.rs` + `Cmd::Acp` in `src/main.rs`: tokio runtime, process setup shared with `bee repl` (`app::session::build`: non-dumpable, provider), one `Supervisor::start()` for the process (kernel mode) handing each session a scope via `create_scope`; stdin EOF → cancel all, `shutdown()` each session, non-zero exit if a scope would not empty; stdout is protocol-only (all logging to stderr)
-- [ ] T019 [US1] Prompt execution in `src/acp/agent.rs`: build the user message from text + embedded text resources; refuse image/audio; run `run_exchange` with `AcpOutput` and the session's `ReplConfig` (delegation progress sink → `tool_call_update` lines on the `task` call); map `ExchangeOutcome` → `stopReason` per the contract; refuse a second concurrent prompt in one session
-- [ ] T020 [US1] Cancel in `src/acp/agent.rs`: abort the exchange task (dropping it kills tool children — `tools/exec.rs` `ChildOwner`), truncate the conversation (as `tui/mod.rs` `/cancel`), refuse pending consent for that session, answer `cancelled`
-- [ ] T021 [US1] Make T009–T014 pass; record the VM results in `specs/026-acp/quickstart.md` Results
+- [x] T015 [US1] `src/acp/output.rs`: `AcpOutput` implementing `ReplOutput` by sending `SessionNotification`s on an mpsc to the connection task, mapping per contracts/acp-agent.md (`kind` table, denial lines from audit, `info`/`error` as `bee: ` chunks, all text through `safe_text`); `tool_call` ids = bee call ids
+- [x] T016 [US1] `src/acp/agent.rs`: the connection (`Agent.v1()` over `tokio::io::stdin/stdout` via `tokio-util` compat), handlers for `initialize`, `session/new`, `session/prompt` (spawned with `cx.spawn`, responder kept — research R1 ordering trap), `session/cancel`; `method_not_found` for the rest; session table bounded by `max_sessions`
+- [x] T017 [US1] `session/new` in `src/acp/agent.rs`: validate cwd (absolute, exists, dir); `config::resolve(cwd, flags)`; build the session with `EntryPoint::Acp`, label `acp-<id>`, `prebuilt_sandbox` from the process supervisor (T018), `ChildEnv.cwd = cwd`; check the policy can read cwd (else shutdown + refuse); client MCP per `[acp] client_mcp` (convert stdio entries to `McpServerConfig`, merge into the session's `McpPolicy`); announce dropped servers
+- [x] T018 [US1] `src/app/acp.rs` + `Cmd::Acp` in `src/main.rs`: tokio runtime, process setup shared with `bee repl` (`app::session::build`: non-dumpable, provider), one `Supervisor::start()` for the process (kernel mode) handing each session a scope via `create_scope`; stdin EOF → cancel all, `shutdown()` each session, non-zero exit if a scope would not empty; stdout is protocol-only (all logging to stderr)
+- [x] T019 [US1] Prompt execution in `src/acp/agent.rs`: build the user message from text + embedded text resources; refuse image/audio; run `run_exchange` with `AcpOutput` and the session's `ReplConfig` (delegation progress sink → `tool_call_update` lines on the `task` call); map `ExchangeOutcome` → `stopReason` per the contract; refuse a second concurrent prompt in one session
+- [x] T020 [US1] Cancel in `src/acp/agent.rs`: abort the exchange task (dropping it kills tool children — `tools/exec.rs` `ChildOwner`), truncate the conversation (as `tui/mod.rs` `/cancel`), refuse pending consent for that session, answer `cancelled`
+- [x] T021 [US1] Make T009–T014 pass; record the VM results in `specs/026-acp/quickstart.md` Results
 
 **Checkpoint**: bee is usable from t3code with a fixed policy (consent refuses until US2).
 
@@ -83,17 +83,23 @@ harness tasks (US3+US4), **PR4** = Phase 8.
 
 ### Tests (write first, must fail)
 
-- [ ] T022 [P] [US2] Host test `tests/acp_agent.rs::permission_allow_widens_and_reject_does_not` (test-support scripted audit for the denial): two prompts; client answers allow then reject; assert scope reload on the first, none on the second; consent log = Granted, DeniedByOperator, `operator: interactive`
-- [ ] T023 [P] [US2] Host test `tests/acp_agent.rs::permission_request_lists_every_capability_and_names_a_subagent`: request content contains every `render_lines()` line; a subagent's request (018 US7 origin) is titled `subagent '<name>' asks: …`
-- [ ] T024 [P] [US2] Host tests `tests/acp_agent.rs::unanswered_and_cancelled_permission_requests_refuse`: no answer within a short operator timeout → TimedOut; client answers `cancelled` → Denied; connection closed → Denied
+- [x] T022 [P] [US2] Host test `tests/acp_agent.rs::permission_allow_widens_and_reject_does_not` (test-support scripted audit for the denial): two prompts; client answers allow then reject; assert scope reload on the first, none on the second; consent log = Granted, DeniedByOperator, `operator: interactive`
+- [x] T023 [P] [US2] Host test `tests/acp_agent.rs::permission_request_lists_every_capability_and_names_a_subagent`: request content contains every `render_lines()` line; a subagent's request (018 US7 origin) is titled `subagent '<name>' asks: …`
+- [x] T024 [P] [US2] Host tests `tests/acp_agent.rs::unanswered_and_cancelled_permission_requests_refuse`: no answer within a short operator timeout → TimedOut; client answers `cancelled` → Denied; connection closed → Denied
 - [ ] T025 [P] [US2] Host test `tests/acp_agent.rs::startup_grants_are_asked_during_session_new`: a skill with `requires` → a permission request arrives before the `session/new` response
-- [ ] T026 [P] [US2] VM case `acp-consent` (S4) in `test/vm/remote-matrix.sh` + `cases.txt`, with a never-answer variant
+- [x] T026 [P] [US2] VM case `acp-consent` (S4) in `test/vm/remote-matrix.sh` + `cases.txt`, with a never-answer variant
 
 ### Implementation
 
-- [ ] T027 [US2] `src/acp/consent.rs`: per-session task servicing the `ConsentReceiver` (from `ChannelConsent::new()` used for `Operator::interactive`) → `cx.send_request(RequestPermissionRequest)` with options `allow`(allow_once) / `reject`(reject_once), `toolCall` = triggering call id or `consent-<seq>`, content = `render_lines()`; reply `Granted` only on `selected: allow`; handled with `on_receiving_result`, never `block_task` inside a handler
-- [ ] T028 [US2] Service consent during `session::build` in `src/acp/agent.rs` (start-up grants, as `serve_startup` does for the REPL) and for the session's lifetime; on cancel/disconnect drop pending asks (→ Denied)
-- [ ] T029 [US2] Make T022–T026 pass; record S4
+- [x] T027 [US2] `src/acp/consent.rs`: per-session task servicing the `ConsentReceiver` (from `ChannelConsent::new()` used for `Operator::interactive`) → `cx.send_request(RequestPermissionRequest)` with options `allow`(allow_once) / `reject`(reject_once), `toolCall` = triggering call id or `consent-<seq>`, content = `render_lines()`; reply `Granted` only on `selected: allow`; handled with `on_receiving_result`, never `block_task` inside a handler
+- [x] T028 [US2] Service consent during `session::build` in `src/acp/agent.rs` (start-up grants, as `serve_startup` does for the REPL) and for the session's lifetime; on cancel/disconnect drop pending asks (→ Denied)
+- [x] T029 [US2] Make T022–T026 pass; record S4
+
+> **PR1 as built (2026-11-09).**
+> - **Deferred:** T003 (fake harness binary) and T008 (counts that can be "not counted") move to PR3, where only harnesses need them. T025 (a start-up grant asked during `session/new`) is not tested: the consent servicer runs before `build`, so it works the same way, but no test covers it yet.
+> - **Narrower than planned:** T017 does not check that the session's policy can read the cwd. A cwd the scope cannot enter makes every tool start fail, visibly, rather than refusing the session. T019 shows no live progress for subagents; a `task` call shows its report when it ends, as in the REPL. T023 checks the rendered capability lines; the subagent prefix is covered by the operator unit test. T024 covers a `cancelled` answer; the timeout and closed-connection cases rely on the operator's existing tests.
+> - **Seams:** `session::build_on(spec, report, supervisor)` creates a session's scope on a shared supervisor (`SystemParts.supervisor`). `EntryPoint::Acp` names scopes `bee-acp-<session id>` and starts children in `SessionSpec.workdir`. The build functions' `report` callback is now `&(dyn Fn(&str) + Sync)` so a build future is `Send`. `ChildEnv` keeps its size: `strip_env` is an `Arc<[String]>` and the new `cwd` an `Option<Arc<Path>>`, because `Sandbox::Host` holds it unboxed.
+> - **VM:** 60/60, with four new cases (`acp-denial-reported`, `acp-two-sessions-isolated`, `acp-cancel`, `acp-consent`). Negative controls: giving session A session B's policy fails the isolation pair; allowing both requests fails `acp-consent`. Host tests were checked by mutation (grant on any answer; ignore cancel).
 
 **Checkpoint (PR1)**: US1 + US2 complete — open PR1.
 

@@ -21,6 +21,9 @@ pub enum EntryPoint {
     Tui,
     /// `bee run --batch`. `concurrent` batches share one engine and cannot run every part (FR-008).
     Batch { concurrent: bool },
+    /// One session of `bee acp` (026): a client thread, several to a process, sharing its engine.
+    /// Its `label` is the ACP session id, which names its scope.
+    Acp,
 }
 
 /// What the session's tools run under, decided once, before the builder runs.
@@ -81,9 +84,15 @@ pub(crate) struct SystemParts {
     pub(crate) worker_exe: Option<PathBuf>,
     /// Host names `[policy.http]` and the proxy worker resolve before asking the system.
     pub(crate) hosts: Vec<(String, std::net::IpAddr)>,
+    /// The engine the session's scopes are created on. `None`: the session starts its own. A process
+    /// serving several sessions (`bee acp`) shares one, so it attaches one eBPF object (026 R3).
+    #[cfg(feature = "enforce")]
+    pub(crate) supervisor: Option<crate::supervisor::Supervisor>,
 }
 
 impl SystemParts {
+    /// True when nothing replaces what a test would: the worker binary and host names. A shared
+    /// supervisor is not a test seam and does not count.
     pub(crate) fn is_default(&self) -> bool {
         self.worker_exe.is_none() && self.hosts.is_empty()
     }

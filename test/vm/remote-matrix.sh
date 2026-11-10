@@ -1433,6 +1433,210 @@ else
   echo "RESULT|subagent-escalate-beyond|SKIP|no bee at $BEE"
 fi
 
+# ------------------------------------------------- 026: bee as an ACP agent (US1, US2)
+# A minimal ACP client (newline-delimited JSON-RPC over `bee acp`'s stdio) runs a plan of steps and
+# prints what it saw as JSON. Each session builds its own model from the provider file, so every
+# session replays the same script; what differs between sessions is only their cwd and policy.
+if [ -x "$BEE" ] && "$BEE" acp --help >/dev/null 2>&1; then
+  AC=/home/ubuntu/acp
+  sudo rm -rf "$AC"; mkdir -p "$AC/pa/.bee" "$AC/pb/.bee" "$AC/work" "$AC/grant"
+  cat >"$WORK/acpc.py" <<'PY'
+import json, os, subprocess, sys, threading, time
+bee, plan = sys.argv[1], json.load(open(sys.argv[2]))
+p = subprocess.Popen([bee, "acp", *plan.get("args", [])], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                     stderr=open(plan["log"], "w"), text=True, bufsize=1)
+lock, results, updates, perms = threading.Lock(), {}, [], []
+answers = list(plan.get("answers", []))
+events = {}
+def reader():
+    for line in p.stdout:
+        m = json.loads(line)
+        if "method" in m and "id" in m:  # a request from bee: only permission requests are expected
+            if m["method"] == "session/request_permission":
+                with lock:
+                    perms.append(m["params"])
+                    a = answers.pop(0) if answers else None
+                out = {"outcome": {"outcome": "selected", "optionId": a}} if a else {"outcome": {"outcome": "cancelled"}}
+                send({"jsonrpc": "2.0", "id": m["id"], "result": out})
+            else:
+                with lock: perms.append({"unexpected": m["method"]})
+                send({"jsonrpc": "2.0", "id": m["id"], "error": {"code": -32601, "message": "no"}})
+        elif "method" in m:
+            with lock: updates.append(m["params"])
+        else:
+            with lock: results[m["id"]] = m
+            events.setdefault(m["id"], threading.Event()).set()
+def send(m):
+    p.stdin.write(json.dumps(m) + "\n"); p.stdin.flush()
+nid = [0]
+def call(method, params, timeout=120):
+    nid[0] += 1; i = nid[0]; ev = events.setdefault(i, threading.Event())
+    send({"jsonrpc": "2.0", "id": i, "method": method, "params": params})
+    if not ev.wait(timeout): return {"error": "timeout"}
+    return results[i]
+threading.Thread(target=reader, daemon=True).start()
+call("initialize", {"protocolVersion": 1, "clientCapabilities": {"fs": {"readTextFile": True, "writeTextFile": True}, "terminal": True}})
+out = {"sessions": {}, "prompts": []}
+for step in plan["steps"]:
+    if "new" in step:
+        r = call("session/new", {"cwd": step["cwd"], "mcpServers": []})
+        out["sessions"][step["new"]] = r.get("result", {}).get("sessionId") or r
+    else:
+        sid = out["sessions"][step["prompt"]]
+        if "cancel_after" in step:
+            def later(sid=sid, t=step["cancel_after"]):
+                time.sleep(t); send({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": sid}})
+            threading.Thread(target=later, daemon=True).start()
+        t0 = time.time()
+        r = call("session/prompt", {"sessionId": sid, "prompt": [{"type": "text", "text": step["text"]}]})
+        out["prompts"].append({"session": step["prompt"], "stop": r.get("result", {}).get("stopReason"),
+                               "error": r.get("error"), "secs": round(time.time() - t0, 2)})
+p.stdin.close()
+try: rc = p.wait(30)
+except Exception: p.kill(); rc = "killed"
+with lock:
+    out["updates"], out["permissions"], out["rc"] = updates, perms, rc
+print(json.dumps(out))
+PY
+  cat >"$WORK/acp-a.policy.toml" <<EOF
+[policy]
+name = "acp-a"
+mode = "enforce"
+[policy.filesystem]
+"$AC/pa" = "write"
+EOF
+  cat >"$WORK/acp-b.policy.toml" <<EOF
+[policy]
+name = "acp-b"
+mode = "enforce"
+[policy.filesystem]
+"$AC/pb" = "write"
+EOF
+  printf '[policy]\npath = "%s"\n' "$WORK/acp-a.policy.toml" >"$AC/pa/.bee/config.toml"
+  printf '[policy]\npath = "%s"\n' "$WORK/acp-b.policy.toml" >"$AC/pb/.bee/config.toml"
+  cat >"$WORK/acp-two.prov.toml" <<EOF
+[provider]
+provider = "mock"
+[[provider.script]]
+tool = "bash"
+args = { command = "pwd; echo hi > $AC/pb/from-\$(basename \$(pwd)); echo rc=\$?" }
+[[provider.script]]
+text = "Done."
+EOF
+  cat >"$WORK/acp-two.plan.json" <<EOF
+{"log": "$WORK/acp-two.log", "args": ["--provider", "$WORK/acp-two.prov.toml", "--tools", "bash"],
+ "steps": [{"new": "A", "cwd": "$AC/pa"}, {"new": "B", "cwd": "$AC/pb"},
+           {"prompt": "A", "text": "go"}, {"prompt": "B", "text": "go"}]}
+EOF
+  sudo python3 "$WORK/acpc.py" "$BEE" "$WORK/acp-two.plan.json" >"$WORK/acp-two.json" 2>>"$WORK/acp-two.log"
+  verdict=$(python3 - "$WORK/acp-two.json" "$AC" <<'PY' 2>&1
+import json, os, sys
+o, ac = json.load(open(sys.argv[1])), sys.argv[2]
+sid = o["sessions"]
+def calls(s):
+    ups = [u["update"] for u in o["updates"] if u["sessionId"] == sid[s]]
+    return [u for u in ups if u.get("sessionUpdate") == "tool_call_update"]
+def text(us): return json.dumps([u.get("content") for u in us])
+a, b = calls("A"), calls("B")
+checks = {
+  "both prompts ended end_turn": [p["stop"] for p in o["prompts"]] == ["end_turn", "end_turn"],
+  "A's denial shown on its call": "kernel denied" in text(a) and "from-pa" in text(a),
+  "A ran in its cwd": ac + "/pa" in text(a),
+  # The LSM's file_open hook runs after O_CREAT has made the inode, so a denied redirect leaves an
+  # empty file: what must not land is the content (as skill-grant-deny checks).
+  "A's write did not land": not os.path.exists(ac + "/pb/from-pa") or os.path.getsize(ac + "/pb/from-pa") == 0,
+  "B ran in its cwd and wrote": ac + "/pb" in text(b) and os.path.exists(ac + "/pb/from-pb"),
+  "no denial in B": "kernel denied" not in text(b),
+  "no client method used": not [p for p in o["permissions"] if "unexpected" in p],
+  "clean exit": o["rc"] == 0,
+}
+bad = [k for k, v in checks.items() if not v]
+print("OK" if not bad else "failed: " + ", ".join(bad))
+PY
+)
+  case "$verdict" in
+    OK) emit acp-denial-reported PASS "denied write shown on its tool call (kernel denied …)"
+        emit acp-two-sessions-isolated PASS "one process, two scopes: same command denied in A, allowed in B, each in its own cwd" ;;
+    *)  emit acp-denial-reported FAIL "$verdict"
+        emit acp-two-sessions-isolated FAIL "$verdict ($(tail -1 "$WORK/acp-two.log" 2>/dev/null))" ;;
+  esac
+
+  # acp-cancel — a cancelled prompt ends `cancelled` promptly and leaves no process behind.
+  cat >"$WORK/acp-cancel.prov.toml" <<'EOF'
+[provider]
+provider = "mock"
+[[provider.script]]
+tool = "bash"
+args = { command = "sleep 313 & sleep 313; echo never" }
+[[provider.script]]
+text = "never"
+EOF
+  cat >"$WORK/acp-cancel.plan.json" <<EOF
+{"log": "$WORK/acp-cancel.log", "args": ["--provider", "$WORK/acp-cancel.prov.toml", "--tools", "bash", "--policy", "$WORK/acp-a.policy.toml"],
+ "steps": [{"new": "A", "cwd": "$AC/pa"}, {"prompt": "A", "text": "go", "cancel_after": 2}]}
+EOF
+  sudo python3 "$WORK/acpc.py" "$BEE" "$WORK/acp-cancel.plan.json" >"$WORK/acp-cancel.json" 2>>"$WORK/acp-cancel.log"
+  sleep 1
+  left=$(pgrep -fc "sleep 313" || true)
+  stop=$(python3 -c 'import json,sys; o=json.load(open(sys.argv[1])); p=o["prompts"][0]; print(p["stop"], p["secs"] < 7)' "$WORK/acp-cancel.json" 2>&1)
+  if [ "$stop" = "cancelled True" ] && [ "${left:-0}" = 0 ]; then
+    emit acp-cancel PASS "prompt cancelled within 5 s of the request; no process from the turn survives"
+  else
+    emit acp-cancel FAIL "stop/fast=$stop survivors=$left ($(tail -1 "$WORK/acp-cancel.log" 2>/dev/null))"
+    sudo pkill -f "sleep 313" 2>/dev/null
+  fi
+
+  # acp-consent — a denied write within the ceiling becomes a permission request. Session 1's client
+  # allows it (the retried write lands); session 2's rejects it (the write stays kernel-denied).
+  cat >"$WORK/acp-ceil.policy.toml" <<EOF
+[policy]
+name = "acp-ceil"
+mode = "enforce"
+[policy.filesystem]
+"$AC/work" = "write"
+"$AC/grant" = "write"
+EOF
+  cat >"$WORK/acp-work.policy.toml" <<EOF
+[policy]
+name = "acp-work"
+mode = "enforce"
+[policy.filesystem]
+"$AC/work" = "write"
+EOF
+  cat >"$WORK/acp-consent.prov.toml" <<EOF
+[provider]
+provider = "mock"
+[[provider.script]]
+tool = "write_file"
+args = { path = "$AC/grant/x", content = "granted" }
+[[provider.script]]
+text = "Done."
+EOF
+  cat >"$WORK/acp-consent.plan.json" <<EOF
+{"log": "$WORK/acp-consent.log", "answers": ["allow", "reject"],
+ "args": ["--provider", "$WORK/acp-consent.prov.toml", "--tools", "write_file", "--policy", "$WORK/acp-work.policy.toml", "--ceiling-policy", "$WORK/acp-ceil.policy.toml"],
+ "steps": [{"new": "A", "cwd": "$AC/work"}, {"prompt": "A", "text": "go"}]}
+EOF
+  sudo python3 "$WORK/acpc.py" "$BEE" "$WORK/acp-consent.plan.json" >"$WORK/acp-consent-1.json" 2>>"$WORK/acp-consent.log"
+  allowed=$(cat "$AC/grant/x" 2>/dev/null)
+  rm -f "$AC/grant/x"
+  sed -i 's/"answers": \["allow", "reject"\]/"answers": ["reject"]/' "$WORK/acp-consent.plan.json"
+  sudo python3 "$WORK/acpc.py" "$BEE" "$WORK/acp-consent.plan.json" >"$WORK/acp-consent-2.json" 2>>"$WORK/acp-consent.log"
+  rejected=$(cat "$AC/grant/x" 2>/dev/null)
+  asked=$(python3 -c 'import json,sys; print(sum(len(json.load(open(f))["permissions"]) for f in sys.argv[1:]))' "$WORK/acp-consent-1.json" "$WORK/acp-consent-2.json" 2>&1)
+  shows=$(grep -c "filesystem: $AC/grant/x = write" "$WORK/acp-consent-1.json" 2>/dev/null)
+  if [ "$allowed" = granted ] && [ -z "$rejected" ] && [ "$asked" = 2 ] && [ "${shows:-0}" -ge 1 ]; then
+    emit acp-consent PASS "client allow → scope widened, write landed; client reject → write kernel-denied"
+  else
+    emit acp-consent FAIL "allowed='$allowed' rejected='$rejected' asked=$asked shows=$shows ($(tail -1 "$WORK/acp-consent.log" 2>/dev/null))"
+  fi
+  sudo rm -rf "$AC"
+else
+  for c in acp-denial-reported acp-two-sessions-isolated acp-cancel acp-consent; do
+    echo "RESULT|$c|SKIP|bee built without --features acp"
+  done
+fi
+
 # ---------------------------------------------------------------- 019: HTTP interception (US1)
 # One scripted episode under `[policy.http]`, one tool call per probe. Each call is its own credential
 # (its own call id), so every probe is attributed separately in the transcript. The in-VM targets are

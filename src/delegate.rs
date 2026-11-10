@@ -555,9 +555,13 @@ fn child_sandbox(
         let scope = parent_scope
             .supervisor()
             .create_scope(&id, &id, Some(parent_scope), &plan)?;
-        return Ok((Sandbox::enforced(scope, parent.strip_env()), id, true));
+        let mut sandbox = Sandbox::enforced(scope, parent.strip_env());
+        sandbox.set_cwd(parent.cwd().map(Into::into));
+        return Ok((sandbox, id, true));
     }
-    Ok((Sandbox::host(parent.strip_env()), String::new(), false))
+    let mut sandbox = Sandbox::host(parent.strip_env());
+    sandbox.set_cwd(parent.cwd().map(Into::into));
+    Ok((sandbox, String::new(), false))
 }
 
 /// How a child's loop ended, and the report's first line.

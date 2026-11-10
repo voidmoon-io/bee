@@ -108,6 +108,8 @@ pub struct EffectiveConfig {
     pub stuck: file::StuckSection,
     /// `[delegation]` (018): set by a trusted layer, only ever lowered by a project one.
     pub delegation: file::DelegationSection,
+    /// `[acp]` (026), from trusted layers only, merged key by key.
+    pub acp: file::AcpSection,
 }
 
 /// One thing bee needs and does not have, with the places it could come from.
@@ -195,6 +197,7 @@ struct Merged {
     context: file::ContextSection,
     stuck: file::StuckSection,
     delegation: file::DelegationSection,
+    acp: file::AcpSection,
 }
 
 impl Merged {
@@ -274,6 +277,10 @@ impl Merged {
                     // An untrusted repository may ask for less delegation, never more.
                     m.delegation.narrowed_by(d)
                 };
+            }
+            // Operator-only: a project layer carrying `[acp]` was refused before this point.
+            if let Some(a) = &c.acp {
+                m.acp = std::mem::take(&mut m.acp).merge(a.clone());
             }
         }
 
@@ -435,6 +442,7 @@ pub fn resolve_from_layers(
         context: m.context,
         stuck: m.stuck,
         delegation: m.delegation,
+        acp: m.acp,
     })
 }
 

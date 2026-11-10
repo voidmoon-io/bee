@@ -10,6 +10,10 @@ subagent-overgrant-no-cgroup
 subagent-siblings-isolated
 subagent-escalate
 subagent-escalate-beyond
+acp-denial-reported
+acp-two-sessions-isolated
+acp-cancel
+acp-consent
 episode-allow
 episode-file-deny
 exec-allow

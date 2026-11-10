@@ -1329,9 +1329,13 @@ mod mcp_cgroup_spike {
         let policy =
             bee_core::Policy::from_path(&scenario.policy_path).expect("parse spike policy");
         let scope_id = format!("bee-episode-{}-{}", scenario.id, std::process::id());
-        let (sandbox, _http) =
-            crate::session::parts::kernel_sandbox(&policy, &scope_id, sandbox::key_vars(None))
-                .expect("build enforced sandbox (need root + BPF-LSM)");
+        let (sandbox, _http) = crate::session::parts::kernel_sandbox(
+            &policy,
+            &scope_id,
+            sandbox::key_vars(None),
+            None,
+        )
+        .expect("build enforced sandbox (need root + BPF-LSM)");
 
         let scope_cgid = match &sandbox {
             Sandbox::Enforced(e) => e.scope.cgroup_id,

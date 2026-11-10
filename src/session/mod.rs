@@ -357,6 +357,12 @@ async fn build_from(
                 None => crate::intercept::sidecar::Enforcement::Kernel,
             };
             let session_id = format!("{label}-{}", std::process::id());
+            let child_proxies = crate::intercept::session::ChildProxies {
+                worker_exe: prepared.worker_exe.clone(),
+                hosts: system.hosts.clone(),
+                project_root: spec.workdir.clone(),
+                enforcement: enforcement.clone(),
+            };
             match crate::intercept::session::start(
                 prepared,
                 &mut sandbox,
@@ -364,13 +370,15 @@ async fn build_from(
                 &spec.workdir,
                 enforcement,
                 crate::intercept::session::worker_resolver(system.hosts.clone()),
+                None,
             )
             .await
             {
                 Ok(h) => {
-                    let deps = (**registry.deps())
+                    let mut deps = (**registry.deps())
                         .clone()
                         .with_interceptor(h.interceptor.clone());
+                    deps.child_proxies = Some(Arc::new(child_proxies));
                     registry.set_deps(Arc::new(deps));
                     Some(h)
                 }

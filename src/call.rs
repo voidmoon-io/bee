@@ -377,6 +377,7 @@ async fn run_call_inner(
                 // The child is derived from what the session holds now, as if it ran now.
                 outcome.pending_delegation = Some(Box::new(crate::delegate::PendingDelegation {
                     request: req,
+                    call_id: tc.id.clone(),
                     policy: esc.as_ref().map(|e| e.active.active().clone()),
                 }));
             }
@@ -389,6 +390,7 @@ async fn run_call_inner(
                         registry: &*registry,
                         sandbox: &*sandbox,
                         deadline,
+                        call_id: &tc.id,
                     },
                 )
                 .await;

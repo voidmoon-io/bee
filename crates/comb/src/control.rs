@@ -87,6 +87,11 @@ pub enum ToWorker {
         addrs: Vec<std::net::IpAddr>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        /// The harness reloaded the proxy scope's kernel rules so that they hold every address in
+        /// `addrs` for this name (resolve-and-admit, 026 R9). The worker then connects to them
+        /// though they are not in the compile-time set; the kernel still has the last word.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        admitted: bool,
     },
     /// One batch of a fuzz run: `count` variants as segments, each a complete raw request.
     #[serde(rename = "fuzz.start")]
@@ -596,6 +601,13 @@ mod tests {
                 req_id: 3,
                 addrs: vec!["10.0.0.1".parse().unwrap()],
                 error: None,
+                admitted: false,
+            },
+            ToWorker::Resolved {
+                req_id: 4,
+                addrs: vec!["10.0.0.2".parse().unwrap()],
+                error: None,
+                admitted: true,
             },
             ToWorker::FuzzStart {
                 run_id: "F1".into(),

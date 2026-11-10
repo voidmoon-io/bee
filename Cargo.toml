@@ -445,6 +445,11 @@ path = "tests/intercept_tools.rs"
 required-features = ["intercept", "test-support"]
 
 [[test]]
+name = "intercept_delegation"
+path = "tests/intercept_delegation.rs"
+required-features = ["intercept", "test-support"]
+
+[[test]]
 name = "intercept_replay"
 path = "tests/intercept_replay.rs"
 required-features = ["intercept", "test-support"]

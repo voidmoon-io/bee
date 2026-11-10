@@ -144,16 +144,16 @@ harness tasks (US3+US4), **PR4** = Phase 8.
 
 - [ ] T043 [P] [US4] Property test in `crates/core/src/attenuation.rs` (extend the derive property suite): a harness derivation routes `requires.net` names only when each is held by the parent by exact name (non-intercepting parent: `network.allow`; intercepting: `http.targets ∪ http.egress`); never yields a kernel net rule other than the proxy port
 - [ ] T044 [P] [US4] Unit tests in `crates/core/src/compiler.rs`: a harness policy compiles the harness protected list (`~/.claude`, `~/.claude.json`, `~/.codex`, `~/.local/share/opencode`, `~/.config/opencode`) as DENY unless named in the child **and** the parent; the global `PROTECTED_DEFAULTS` are unchanged for non-harness policies
-- [ ] T045 [P] [US4] Unit tests for resolve-and-admit in `src/intercept/session.rs`: a non-declared host → error, no reload; a declared host with a new address → exactly one reload, then answer; the same address again → no reload; >16 addresses → oldest evicted
+- [x] T045 [P] [US4] Unit tests for resolve-and-admit in `src/intercept/session.rs`: a non-declared host → error, no reload; a declared host with a new address → exactly one reload, then answer; the same address again → no reload; >16 addresses → oldest evicted
 - [ ] T046 [P] [US4] VM cases `harness-egress-by-name` (S8, incl. the `/etc/hosts` address change) and `harness-credentials` (S9a) in `test/vm/remote-matrix.sh` + `cases.txt`
-- [ ] T047 [P] [US4] VM case `proxy-admit-on-resolve`: a session (not a harness) with `[policy.http]` egress `prov.test:8443` whose address changes mid-session still reaches it, and the proxy scope's reload is recorded
+- [x] T047 [P] [US4] VM case `proxy-admit-on-resolve`: a session (not a harness) with `[policy.http]` egress `prov.test:8443` whose address changes mid-session still reaches it, and the proxy scope's reload is recorded
 
 ### Implementation — proxy scopes per sandbox (019 T092; PR2)
 
-- [ ] T048 [US4] Move the sidecar onto the supervisor in `src/supervisor.rs` / `src/sandbox.rs`: a scope record may own an optional proxy scope (`ProxyScope { scope_id, interceptor, namespace, admitted }`); delete `EnforcedSandbox.sidecar`'s one-per-session assumption; teardown order proxy-before-tool, children-first (keep `Supervisor::teardown`'s ordering tests green)
-- [ ] T049 [US4] Generalize `attach_sidecar` in `src/intercept/session.rs` to attach a proxy scope to any enforced `Sandbox` from a compiled `[policy.http]` (targets, egress, inspect), spawning `bee proxy-worker` into it with a per-sandbox credential namespace; the tool scope's kernel net becomes `with_proxy_loopback`
-- [ ] T050 [US4] Resolve-and-admit in `src/intercept/session.rs`: the `resolver` for each proxy scope refuses undeclared names, resolves, reloads the proxy scope's net with new addresses (bounded 16/host), records the reload, then answers `Resolved` (contracts/proxy-scopes.md)
-- [ ] T051 [US4] Recording attribution: tag `ExchangeRecord`/`TunnelRecord`/`ProxyEvent` from a subagent's worker with its scope id and delegation id in the 019 store (`src/intercept/store*` / `crates/comb` store schema); migration-free (new nullable columns)
+- [x] T048 [US4] Move the sidecar onto the supervisor in `src/supervisor.rs` / `src/sandbox.rs`: a scope record may own an optional proxy scope (`ProxyScope { scope_id, interceptor, namespace, admitted }`); delete `EnforcedSandbox.sidecar`'s one-per-session assumption; teardown order proxy-before-tool, children-first (keep `Supervisor::teardown`'s ordering tests green)
+- [x] T049 [US4] Generalize `attach_sidecar` in `src/intercept/session.rs` to attach a proxy scope to any enforced `Sandbox` from a compiled `[policy.http]` (targets, egress, inspect), spawning `bee proxy-worker` into it with a per-sandbox credential namespace; the tool scope's kernel net becomes `with_proxy_loopback`
+- [x] T050 [US4] Resolve-and-admit in `src/intercept/session.rs`: the `resolver` for each proxy scope refuses undeclared names, resolves, reloads the proxy scope's net with new addresses (bounded 16/host), records the reload, then answers `Resolved` (contracts/proxy-scopes.md)
+- [x] T051 [US4] Recording attribution: tag `ExchangeRecord`/`TunnelRecord`/`ProxyEvent` from a subagent's worker with its scope id and delegation id in the 019 store (`src/intercept/store*` / `crates/comb` store schema); migration-free (new nullable columns)
 
 ### Implementation — harness network and credentials (PR3)
 
@@ -170,10 +170,18 @@ harness tasks (US3+US4), **PR4** = Phase 8.
 
 **Independent Test**: quickstart S9(b).
 
-- [ ] T056 [P] [US5] VM case `subagent-intercept-attributed` (S9b) in `test/vm/remote-matrix.sh` + `cases.txt`: an intercepting session delegates to a bee-loop subagent that fetches `app.test`; the exchange is attributed to the subagent's scope, none to the parent; a sibling's credential is refused by the other's worker
-- [ ] T057 [P] [US5] Host test in `tests/delegation.rs`: `a_subagent_of_an_intercepted_session_is_not_refused` (replaces the expectation of the 018 refusal)
-- [ ] T058 [US5] Remove the intercepted-session refusal in `src/delegate.rs` (`run_inner`); for a bee-loop child whose derived policy has active `[policy.http]`, attach a proxy scope (T049); update `specs/019-http-intercept/tasks.md` T092 to done with a pointer to 026
-- [ ] T059 [US5] Make T056–T057 pass; record S9b
+- [x] T056 [P] [US5] VM case `subagent-intercept-attributed` (S9b) in `test/vm/remote-matrix.sh` + `cases.txt`: an intercepting session delegates to a bee-loop subagent that fetches `app.test`; the exchange is attributed to the subagent's scope, none to the parent; a sibling's credential is refused by the other's worker
+- [x] T057 [P] [US5] Host test in `tests/delegation.rs`: `a_subagent_of_an_intercepted_session_is_not_refused` (replaces the expectation of the 018 refusal)
+- [x] T058 [US5] Remove the intercepted-session refusal in `src/delegate.rs` (`run_inner`); for a bee-loop child whose derived policy has active `[policy.http]`, attach a proxy scope (T049); update `specs/019-http-intercept/tasks.md` T092 to done with a pointer to 026
+- [x] T059 [US5] Make T056–T057 pass; record S9b
+
+> **PR2 as built (2026-11-10).**
+> - **Proxy scope (T048):** `src/proxy_scope.rs`. `ProxyScope` (its scope handle, compiled base, installed plan and `Admissions`) is created on the supervisor as the tool scope's userspace child, as before, and owned by the sandbox as `Arc<ProxyScope>` (`SidecarScope` is now that alias). It is not a field of the supervisor's `Record`: the supervisor already holds it as a scope record whose parent link orders teardown, and the sandbox already exists once per tool scope, so "one per session" was never in the type. The worker's resolver holds a `Weak` to it. Every rule change (admit, widening, rollback) runs under its lock, so they apply one at a time. A reload that cannot be rolled back poisons the proxy scope, and the tool sandbox it serves then refuses every child.
+> - **Child proxies (T049, T058):** `intercept::session::ChildProxies` (worker binary, test host names, project root and the session's enforcement) rides in `ToolDeps`, so every child inherits it. `delegate::child_sandbox` binds the child's listener, compiles its tool scope with `with_proxy_loopback`, and attaches its proxy scope under kernel enforcement. `run_inner` starts its worker and sets the child's `ToolDeps.interceptor`. The parent's interceptor is never handed to a child: until the child's own proxy starts, its HTTP tools refuse. The worker is shut down before the child's scope is torn down. A cancelled delegation's `HttpSession` stops its worker on drop.
+> - **Resolve-and-admit (T050):** comb's `InterceptorConfig.admit` (trait `Admit`) is called after resolution and before the reply. `ToWorker::Resolved` gained `admitted`, and the worker connects to an admitted address without checking it against the compile-time set (`resolve_checked`). Advisory sessions have no hook and keep the drift refusal. Each admit that adds addresses is recorded in the store's `admits` table.
+> - **Attribution (T051):** a new `attribution` table, not new columns. Every child proxy has its own store session id, which every exchange, tunnel and refusal row already carries. The table maps that id to the child's `scope_id`, `delegation_id` (the parent's `task` call id, now on `ParentView` and `PendingDelegation`), `parent_session` and agent, indexed by scope and delegation. Both tables are `CREATE TABLE IF NOT EXISTS`, so no migration is needed.
+> - **Tests:** T045 is covered by unit tests in `src/proxy_scope.rs` and by the end-to-end host test `tests/intercept_proxy.rs::a_moved_address_is_admitted_once_then_reached`. The reload there is counted, not made. T057 is `tests/intercept_delegation.rs`, which needs the intercept harness that `tests/delegation.rs` does not build with.
+> - **VM:** `proxy-admit-on-resolve` and `subagent-intercept-attributed` both pass. Negative control: a build with no admit hook and no child attribution fails both.
 
 **Checkpoint (PR2 = T048–T051 + Phase 7; PR3 = Phase 5 + T052–T055)**
 

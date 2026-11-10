@@ -228,6 +228,8 @@ impl<'a> Delegator<'a> {
 #[derive(Debug, Clone)]
 pub struct PendingDelegation {
     pub request: Box<DelegationRequest>,
+    /// The `task` call that asked for it: the delegation's id in the HTTP store (026 T051).
+    pub call_id: String,
     pub policy: Option<bee_core::Policy>,
 }
 
@@ -255,6 +257,7 @@ pub async fn run_all<'a>(
                     registry,
                     sandbox,
                     deadline,
+                    call_id: &p.call_id,
                 },
             )
         })
@@ -274,6 +277,8 @@ pub struct ParentView<'a> {
     pub sandbox: &'a Sandbox,
     /// The parent call's wall-clock deadline; the child shares it.
     pub deadline: Instant,
+    /// The parent's `task` call: the delegation's id wherever the child's records are attributed.
+    pub call_id: &'a str,
 }
 
 /// A delegation's result: what replaces the `task` call's result, and the record attached to it.
@@ -319,15 +324,6 @@ async fn run_inner(
             detail: "this loop has no session policy to derive a subagent's from".into(),
         });
     };
-    // Plan Refresh §5: a child of an intercepted session would share the parent's proxy, and its
-    // exchanges would be recorded as the parent's.
-    if parent_policy.http.as_ref().is_some_and(|h| h.is_active()) {
-        return refuse(RefusalReason::Unavailable {
-            detail: "subagents of an intercepted session ([policy.http]) need their own proxy \
-                     scope, which bee does not provide yet (019 T092)"
-                .into(),
-        });
-    }
     // FR-012: every tool the agent names must be one the session holds — checked before anything
     // is built, by name.
     let child_may_delegate = depth < cfg.max_depth;
@@ -361,8 +357,21 @@ async fn run_inner(
         }
     };
 
-    // The child's tools, built from the session's dependencies, recomputed for its policy.
-    let deps = (**parent.registry.deps()).clone().with_policy(&derived);
+    // The child's tools, built from the session's dependencies, recomputed for its policy. Never
+    // the parent's proxy: a child that intercepts gets its own below, and until then (or without
+    // one) its HTTP tools refuse rather than record as the parent (026 T058).
+    #[cfg_attr(not(feature = "intercept"), allow(unused_mut))]
+    let mut deps = (**parent.registry.deps()).clone().with_policy(&derived);
+    #[cfg(feature = "intercept")]
+    let (proxies, parent_session) = (
+        deps.child_proxies.clone(),
+        deps.interceptor
+            .take()
+            .map(|i| i.session_id().to_string())
+            .unwrap_or_default(),
+    );
+    #[cfg(not(feature = "intercept"))]
+    let proxies: Option<Arc<std::convert::Infallible>> = None;
     let mut registry = ToolRegistry::with_deps(Arc::new(deps));
     let mut tools: Vec<String> = Vec::new();
     for tool in &agent.tools {
@@ -379,8 +388,8 @@ async fn run_inner(
 
     // The child's sandbox: its own scope on the session's supervisor, or — with no kernel scope to
     // give it — a host sandbox that says so.
-    let (mut sandbox, scope_id, enforced) =
-        match child_sandbox(parent.sandbox, &req.agent, &derived) {
+    let (mut sandbox, scope_id, enforced, prepared) =
+        match child_sandbox(parent.sandbox, &req.agent, &derived, proxies.as_deref()) {
             Ok(v) => v,
             Err(detail) => return failed(&req.agent, depth, String::new(), false, detail),
         };
@@ -390,6 +399,58 @@ async fn run_inner(
         if scope_id.is_empty() { "-" } else { &scope_id },
         if enforced { "enforced" } else { "UNENFORCED" },
     ));
+
+    // 026 T058: a child whose derived policy intercepts records through a proxy of its own — its
+    // own worker, credential namespace and store session, attributed to its scope and to this
+    // delegation — never the parent's.
+    #[cfg(feature = "intercept")]
+    let child_http = match (prepared, proxies.as_deref()) {
+        (None, _) => None,
+        (Some(p), Some(proxies)) => {
+            static NEXT_PROXY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let session_id = format!(
+                "{parent_session}-sub-{}-{}",
+                crate::session::parts::sanitize(&req.agent),
+                NEXT_PROXY.fetch_add(1, Ordering::Relaxed)
+            );
+            let attribution = crate::intercept::sidecar::Attribution {
+                scope_id: scope_id.clone(),
+                delegation_id: parent.call_id.to_string(),
+                parent_session,
+                agent: req.agent.clone(),
+            };
+            match proxies
+                .start(p, &mut sandbox, &session_id, attribution)
+                .await
+            {
+                Ok(h) => {
+                    let deps = (**registry.deps())
+                        .clone()
+                        .with_interceptor(h.interceptor.clone());
+                    registry.set_deps(Arc::new(deps));
+                    cfg.emit(&format!(
+                        "delegate '{}' proxy {session_id} ({})",
+                        req.agent,
+                        h.interceptor.enforcement().label()
+                    ));
+                    Some(h)
+                }
+                Err(detail) => {
+                    let _ = sandbox.teardown();
+                    return failed(
+                        &req.agent,
+                        depth,
+                        scope_id,
+                        enforced,
+                        format!("could not start its HTTP proxy: {detail}"),
+                    );
+                }
+            }
+        }
+        (Some(_), None) => unreachable!("child_sandbox prepares a proxy only with ChildProxies"),
+    };
+    #[cfg(not(feature = "intercept"))]
+    let _ = prepared;
 
     let deadline = match &cfg.budget {
         Some(b) => parent.deadline.min(b.deadline),
@@ -435,6 +496,11 @@ async fn run_inner(
     };
     let transcript = run_loop(d.model, &scenario, &mut registry, &mut sandbox, &opts).await;
 
+    // The worker stops before its proxy scope goes, as a session's does.
+    #[cfg(feature = "intercept")]
+    if let Some(h) = child_http {
+        h.shutdown().await;
+    }
     let teardown = sandbox.teardown();
     let turns_used = transcript.turns.len() as u32;
     let tokens_used = transcript.usage.as_ref().map_or(0, |u| {
@@ -524,21 +590,66 @@ fn child_escalation(
     }
 }
 
-/// The child's sandbox, its scope id, and whether a kernel scope confines it.
+/// How a child of an intercepting session gets its own proxy (026 T058).
+#[cfg(feature = "intercept")]
+type ChildProxyRef<'a> = Option<&'a crate::intercept::session::ChildProxies>;
+#[cfg(not(feature = "intercept"))]
+type ChildProxyRef<'a> = Option<&'a std::convert::Infallible>;
+
+/// A child's prepared proxy: its compiled `[policy.http]` and bound listener.
+#[cfg(feature = "intercept")]
+type ChildPrepared = Option<crate::intercept::session::Prepared>;
+#[cfg(not(feature = "intercept"))]
+type ChildPrepared = Option<std::convert::Infallible>;
+
+/// The child's sandbox, its scope id, whether a kernel scope confines it, and — when its derived
+/// policy intercepts — its prepared proxy, whose port is already the tool scope's only network rule
+/// and (under kernel enforcement) whose proxy scope is already attached (026 T058, 019 T092).
 #[cfg_attr(not(feature = "enforce"), allow(unused_variables))]
 fn child_sandbox(
     parent: &Sandbox,
     agent: &str,
-    #[cfg_attr(not(feature = "enforce"), allow(unused_variables))] policy: &bee_core::Policy,
-) -> Result<(Sandbox, String, bool), String> {
+    policy: &bee_core::Policy,
+    proxies: ChildProxyRef<'_>,
+) -> Result<(Sandbox, String, bool, ChildPrepared), String> {
+    let intercepts = policy.http.as_ref().is_some_and(|h| h.is_active());
+    #[cfg(feature = "intercept")]
+    let prepared = match (intercepts, proxies) {
+        (false, _) => None,
+        (true, Some(p)) => p.prepare(policy)?,
+        (true, None) => {
+            return Err(
+                "its policy intercepts ([policy.http]), but this session runs no \
+                        interception proxy to give it one of its own"
+                    .into(),
+            )
+        }
+    };
+    #[cfg(not(feature = "intercept"))]
+    let prepared: ChildPrepared = {
+        let _ = proxies;
+        if intercepts {
+            return Err(
+                "its policy intercepts ([policy.http]), but bee was built without \
+                        --features intercept"
+                    .into(),
+            );
+        }
+        None
+    };
     #[cfg(feature = "enforce")]
     if let Some(parent_scope) = parent.scope_handle() {
         use bee_userspace::{EnforcementPlan, ScopeMode, SystemResolver};
         use std::sync::atomic::AtomicU64;
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let compiled = policy
+        #[cfg_attr(not(feature = "intercept"), allow(unused_mut))]
+        let mut compiled = policy
             .compile(&SystemResolver::current())
             .map_err(|e| format!("subagent policy compile: {e}"))?;
+        #[cfg(feature = "intercept")]
+        if let Some(p) = &prepared {
+            compiled = p.tool_policy(compiled);
+        }
         let mode = match compiled.mode {
             bee_core::Mode::Enforce => ScopeMode::Enforce,
             bee_core::Mode::Observe => ScopeMode::Observe,
@@ -555,13 +666,34 @@ fn child_sandbox(
         let scope = parent_scope
             .supervisor()
             .create_scope(&id, &id, Some(parent_scope), &plan)?;
+        // The child's proxy scope: the child scope's userspace child, so it goes first.
+        #[cfg(feature = "intercept")]
+        let sidecar = match (&prepared, proxies) {
+            (Some(p), Some(px)) if px.kernel() => Some(
+                crate::intercept::session::attach_sidecar(&scope, &p.compiled).inspect_err(
+                    |_| {
+                        let _ = scope.teardown();
+                    },
+                )?,
+            ),
+            _ => None,
+        };
+        #[cfg_attr(not(feature = "intercept"), allow(unused_mut))]
         let mut sandbox = Sandbox::enforced(scope, parent.strip_env());
+        #[cfg(feature = "intercept")]
+        if let Some(sc) = sidecar {
+            sandbox = sandbox.with_sidecar(sc).map_err(|(sb, sc, e)| {
+                let _ = sc.handle().teardown();
+                let _ = sb.teardown();
+                e.to_string()
+            })?;
+        }
         sandbox.set_cwd(parent.cwd().map(Into::into));
-        return Ok((sandbox, id, true));
+        return Ok((sandbox, id, true, prepared));
     }
     let mut sandbox = Sandbox::host(parent.strip_env());
     sandbox.set_cwd(parent.cwd().map(Into::into));
-    Ok((sandbox, String::new(), false))
+    Ok((sandbox, String::new(), false, prepared))
 }
 
 /// How a child's loop ended, and the report's first line.

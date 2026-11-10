@@ -1800,6 +1800,176 @@ else
   done
 fi
 
+# ------------------------------------- 026 PR2: per-subagent proxy scopes and resolve-and-admit
+# proxy-admit-on-resolve (T047, research R9): an egress host whose address changes mid-session is
+# still reached. `prov.test` starts at 127.0.0.2 in /etc/hosts; after the first fetch the matrix moves
+# it to 127.0.0.3 and kills the .2 server, so the second fetch succeeds only through the new address —
+# which the proxy scope's kernel rules held only after bee admitted it (a recorded reload).
+# subagent-intercept-attributed (T056, S9b): an intercepting session delegates; each child records
+# through a proxy of its own, attributed to its scope and delegation, none to the parent. Child B
+# offers child A's credential to its own proxy (refused: not its namespace) and tries the parent's
+# proxy port directly (kernel-denied: its tool scope reaches only its own proxy).
+PS_CASES="proxy-admit-on-resolve subagent-intercept-attributed"
+if [ -x "$BEE" ] && "$BEE" proxy-worker --help >/dev/null 2>&1; then
+  PW=/home/ubuntu/pscope
+  rm -rf "$PW"; mkdir -p "$PW/www" "$PW/skills/web"
+  echo "app-ok" >"$PW/www/index.html"
+  cp /etc/hosts "$PW/hosts.bak"
+  printf '127.0.0.2 prov.test\n' >>/etc/hosts
+  ( cd "$PW/www" && exec python3 -m http.server 18090 --bind 127.0.0.1 ) >/dev/null 2>&1 &
+  PA=$!
+  openssl req -x509 -newkey rsa:2048 -nodes -subj "/CN=prov.test" -days 1 \
+    -keyout "$PW/key.pem" -out "$PW/cert.pem" >/dev/null 2>&1
+  openssl s_server -accept 127.0.0.2:18443 -cert "$PW/cert.pem" -key "$PW/key.pem" -www -quiet \
+    >/dev/null 2>&1 &
+  P2=$!
+  openssl s_server -accept 127.0.0.3:18443 -cert "$PW/cert.pem" -key "$PW/key.pem" -www -quiet \
+    >/dev/null 2>&1 &
+  P3=$!
+  sleep 1
+  printf '%s\n' '[policy]' 'name = "pscope"' 'mode = "enforce"' \
+    '[policy.exec]' 'allow = ["dash", "bash", "curl", "cat", "sleep"]' \
+    '[policy.filesystem]' "\"$PW\" = \"write\"" \
+    '[policy.http]' 'targets = ["127.0.0.1:18090"]' 'egress = ["prov.test:18443"]' >"$PW/policy.toml"
+
+  # --- proxy-admit-on-resolve
+  printf '%s\n' '[scenario]' 'id = "admit"' "policy_path = \"$PW/policy.toml\"" \
+    'system_prompt = "test"' 'task = "probe"' 'turn_limit = 6' 'timeout_secs = 120' \
+    'tools = ["bash"]' >"$PW/admit.scn.toml"
+  FETCH="curl -sk --max-time 10 -o page.html -w 'code=%{http_code}' https://prov.test:18443/; echo"
+  python3 - "$FETCH" >"$PW/admit.prov.toml" <<'PYPROV'
+import json, sys
+fetch = sys.argv[1]
+wait = ": > flip; i=0; while [ ! -f flipped ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i+1)); done; [ -f flipped ] && echo FLIPPED"
+print('[provider]\nprovider = "mock"')
+for cmd in (fetch, wait, fetch):
+    print(f'[[provider.script]]\ntool = "bash"\nargs = {{ command = {json.dumps(cmd)} }}')
+print('[[provider.script]]\ntext = "done"')
+PYPROV
+  # The flip, from outside every scope: move prov.test and take its old address away.
+  ( for _ in $(seq 1 300); do [ -f "$PW/flip" ] && break; sleep 0.1; done
+    sed -i 's/^127\.0\.0\.2 prov\.test$/127.0.0.3 prov.test/' /etc/hosts
+    kill "$P2" 2>/dev/null; sleep 0.3; : >"$PW/flipped" ) &
+  FL=$!
+  ( cd "$PW" && "$BEE" run --scenario "$PW/admit.scn.toml" --provider "$PW/admit.prov.toml" \
+      --out "$PW/admit.json" ) >"$PW/admit.log" 2>&1
+  kill "$FL" 2>/dev/null
+  cp "$PW/hosts.bak" /etc/hosts
+  while IFS='|' read -r c st note; do emit "$c" "$st" "$note"; done < <(python3 - "$PW/admit.json" "$PW/.bee/http/index.sqlite" 2>&1 <<'PYCHECK'
+import json, sqlite3, sys
+try:
+    t = json.load(open(sys.argv[1]))
+    calls = [c for turn in t["turns"] for c in turn.get("calls", [])]
+    res = [c["result"]["content"] for c in calls]
+    db = sqlite3.connect(f"file:{sys.argv[2]}?mode=ro", uri=True)
+    admits = db.execute("SELECT added FROM admits WHERE host = 'prov.test'").fetchall()
+    added = [a for (row,) in admits for a in json.loads(row)]
+    pden = [a for c in calls for a in c.get("audit", [])
+            if a.get("scope_id") == "proxy" and a["decision"] == "denied"]
+    checks = {
+        "reached at the first address": len(res) > 0 and "code=200" in res[0],
+        "flipped mid-session": len(res) > 1 and "FLIPPED" in res[1],
+        "reached at the new address": len(res) > 2 and "code=200" in res[2],
+        "admit reload recorded for 127.0.0.3": "127.0.0.3" in added,
+        "no proxy-scope denial": not pden,
+    }
+    bad = [k for k, v in checks.items() if not v]
+    note = f"results={[r.strip()[:20] for r in res]}, admits={added}, proxy denials={[a['target'] for a in pden]}"
+    print(f"proxy-admit-on-resolve|{'PASS' if not bad else 'FAIL'}|{'; '.join(bad) or 'ok'}: {note}")
+except Exception as e:
+    print(f"proxy-admit-on-resolve|FAIL|could not judge: {e}")
+PYCHECK
+)
+
+  # --- subagent-intercept-attributed
+  cat >"$PW/skills/web/SKILL.md" <<'EOF'
+---
+name: web
+kind: agent
+description: Fetches pages through its proxy.
+tools: [bash]
+turn-limit: 3
+---
+Fetch what you are asked to and report the status.
+EOF
+  # Its own policy: /etc/hosts no longer names prov.test, and every egress name must resolve.
+  sed '/^egress = /d' "$PW/policy.toml" >"$PW/sub.policy.toml"
+  printf '%s\n' '[scenario]' 'finish = false' 'id = "sub-intercept"' \
+    "policy_path = \"$PW/sub.policy.toml\"" 'system_prompt = "test"' 'task = "delegate"' \
+    'turn_limit = 12' 'timeout_secs = 120' 'tools = ["task", "bash"]' \
+    "skills = [\"$PW/skills\"]" >"$PW/sub.scn.toml"
+  python3 - >"$PW/sub.prov.toml" <<'PYPROV'
+import json
+steps = [
+    ("bash", {"command": "echo \"$HTTP_PROXY\" > parent.proxy && echo SAVED"}),
+    ("task", {"agent": "web", "prompt": "A"}),
+    ("bash", {"command": "echo \"$HTTP_PROXY\" > a.proxy; curl -sS --max-time 10 -o a.html -w 'code=%{http_code}' http://127.0.0.1:18090/; echo"}),
+    ("finish", {"outcome": "completed", "summary": "A fetched"}),
+    ("task", {"agent": "web", "prompt": "B"}),
+    ("bash", {"command": "A=$(cat a.proxy); P=$(cat parent.proxy); U=${A#http://}; U=${U%@*}; MINE=${HTTP_PROXY##*@}; "
+                         "curl -sS --max-time 10 -o b1.html -w 'cred=%{http_code}' -x \"http://$U@$MINE\" http://127.0.0.1:18090/; echo; "
+                         "curl -sS --max-time 5 -o b2.html -w 'port=%{http_code}' -x \"$P\" http://127.0.0.1:18090/; echo"}),
+    ("finish", {"outcome": "completed", "summary": "B probed"}),
+]
+print('[provider]\nprovider = "mock"')
+for tool, args in steps:
+    inline = ", ".join(f"{k} = {json.dumps(v)}" for k, v in args.items())
+    print(f'[[provider.script]]\ntool = "{tool}"\nargs = {{ {inline} }}')
+print('[[provider.script]]\ntext = "done"')
+PYPROV
+  ( cd "$PW" && "$BEE" run --scenario "$PW/sub.scn.toml" --provider "$PW/sub.prov.toml" \
+      --out "$PW/sub.json" ) >"$PW/sub.log" 2>&1
+  while IFS='|' read -r c st note; do emit "$c" "$st" "$note"; done < <(python3 - "$PW/sub.json" "$PW/.bee/http/index.sqlite" 2>&1 <<'PYCHECK'
+import json, sqlite3, sys
+try:
+    t = json.load(open(sys.argv[1]))
+    calls = [c for turn in t["turns"] for c in turn.get("calls", [])]
+    tasks = [c for c in calls if c["call"]["name"] == "task"]
+    kids = [c.get("child") or {} for c in tasks]
+    def out(tr):
+        return "\n".join(c["result"]["content"] for turn in tr.get("turns", []) for c in turn.get("calls", []))
+    a, b = (kids + [{}, {}])[:2]
+    a_out, b_out = out(a.get("transcript") or {}), out(b.get("transcript") or {})
+    db = sqlite3.connect(f"file:{sys.argv[2]}?mode=ro", uri=True)
+    attr = {r[1]: r for r in db.execute(
+        "SELECT session_id, delegation_id, scope_id, parent_session FROM attribution")}
+    ta, tb = (tasks + [None, None])[0], (tasks + [None, None])[1]
+    ra = attr.get(ta["call"]["id"]) if ta else None
+    rb = attr.get(tb["call"]["id"]) if tb else None
+    count = lambda table, sid: db.execute(f"SELECT COUNT(*) FROM {table} WHERE session_id = ?", (sid,)).fetchone()[0]
+    parent = ra[3] if ra else None
+    bden = [e for e in (b.get("transcript") or {}).get("audit_trail", [])
+            if e["op"] == "connect" and e["decision"] == "denied"]
+    bref = db.execute("SELECT COUNT(*) FROM refusals WHERE session_id = ? AND kind = 'refused_bad_credential'",
+                      (rb[0] if rb else "",)).fetchone()[0]
+    checks = {
+        "delegations not refused": len(kids) == 2 and all((k.get("outcome") or {}).get("kind") == "completed" for k in kids),
+        "both enforced": all(k.get("enforced") is True for k in kids),
+        "A fetched through its proxy": "code=200" in a_out,
+        "A attributed to its scope and delegation": bool(ra) and ra[2] == a.get("scope_id"),
+        "B attributed to its scope and delegation": bool(rb) and rb[2] == b.get("scope_id"),
+        "A's exchange is A's": bool(ra) and count("exchanges", ra[0]) == 1,
+        "none on the parent": bool(parent) and count("exchanges", parent) == 0 and count("tunnels", parent) == 0,
+        "A's credential refused by B's proxy": "cred=407" in b_out and bref >= 1,
+        "parent's proxy port kernel-denied to B": "port=000" in b_out and bool(bden)
+            and all(e.get("scope_id") == b.get("scope_id") for e in bden),
+    }
+    bad = [k for k, v in checks.items() if not v]
+    note = f"A={a_out.strip()[:30]!r} B={b_out.strip()[:60]!r} attr={list(attr)} bden={[e['target'] for e in bden]}"
+    print(f"subagent-intercept-attributed|{'PASS' if not bad else 'FAIL'}|{'; '.join(bad) or 'ok'}: {note}")
+except Exception as e:
+    print(f"subagent-intercept-attributed|FAIL|could not judge: {e}")
+PYCHECK
+)
+  kill "$PA" "$P2" "$P3" 2>/dev/null
+  cp "$PW/hosts.bak" /etc/hosts
+  rm -rf "$PW"
+else
+  for c in $PS_CASES; do
+    emit "$c" FAIL "bee was not built with --features intercept (see test/vm/README.md)"
+  done
+fi
+
 rm -rf "$WORK"
 echo "SUMMARY|pass=$pass|fail=$fail"
 [ "$fail" -eq 0 ]

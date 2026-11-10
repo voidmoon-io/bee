@@ -22,7 +22,6 @@ pub mod rules;
 pub mod scope;
 
 use std::collections::HashMap;
-use std::net::IpAddr;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -50,7 +49,7 @@ const SEGMENT_HEADROOM: u64 = 1 << 20;
 
 type Outgoing = (FromWorker, Vec<Vec<u8>>);
 /// A name lookup waiting for the harness's answer.
-type ResolveWaiter = oneshot::Sender<Result<Vec<IpAddr>, String>>;
+type ResolveWaiter = oneshot::Sender<Result<scope::Resolution, String>>;
 
 /// State shared by every connection and control handler.
 pub struct Worker {
@@ -165,8 +164,9 @@ impl HostResolver for Worker {
     fn resolve(
         &self,
         host: &str,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<IpAddr>, String>> + Send + '_>>
-    {
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<scope::Resolution, String>> + Send + '_>,
+    > {
         let host = host.to_string();
         Box::pin(async move {
             let req_id = self.next_req.fetch_add(1, Ordering::Relaxed);
@@ -332,6 +332,7 @@ async fn control_loop<R: AsyncRead + Unpin>(
                 req_id,
                 addrs,
                 error,
+                admitted,
             } => {
                 if let Some(tx) = worker
                     .resolves
@@ -341,7 +342,7 @@ async fn control_loop<R: AsyncRead + Unpin>(
                 {
                     let _ = tx.send(match error {
                         Some(e) => Err(e),
-                        None => Ok(addrs),
+                        None => Ok(scope::Resolution { addrs, admitted }),
                     });
                 }
             }

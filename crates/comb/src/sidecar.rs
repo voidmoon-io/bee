@@ -79,6 +79,44 @@ pub struct InterceptorConfig {
     pub http_scope: HttpScope,
     pub enforcement: Enforcement,
     pub resolver: HarnessResolver,
+    /// Resolve-and-admit (026 R9): when set, every name the worker asks for is passed through it
+    /// after resolution, and the worker is told the answer was admitted. `None` keeps the
+    /// compile-time address set as the only one the worker connects to.
+    pub admit: Option<Arc<dyn Admit>>,
+    /// Who this worker records for, written once to the store (026 T051). `None` for a session's
+    /// own proxy.
+    pub attribution: Option<Attribution>,
+}
+
+/// Which subagent a proxy belongs to (026 T051). Every exchange, tunnel and refusal its worker
+/// records carries its `session_id`; this row maps that id to the subagent's scope and delegation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attribution {
+    /// The kernel scope the subagent's tools run in.
+    pub scope_id: String,
+    /// The parent's `task` call that started the delegation.
+    pub delegation_id: String,
+    /// The proxy session of the sandbox that delegated.
+    pub parent_session: String,
+    pub agent: String,
+}
+
+/// What [`Admit::admit`] did for one lookup.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AdmitOutcome {
+    /// Every address the kernel now holds for the name: what the worker is answered.
+    pub addrs: Vec<IpAddr>,
+    /// Addresses this lookup added. Non-empty means the proxy scope was reloaded.
+    pub added: Vec<IpAddr>,
+    /// Addresses dropped to stay within the per-host bound.
+    pub evicted: Vec<IpAddr>,
+}
+
+/// Admits resolved addresses into a proxy scope's kernel rules (026 R9). Called off the async
+/// runtime; it may block on a scope reload. `Err` refuses the lookup: a name the scope does not
+/// declare, or a reload that failed.
+pub trait Admit: Send + Sync {
+    fn admit(&self, host: &str, addrs: &[IpAddr]) -> Result<AdmitOutcome, String>;
 }
 
 /// Why an HTTP tool could not get an answer from the proxy.
@@ -187,13 +225,18 @@ impl Interceptor {
             .local_addr()
             .map_err(|e| format!("listener: {e}"))?
             .port();
-        let store = Store::open(&cfg.project_root, &cfg.session_id, &cfg.http_scope.limits)
+        let mut store = Store::open(&cfg.project_root, &cfg.session_id, &cfg.http_scope.limits)
             .map_err(|e| e.to_string())?;
         if store.is_read_only() {
             return Err(
                 "the .bee/http store was written by a newer bee; refusing to start interception"
                     .into(),
             );
+        }
+        if let Some(a) = &cfg.attribution {
+            store
+                .insert_attribution(a)
+                .map_err(|e| format!("exchange store attribution: {e}"))?;
         }
         let cfg_scope = cfg.http_scope.clone();
         let inner = Arc::new(Inner {
@@ -913,25 +956,54 @@ impl Interceptor {
             }
             FromWorker::Resolve { req_id, host } => {
                 let resolver = self.inner.cfg.resolver.clone();
+                let admit = self.inner.cfg.admit.clone();
                 let me = self.clone();
                 tokio::spawn(async move {
-                    let r = tokio::task::spawn_blocking(move || resolver(&host))
-                        .await
-                        .unwrap_or_else(|e| Err(e.to_string()));
-                    let (addrs, error) = match r {
-                        Ok(a) => (a, None),
-                        Err(e) => (Vec::new(), Some(e)),
-                    };
-                    let _ = me
-                        .write(
-                            &ToWorker::Resolved {
+                    let lookup = host.clone();
+                    let r = tokio::task::spawn_blocking(move || {
+                        let addrs = resolver(&lookup)?;
+                        match admit {
+                            // The reload happens here, before the answer: the worker connects
+                            // only once the kernel holds the address (026 R9).
+                            Some(a) => a.admit(&lookup, &addrs).map(Some),
+                            None => Ok(None),
+                        }
+                        .map(|o| (addrs, o))
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()));
+                    let reply = match r {
+                        Ok((addrs, None)) => ToWorker::Resolved {
+                            req_id,
+                            addrs,
+                            error: None,
+                            admitted: false,
+                        },
+                        Ok((_, Some(o))) => {
+                            if !o.added.is_empty() {
+                                if let Err(e) = me.with_store(|s| s.insert_admit(&host, &o)) {
+                                    me.inner
+                                        .notices
+                                        .lock()
+                                        .expect("notices lock")
+                                        .push(format!("exchange store: {e}"));
+                                }
+                            }
+                            ToWorker::Resolved {
                                 req_id,
-                                addrs,
-                                error,
-                            },
-                            &[],
-                        )
-                        .await;
+                                addrs: o.addrs,
+                                error: None,
+                                admitted: true,
+                            }
+                        }
+                        Err(e) => ToWorker::Resolved {
+                            req_id,
+                            addrs: Vec::new(),
+                            error: Some(e),
+                            admitted: false,
+                        },
+                    };
+                    let _ = me.write(&reply, &[]).await;
                 });
             }
             FromWorker::FuzzDone {

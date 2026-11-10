@@ -394,6 +394,10 @@ pub struct ToolDeps {
     /// The session's HTTP interception proxy (019). `None` means the HTTP tools refuse.
     #[cfg(feature = "intercept")]
     pub interceptor: Option<crate::intercept::sidecar::Interceptor>,
+    /// How a subagent of an intercepting session gets a proxy of its own (026 T058). Set with
+    /// [`interceptor`](Self::interceptor), and inherited by every child's dependencies.
+    #[cfg(feature = "intercept")]
+    pub child_proxies: Option<std::sync::Arc<crate::intercept::session::ChildProxies>>,
 }
 
 impl ToolDeps {

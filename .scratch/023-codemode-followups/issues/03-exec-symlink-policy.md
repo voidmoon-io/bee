@@ -1,6 +1,6 @@
 # Exec rules and symlinked binaries (`sh` → `dash`)
 
-Status: needs-triage
+Status: done
 
 Found: 2026-10-31, `kernel_codemode_shell_policy` VM case.
 
@@ -24,3 +24,17 @@ fixture works around this by allowing the canonical path.
 
 Recommendation: 3, optionally with 1 behind an explicit opt-in. Whichever is chosen,
 add a VM matrix case for a symlinked allowlist entry.
+
+## Resolution (2026-11-01)
+
+Implemented option 3 in `bee validate`, the policy diagnostic command; `bee check`
+only checks kernel support. Validation warns when an unpinned exec path differs
+from its canonical target, names that target and explains that explicitly allowing
+it also permits direct execution. Compiled permissions remain unchanged. Pinned
+rules do not warn. Failed canonicalization produces an inspection warning.
+
+Verification: host regression covers alias/canonical/pinned rules, unchanged
+compiled grants, and actual CLI stderr with successful validation. Userspace and
+CLI Clippy (`-D warnings`), formatting, four VM parser tests and shell syntax pass.
+The expanded BPF-LSM gate passed all 21 cases, including the symlink warning case
+which proves execution stays denied. See `specs/023-codemode/enforcement-verification.md`.

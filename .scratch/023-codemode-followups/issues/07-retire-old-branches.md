@@ -1,6 +1,6 @@
 # Retire the pre-port branches and local backups
 
-Status: ready-for-human
+Status: done
 
 #49 is merged, so this can be done now. `feat/023-codemode` (the merged branch) can go too.
 
@@ -14,3 +14,19 @@ Status: ready-for-human
   edits matter before `/tmp` is cleared.
 - Untracked `.scratch/artex-harness/`, `.scratch/tigerstyle-hardening/PR.md` and
   `VULN-FINDINGS-current.*` were restored in place and are still untracked.
+
+## Resolution (2026-11-01)
+
+Retired the three named local branches after preserving and verifying their tips:
+- `archive/023-codemode/fix/f001-reload-transactional`: `97c670dba2efbed8ca8bf87a8b3ba1e0c1377e56`
+- `archive/023-codemode/feat/codemode-batch-nesting`: `74643c4651a005c345f9b15172ea056312577cdf`
+- `archive/023-codemode/feat/023-codemode`: `c85f6ffe6697d9394d373ee03a6d38d121a8cf32`
+
+Moved the temporary backup into a durable archive:
+`/home/jg/.local/share/bee/archives/023-codemode/bee-scratch-backup-1793498479.tar.gz`.
+SHA-256: `7b235bc211f7003f545057023acb3b26312a872d781d1eaaaf048fd960d3447c`.
+Verified every archived file byte-for-byte before removing the temporary directory.
+13 files differ from current copies; preserved those historical notes and logs in
+this archive rather than overwriting newer work. Current untracked scratch files
+and vulnerability reports remain in place. Remote branches and other worktrees
+were not part of this cleanup.

@@ -66,6 +66,7 @@ fn prepare_episodes(
                     .compile(resolver)
                     .map_err(|e| format!("policy compile: {e}"))
             })
+            .and_then(crate::tools::exec::tool_scope)
             .and_then(|compiled| {
                 EnforcementPlan::prepare(&compiled, ScopeMode::Enforce)
                     .map_err(|e| format!("enforcement plan: {e}"))

@@ -1,0 +1,6 @@
+[provider]
+provider = "openai-compat"
+model = "claude-sonnet-5-5"
+base_url = "http://anthropic-proxy.ax-system.svc.cluster.local/v1"
+api_key_env = "BEE_API_KEY"
+max_tokens = 1024

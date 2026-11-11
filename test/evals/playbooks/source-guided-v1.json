@@ -1,0 +1,5 @@
+{
+  "id": "source-guided",
+  "version": "1",
+  "prompt": "Investigate using observed evidence. Establish readiness with a normal request. Trace untrusted input to the reachable authorization check or sensitive operation. Test a concrete bypass and a negative control. Compare response content, not only status. Separate unreachable suspicious code from demonstrated behavior. A setup failure cannot establish a vulnerability. Limit conclusions to this fixture."
+}

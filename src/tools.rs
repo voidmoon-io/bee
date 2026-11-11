@@ -1,7 +1,8 @@
 //! The tool trait, its result type, and the name→tool registry (contracts/tool-contracts.md).
 //!
-//! Every tool executes as a **sandboxed child inside the episode's bee scope** (via [`Sandbox`]) and
-//! returns a [`ToolResult`]. A tool MUST NOT panic on bad arguments — it returns an error result
+//! File and process tools execute as sandboxed children inside the episode's bee scope.
+//! The operator-enabled decision tool makes host-side inference calls to fixed provider endpoints.
+//! Tools return a [`ToolResult`]. A tool MUST NOT panic on bad arguments — it returns an error result
 //! (FR-016). Concrete tools (`bash`, `read_file`, `write_file`, `list_directory`) land in T014/T015.
 
 use std::collections::BTreeMap;
@@ -13,7 +14,10 @@ use crate::sandbox::Sandbox;
 
 pub mod bash;
 pub mod ctf;
+#[cfg(feature = "decisions")]
+pub mod decision;
 pub mod exec;
+pub mod feedback;
 pub mod files;
 pub mod finish;
 #[cfg(feature = "source")]
@@ -55,9 +59,12 @@ use crate::render_spec::{EffectSpec, PanelOp, RenderSpec, RenderTarget};
 /// tools (`submit_flag`, `give_up`) are **not** here — a scenario opts into them via its `tools`
 /// list when `mode = "ctf"`.
 pub const DEFAULT_TOOLS: &[&str] = &[
+    "feedback",
     "bash",
     "read_file",
     "write_file",
+    "edit_file",
+    "ensure_line",
     "list_directory",
     "search",
 ];
@@ -133,6 +140,7 @@ pub const HTTP_TOOLS: &[&str] = &[
 pub fn is_known_tool(name: &str) -> bool {
     DEFAULT_TOOLS.contains(&name)
         || CTF_TOOLS.contains(&name)
+        || name == "decision_evaluate"
         || RUN_TOOLS.contains(&name)
         || RENDER_TOOLS.contains(&name)
         || SKILL_TOOLS.contains(&name)
@@ -148,6 +156,7 @@ pub fn is_known_tool(name: &str) -> bool {
 /// phases, alongside the tools themselves.
 pub fn sec_tool_family(name: &str) -> Option<&'static str> {
     match name {
+        "decision_evaluate" => Some("decisions"),
         "ast_grep" => Some("astgrep"),
         "git_log" => Some("gitlog"),
         "cvss" => Some("cvss"),
@@ -752,9 +761,13 @@ pub fn registry_for(enabled: &[String], flag: Option<&str>) -> ToolRegistry {
 )]
 fn build(name: &str, deps: &ToolDeps) -> Result<Option<Box<dyn Tool>>, UnknownTool> {
     let tool: Box<dyn Tool> = match name {
+        #[cfg(feature = "decisions")]
+        "decision_evaluate" => Box::new(decision::DecisionTool::from_env()),
         "bash" => Box::new(bash::Bash),
         "read_file" => Box::new(files::ReadFile),
         "write_file" => Box::new(files::WriteFile),
+        "edit_file" => Box::new(files::EditFile),
+        "ensure_line" => Box::new(files::EnsureLine),
         "list_directory" => Box::new(files::ListDirectory),
         "submit_flag" => match &deps.ctf_flag {
             Some(value) => Box::new(ctf::SubmitFlag::new(value.clone())),
@@ -762,6 +775,7 @@ fn build(name: &str, deps: &ToolDeps) -> Result<Option<Box<dyn Tool>>, UnknownTo
         },
         "give_up" => Box::new(ctf::GiveUp),
         "finish" => Box::new(finish::Finish),
+        "feedback" => Box::new(feedback::Feedback),
         "render" => Box::new(render::RenderTool::new()),
         "search" => Box::new(search::Search),
         "skill" => match &deps.skills {

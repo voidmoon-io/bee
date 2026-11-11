@@ -9,14 +9,14 @@ Design and verification: [`specs/023-codemode/`](../../specs/023-codemode/), esp
 | --- | --- | --- | --- |
 | 01 | [Land PR #49](issues/01-land-pr-49.md) | done (merged `f59e240`) | — |
 | 02 | [Overlap batch calls under kernel enforcement](issues/02-enforced-batch-overlap.md) | done | L |
-| 03 | [Exec rules and symlinked binaries (`sh` → `dash`)](issues/03-exec-symlink-policy.md) | needs-triage | S–M |
+| 03 | [Exec rules and symlinked binaries (`sh` → `dash`)](issues/03-exec-symlink-policy.md) | done | S–M |
 | 04 | [Indent nested calls by depth in the TUI](issues/04-tui-nesting-depth.md) | done | S |
-| 05 | [Validate codemode with a real model](issues/05-real-model-validation.md) | ready-for-human | M |
-| 06 | [Widen the guest catalog: MCP and terminal tools](issues/06-catalog-mcp-terminal.md) | needs-triage | M |
-| 07 | [Retire the pre-port branches and local backups](issues/07-retire-old-branches.md) | ready-for-human | S |
+| 05 | [Validate codemode with a real model](issues/05-real-model-validation.md) | done | M |
+| 06 | [User-configured MCP tools in durable codemode](issues/06-catalog-mcp-terminal.md) | ready-for-agent | M |
+| 07 | [Retire the pre-port branches and local backups](issues/07-retire-old-branches.md) | done | S |
+| 08 | [Imported module checkpoint error](issues/08-imported-module-checkpoint.md) | needs-triage | S–M |
 
-02 and 04 are implemented on the PR branch. 03 remains independent. 05 needs
-provider keys and spend. 06 needs a contract decision before any code. 07 can start now.
+02, 03 and 04 are completed locally. 05 passed real-model validation after a description clarification. 06 has an agreed generic MCP contract and is ready for implementation. 07 is complete (archive tags and a verified durable backup).
 
 ## What is already done (not tracked here)
 

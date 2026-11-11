@@ -26,6 +26,8 @@ pub const DEFAULT_KEY_VARS: &[&str] = &[
     "OPENAI_API_KEY",
     "OPENROUTER_API_KEY",
     "GROQ_API_KEY",
+    "TYPESAFE_API_KEY",
+    "CLOUDFLARE_API_TOKEN",
 ];
 
 /// The only environment variables a tool child inherits. Everything else is cleared.
@@ -464,6 +466,7 @@ impl EnforcedSandbox {
         if let Some(b) = &self.ca_bundle {
             compiled.fs.push(bee_core::FsPrimitive::read_grant(b));
         }
+        let compiled = crate::tools::exec::tool_scope(compiled)?;
         let plan = EnforcementPlan::prepare(&compiled, ScopeMode::Enforce)
             .map_err(|e| format!("reload plan: {e}"))?;
         if let Some(why) = self.poisoned() {
@@ -1270,6 +1273,8 @@ mod tests {
         for bad in [
             "ANTHROPIC_API_KEY",
             "OPENAI_API_KEY",
+            "TYPESAFE_API_KEY",
+            "CLOUDFLARE_API_TOKEN",
             "LD_PRELOAD",
             "LD_LIBRARY_PATH",
         ] {

@@ -1,0 +1,5 @@
+{
+  "id": "endpoint-guided",
+  "version": "1",
+  "prompt": "Investigate using observed evidence. Establish readiness with a normal owner read. Test the cross-user read, then a missing-credential negative control. Compare returned content, not just status. Separate observed behavior from assumptions. A setup failure cannot establish a vulnerability. Limit conclusions to this fixture."
+}

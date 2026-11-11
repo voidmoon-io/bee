@@ -1,0 +1,105 @@
+{
+  "version": 1,
+  "splits": {
+    "development": [
+      {
+        "id": "16df7ef12b579b72",
+        "family": "access",
+        "variant": "vulnerable",
+        "split": "development",
+        "expected": "confirmed",
+        "source_sha256": "258e68e7501b9308b12f01eb7cc3e3c1d4b809bc18d1cf55ecc97028882591bd"
+      },
+      {
+        "id": "b59861b245293b82",
+        "family": "access",
+        "variant": "patched",
+        "split": "development",
+        "expected": "refuted",
+        "source_sha256": "23b57cd2f226d86825b93817383df7a46dec5e2b36fe20b47fa51fac19113496"
+      },
+      {
+        "id": "aa2dbb81a33b5d67",
+        "family": "access",
+        "variant": "false_lead",
+        "split": "development",
+        "expected": "refuted",
+        "source_sha256": "6dada29f334598ff8555b7df049b6e8ccbc07db80d7766ed6e7a52d5f93ee8d0"
+      },
+      {
+        "id": "d9393e2b3e72790b",
+        "family": "access",
+        "variant": "unavailable",
+        "split": "development",
+        "expected": "blocked",
+        "source_sha256": "bf1e63a4382d14f2209d462f396d344e075065fc4da794b2a6b18f48149785a0"
+      },
+      {
+        "id": "c96104b7cac7878c",
+        "family": "containment",
+        "variant": "vulnerable",
+        "split": "development",
+        "expected": "confirmed",
+        "source_sha256": "cd51e4c17b889e451fb98e45d606b40958fd6fa0c4d48d1c851fe967c6e0f080"
+      },
+      {
+        "id": "dd6b67a1923e125b",
+        "family": "containment",
+        "variant": "patched",
+        "split": "development",
+        "expected": "refuted",
+        "source_sha256": "82e12b65b156f76d4a66c8392682c6a0ec313c2f3ee038875d7a47c07055df7a"
+      },
+      {
+        "id": "236111b12ada6094",
+        "family": "containment",
+        "variant": "false_lead",
+        "split": "development",
+        "expected": "refuted",
+        "source_sha256": "97c8cf06d095fa3c6e4ce6f150fd373dad9573ac3c654cd7e9adfe0687e41bbb"
+      },
+      {
+        "id": "ecb39d39bab1b56e",
+        "family": "containment",
+        "variant": "unavailable",
+        "split": "development",
+        "expected": "blocked",
+        "source_sha256": "f1951d62d341053f725fe84549b98eb6f36d30ffb2cfe8c18e92fc6d0fd89576"
+      }
+    ],
+    "holdout": [
+      {
+        "id": "464726082fca60f3",
+        "family": "arguments",
+        "variant": "vulnerable",
+        "split": "holdout",
+        "expected": "confirmed",
+        "source_sha256": "184115f8f3be36a2669d32fe52ed168123c05d69dd59da5645f1824e3ed67a16"
+      },
+      {
+        "id": "c1c0b0ac69188052",
+        "family": "arguments",
+        "variant": "patched",
+        "split": "holdout",
+        "expected": "refuted",
+        "source_sha256": "7e84795c1fd9c02b56dffe624f703ace3e80b386e0e99d76d130a0cd02eca9ab"
+      },
+      {
+        "id": "22c42a50bf6bd6b3",
+        "family": "arguments",
+        "variant": "false_lead",
+        "split": "holdout",
+        "expected": "refuted",
+        "source_sha256": "17a40cff83bcd30d2003494dc8e1f4b6241a30460e065ee2963f195f420646b7"
+      },
+      {
+        "id": "aa8262d578ff7002",
+        "family": "arguments",
+        "variant": "unavailable",
+        "split": "holdout",
+        "expected": "blocked",
+        "source_sha256": "93c845a034dea3fdf6f1df23444658b8a29dbc1726dff882fdcf40ae5b6b9634"
+      }
+    ]
+  }
+}

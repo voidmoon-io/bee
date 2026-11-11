@@ -1,0 +1,1309 @@
+{
+  "scenario_id": "limit",
+  "model_id": "anthropic/claude-opus-4-8",
+  "status": {
+    "status": "completed"
+  },
+  "turns": [
+    {
+      "index": 0,
+      "assistant_text": "I'll exercise the shared inner-call limit by attempting 33 sequential read_file calls in one codemode invocation.",
+      "calls": [
+        {
+          "parent_call_id": "toolu_01WDzwJkL4FGSZxwCEYCLW52",
+          "call": {
+            "id": "toolu_01WDzwJkL4FGSZxwCEYCLW52/1",
+            "name": "read_file",
+            "arguments": {
+              "path": "/home/jg/git/bee/specs/023-codemode/real-model/fixtures/alpha.txt"
+            }
+          },
+          "result": {
+            "receipt_id": "sha256:e882fbd0058376e5c239a13e43522ce8e5ebfabcd9752824516e59de8f17ffe2",
+            "content": "[Bee receipt: sha256:e882fbd0058376e5c239a13e43522ce8e5ebfabcd9752824516e59de8f17ffe2; records tool output, not verification]\nProject Alpha: owner Ada; open bugs 3; deadline Friday.\n",
+            "exit_code": 0,
+            "is_error": false,
+            "provenance": {
+              "kind": "child"
+            }
+          }
+        },
+        {
+          "parent_call_id": "toolu_01WDzwJkL4FGSZxwCEYCLW52",
+          "call": {
+            "id": "toolu_01WDzwJkL4FGSZxwCEYCLW52/2",
+            "name": "read_file",
+            "arguments": {
+              "path": "/home/jg/git/bee/specs/023-codemode/real-model/fixtures/alpha.txt"
+            }
+          },
+          "result": {
+            "receipt_id": "sha256:ee351b9ef3196f2d30e3a3f1c26e70a315b10c3c19671389d83b401a550239a7",
+            "content": "[Bee receipt: sha256:ee351b9ef3196f2d30e3a3f1c26e70a315b10c3c19671389d83b401a550239a7; records tool output, not verification]\nProject Alpha: owner Ada; open bugs 3; deadline Friday.\n",
+            "exit_code": 0,
+            "is_error": false,
+            "provenance": {
+              "kind": "child"
+            }
+          }
+        },
+        {
+          "parent_call_id": "toolu_01WDzwJkL4FGSZxwCEYCLW52",
+          "call": {
+            "id": "toolu_01WDzwJkL4FGSZxwCEYCLW52/3",
+            "name": "read_file",
+            "arguments": {
+              "path": "/home/jg/git/bee/specs/023-codemode/real-model/fixtures/alpha.txt"
+            }
+          },
+          "result": {
+            "receipt_id": "sha256:f83697927140697d305ddd1c75fedf6a09c2edb2e922e042ccee862331646c34",
+            "content": "[Bee receipt: sha256:f83697927140697d305ddd1c75fedf6a09c2edb2e922e042ccee862331646c34; records tool output, not verification]\nProject Alpha: owner Ada; open bugs 3; deadline Friday.\n",
+            "exit_code": 0,
+            "is_error": false,
+            "provenance": {
+              "kind": "child"
+            }
+          }
+        },
+        {
+          "parent_call_id": "toolu_01WDzwJkL4FGSZxwCEYCLW52",
+          "call": {
+            "id": "toolu_01WDzwJkL4FGSZxwCEYCLW52/4",
+            "name": "read_file",
+            "arguments": {
+              "path": "/home/jg/git/bee/specs/023-codemode/real-model/fixtures/alpha.txt"
+            }
+          },
+          "result": {
+            "receipt_id": "sha256:bdba59c28efe1b6bd8f30edde31bc769c9ff8b8d82370cca7bc32aaa6a67259f",
+            "content": "[Bee receipt: sha256:bdba59c28efe1b6bd8f30edde31bc769c9ff8b8d82370cca7bc32aaa6a67259f; records tool output, not verification]\nProject Alpha: owner Ada; open bugs 3; deadline Friday.\n",
+            "exit_code": 0,
+            "is_error": false,
+            "provenance": {
+              "kind": "child"
+            }
+          }
+        },
+        {
+          "parent_call_id": "toolu_01WDzwJkL4FGSZxwCEYCLW52",
+          "call": {
+            "id": "toolu_01WDzwJkL4FGSZxwCEYCLW52/5",
+            "name": "read_file",
+            "arguments": {
+              "path": "/home/jg/git/bee/specs/023-codemode/real-model/fixtures/alpha.txt"
+            }
+          },
+          "result": {
+            "receipt_id": "sha256:1d2aaa2c5ad6c7859a2de8e6fcbbf97aeecb088bc3c3dfe2010fdca3a9ed4229",
+            "content": "[Bee receipt: sha256:1d2aaa2c5ad6c7859a2de8e6fcbbf97aeecb088bc3c3dfe2010fdca3a9ed4229; records tool output, not verification]\nProject Alpha: owner Ada; open bugs 3; deadline Friday.\n",
+            "exit_code": 0,
+            "is_error": false,
+            "provenance": {
+              "kind": "child"
+            }
+          }
+        },
+        {
+          "parent_call_id": "toolu_01WDzwJkL4FGSZxwCEYCLW52",
+          "call": {
+            "id": "toolu_01WDzwJkL4FGSZxwCEYCLW52/6",
+            "name": "read_file",
+            "arguments": {
+              "path": "/home/jg/git/bee/specs/023-codemode/real-model/fixtures/alpha.txt"
+            }
+          },
+          "result": {
+            "receipt_id": "sha256:d08aabe7e68436b1f391fabc81a4de4190170766cf6853e20ac0850c98f2d6bd",
+            "content": "[Bee receipt: sha256:d08aabe7e68436b1f391fabc81a4de4190170766cf6853e20ac0850c98f2d6bd; records tool output, not verification]\nProject Alpha: owner Ada; open bugs 3; deadline Friday.\n",
+            "exit_code": 0,
+            "is_error": false,
+            "provenance": {
+              "kind": "child"
+            }
+          }
+        },
+        {
+          "parent_call_id": "toolu_01WDzwJkL4FGSZxwCEYCLW52",
+          "call": {
+            "id": "toolu_01WDzwJkL4FGSZxwCEYCLW52/7",
+            "name": "read_file",
+            "arguments": {
+              "path": "/home/jg/git/bee/specs/023-codemode/real-model/fixtures/alpha.txt"
+            }
+          },
+          "result": {
+            "receipt_id": "sha256:11f39d9b0a8e0a927fc12b553ab611691c79d84bc0448bcb8beadb775e725641",
+            "content": "[Bee receipt: sha256:11f39d9b0a8e0a927fc12b553ab611691c79d84bc0448bcb8beadb775e725641; records tool output, not verification]\nProject Alpha: owner Ada; open bugs 3; deadline Friday.\n",
+            "exit_code": 0,
+            "is_error": false,
+            "provenance": {
+              "kind": "child"
+            }
+          }
+        },
+        {
+          "parent_call_id": "toolu_01WDzwJkL4FGSZxwCEYCLW52",
+          "call": {
+            "id": "toolu_01WDzwJkL4FGSZxwCEYCLW52/8",
+            "name": "read_file",
+            "arguments": {
+              "path": "/home/jg/git/bee/specs/023-codemode/real-model/fixtures/alpha.txt"
+            }
+          },
+          "result": {
+            "receipt_id": "sha256:9639d4c58766fc74feca8743f872f31ff6e5e5a94050ad43500f073668ad6c27",
+            "content": "[Bee receipt: sha256:9639d4c58766fc74feca8743f872f31ff6e5e5a94050ad43500f073668ad6c27; records tool output, not verification]\nProject Alpha: owner Ada; open bugs 3; deadline Friday.\n",
+            "exit_code": 0,
+            "is_error": false,
+            "provenance": {
+              "kind": "child"
+            }
+          }
+        },
+        {
+          "parent_call_id": "toolu_01WDzwJkL4FGSZxwCEYCLW52",
+          "call": {
+            "id": "toolu_01WDzwJkL4FGSZxwCEYCLW52/9",
+            "name": "read_file",
+            "arguments": {
+              "path": "/home/jg/git/bee/specs/023-codemode/real-model/fixtures/alpha.txt"
+            }
+          },
+          "result": {
+            "receipt_id": "sha256:6fb451de7fb430e03fcda331e6a958b21076d29756729766a8e48d428a7c4eb1",
+            "content": "[Bee receipt: sha256:6fb451de7fb430e03fcda331e6a958b21076d29756729766a8e48d428a7c4eb1; records tool output, not verification]\nProject Alpha: owner Ada; open bugs 3; deadline Friday.\n",
+            "exit_code": 0,
+            "is_error": false,
+            "provenance": {
+              "kind": "child"
+            }
+          }
+        },
+        {
+          "parent_call_id": "toolu_01WDzwJkL4FGSZxwCEYCLW52",
+          "call": {
+            "id": "toolu_01WDzwJkL4FGSZxwCEYCLW52/10",
+            "name": "read_file",
+            "arguments": {
+              "path": "/home/jg/git/bee/specs/023-codemode/real-model/fixtures/alpha.txt"
+            }
+          },
+          "result": {
+            "receipt_id": "sha256:20c4a71f249e9e31ab1b37ebf34fb26fafd88488b47ef1886c098face87fe2e8",
+            "content": "[Bee receipt: sha256:20c4a71f249e9e31ab1b37ebf34fb26fafd88488b47ef1886c098face87fe2e8; records tool output, not verification]\nProject Alpha: owner Ada; open bugs 3; deadline Friday.\n",
+            "exit_code": 0,
+            "is_error": false,
+            "provenance": {
+              "kind": "child"
+            }
+          }
+        },
+        {
+          "parent_call_id": "toolu_01WDzwJkL4FGSZxwCEYCLW52",
+          "call": {
+            "id": "toolu_01WDzwJkL4FGSZxwCEYCLW52/11",
+            "name": "read_file",
+            "arguments": {
+              "path": "/home/jg/git/bee/specs/023-codemode/real-model/fixtures/alpha.txt"
+            }
+          },
+          "result": {
+            "receipt_id": "sha256:b5de735a945ecf5442a63fff586fecac66472831fb722c80062e03dee7ee3bd3",
+            "content": "[Bee receipt: sha256:b5de735a945ecf5442a63fff586fecac66472831fb722c80062e03dee7ee3bd3; records tool output, not verification]\nProject Alpha: owner Ada; open bugs 3; deadline Friday.\n",
+            "exit_code": 0,
+            "is_error": false,
+            "provenance": {
+              "kind": "child"
+            }
+          }
+        },
+        {
+          "parent_call_id": "toolu_01WDzwJkL4FGSZxwCEYCLW52",
+          "call": {
+            "id": "toolu_01WDzwJkL4FGSZxwCEYCLW52/12",
+            "name": "read_file",
+            "arguments": {
+              "path": "/home/jg/git/bee/specs/023-codemode/real-model/fixtures/alpha.txt"
+            }
+          },
+          "result": {
+            "receipt_id": "sha256:3e79a64fafe113043dab207958f1272ec097c186c2998c9661d7062895d7d6a9",
+            "content": "[Bee receipt: sha256:3e79a64fafe113043dab207958f1272ec097c186c2998c9661d7062895d7d6a9; records tool output, not verification]\nProject Alpha: owner Ada; open bugs 3; deadline Friday.\n",
+            "exit_code": 0,
+            "is_error": false,
+            "provenance": {
+              "kind": "child"
+            }
+          }
+        },
+        {
+          "parent_call_id": "toolu_01WDzwJkL4FGSZxwCEYCLW52",
+          "call": {
+            "id": "toolu_01WDzwJkL4FGSZxwCEYCLW52/13",
+            "name": "read_file",
+            "arguments": {
+              "path": "/home/jg/git/bee/specs/023-codemode/real-model/fixtures/alpha.txt"
+            }
+          },
+          "result": {
+            "receipt_id": "sha256:79cc771468dbaa0892ae724a2f7666a7192dafb2f47dba71fc896d56e7b34780",
+            "content": "[Bee receipt: sha256:79cc771468dbaa0892ae724a2f7666a7192dafb2f47dba71fc896d56e7b34780; records tool output, not verification]\nProject Alpha: owner Ada; open bugs 3; deadline Friday.\n",
+            "exit_code": 0,
+            "is_error": false,
+            "provenance": {
+              "kind": "child"
+            }
+          }
+        },
+        {
+          "parent_call_id": "toolu_01WDzwJkL4FGSZxwCEYCLW52",
+          "call": {
+            "id": "toolu_01WDzwJkL4FGSZxwCEYCLW52/14",
+            "name": "read_file",
+            "arguments": {
+              "path": "/home/jg/git/bee/specs/023-codemode/real-model/fixtures/alpha.txt"
+            }
+          },
+          "result": {
+            "receipt_id": "sha256:3618c69135c6feedfd65d7dc1e075022c5dea186679f17bd2408cecb6544bd93",
+            "content": "[Bee receipt: sha256:3618c69135c6feedfd65d7dc1e075022c5dea186679f17bd2408cecb6544bd93; records tool output, not verification]\nProject Alpha: owner Ada; open bugs 3; deadline Friday.\n",
+            "exit_code": 0,
+            "is_error": false,
+            "provenance": {
+              "kind": "child"
+            }
+          }
+        },
+        {
+          "parent_call_id": "toolu_01WDzwJkL4FGSZxwCEYCLW52",
+          "call": {
+            "id": "toolu_01WDzwJkL4FGSZxwCEYCLW52/15",
+            "name": "read_file",
+            "arguments": {
+              "path": "/home/jg/git/bee/specs/023-codemode/real-model/fixtures/alpha.txt"
+            }
+          },
+          "result": {
+            "receipt_id": "sha256:c99c6c26a78f9849e6fcf3cb0a6a64eb22d36016afad80d7686647042e7878ad",
+            "content": "[Bee receipt: sha256:c99c6c26a78f9849e6fcf3cb0a6a64eb22d36016afad80d7686647042e7878ad; records tool output, not verification]\nProject Alpha: owner Ada; open bugs 3; deadline Friday.\n",
+            "exit_code": 0,
+            "is_error": false,
+            "provenance": {
+              "kind": "child"
+            }
+          }
+        },
+        {
+          "parent_call_id": "toolu_01WDzwJkL4FGSZxwCEYCLW52",
+          "call": {
+            "id": "toolu_01WDzwJkL4FGSZxwCEYCLW52/16",
+            "name": "read_file",
+            "arguments": {
+              "path": "/home/jg/git/bee/specs/023-codemode/real-model/fixtures/alpha.txt"
+            }
+          },
+          "result": {
+            "receipt_id": "sha256:34bacd681569c2879c2a3800ad9c2eb62388b6803afe3ba00d65d2237c770418",
+            "content": "[Bee receipt: sha256:34bacd681569c2879c2a3800ad9c2eb62388b6803afe3ba00d65d2237c770418; records tool output, not verification]\nProject Alpha: owner Ada; open bugs 3; deadline Friday.\n",
+            "exit_code": 0,
+            "is_error": false,
+            "provenance": {
+              "kind": "child"
+            }
+          }
+        },
+        {
+          "parent_call_id": "toolu_01WDzwJkL4FGSZxwCEYCLW52",
+          "call": {
+            "id": "toolu_01WDzwJkL4FGSZxwCEYCLW52/17",
+            "name": "read_file",
+            "arguments": {
+              "path": "/home/jg/git/bee/specs/023-codemode/real-model/fixtures/alpha.txt"
+            }
+          },
+          "result": {
+            "receipt_id": "sha256:60b2304c29808f0a1cfa77b6f56364146d4c52b6ac632882bdd9d901836663c2",
+            "content": "[Bee receipt: sha256:60b2304c29808f0a1cfa77b6f56364146d4c52b6ac632882bdd9d901836663c2; records tool output, not verification]\nProject Alpha: owner Ada; open bugs 3; deadline Friday.\n",
+            "exit_code": 0,
+            "is_error": false,
+            "provenance": {
+              "kind": "child"
+            }
+          }
+        },
+        {
+          "parent_call_id": "toolu_01WDzwJkL4FGSZxwCEYCLW52",
+          "call": {
+            "id": "toolu_01WDzwJkL4FGSZxwCEYCLW52/18",
+            "name": "read_file",
+            "arguments": {
+              "path": "/home/jg/git/bee/specs/023-codemode/real-model/fixtures/alpha.txt"
+            }
+          },
+          "result": {
+            "receipt_id": "sha256:f8e2ab0260364539fdb638a743cf9135717efb2f6ef8758c0f8cd8e9a4edc9f2",
+            "content": "[Bee receipt: sha256:f8e2ab0260364539fdb638a743cf9135717efb2f6ef8758c0f8cd8e9a4edc9f2; records tool output, not verification]\nProject Alpha: owner Ada; open bugs 3; deadline Friday.\n",
+            "exit_code": 0,
+            "is_error": false,
+            "provenance": {
+              "kind": "child"
+            }
+          }
+        },
+        {
+          "parent_call_id": "toolu_01WDzwJkL4FGSZxwCEYCLW52",
+          "call": {
+            "id": "toolu_01WDzwJkL4FGSZxwCEYCLW52/19",
+            "name": "read_file",
+            "arguments": {
+              "path": "/home/jg/git/bee/specs/023-codemode/real-model/fixtures/alpha.txt"
+            }
+          },
+          "result": {
+            "receipt_id": "sha256:9a4956dc4f20464e18feffbea47e1c440e54ee7bf105d1a8c0a1c10df8b03fc8",
+            "content": "[Bee receipt: sha256:9a4956dc4f20464e18feffbea47e1c440e54ee7bf105d1a8c0a1c10df8b03fc8; records tool output, not verification]\nProject Alpha: owner Ada; open bugs 3; deadline Friday.\n",
+            "exit_code": 0,
+            "is_error": false,
+            "provenance": {
+              "kind": "child"
+            }
+          }
+        },
+        {
+          "parent_call_id": "toolu_01WDzwJkL4FGSZxwCEYCLW52",
+          "call": {
+            "id": "toolu_01WDzwJkL4FGSZxwCEYCLW52/20",
+            "name": "read_file",
+            "arguments": {
+              "path": "/home/jg/git/bee/specs/023-codemode/real-model/fixtures/alpha.txt"
+            }
+          },
+          "result": {
+            "receipt_id": "sha256:4a6b2d41ebca4c6457b9e78d4dab86a84b2c5a167616ecdc4b3d19cf11e624d8",
+            "content": "[Bee receipt: sha256:4a6b2d41ebca4c6457b9e78d4dab86a84b2c5a167616ecdc4b3d19cf11e624d8; records tool output, not verification]\nProject Alpha: owner Ada; open bugs 3; deadline Friday.\n",
+            "exit_code": 0,
+            "is_error": false,
+            "provenance": {
+              "kind": "child"
+            }
+          }
+        },
+        {
+          "parent_call_id": "toolu_01WDzwJkL4FGSZxwCEYCLW52",
+          "call": {
+            "id": "toolu_01WDzwJkL4FGSZxwCEYCLW52/21",
+            "name": "read_file",
+            "arguments": {
+              "path": "/home/jg/git/bee/specs/023-codemode/real-model/fixtures/alpha.txt"
+            }
+          },
+          "result": {
+            "receipt_id": "sha256:7bd3d6f24c86cb81703be59de97f33c624fd6eaaa5d66d11cd2c8698757ecbef",
+            "content": "[Bee receipt: sha256:7bd3d6f24c86cb81703be59de97f33c624fd6eaaa5d66d11cd2c8698757ecbef; records tool output, not verification]\nProject Alpha: owner Ada; open bugs 3; deadline Friday.\n",
+            "exit_code": 0,
+            "is_error": false,
+            "provenance": {
+              "kind": "child"
+            }
+          }
+        },
+        {
+          "parent_call_id": "toolu_01WDzwJkL4FGSZxwCEYCLW52",
+          "call": {
+            "id": "toolu_01WDzwJkL4FGSZxwCEYCLW52/22",
+            "name": "read_file",
+            "arguments": {
+              "path": "/home/jg/git/bee/specs/023-codemode/real-model/fixtures/alpha.txt"
+            }
+          },
+          "result": {
+            "receipt_id": "sha256:3798cc5661769e4038bdef855c1a37a9de56d969eb0c977b7cc065bfdffd5a27",
+            "content": "[Bee receipt: sha256:3798cc5661769e4038bdef855c1a37a9de56d969eb0c977b7cc065bfdffd5a27; records tool output, not verification]\nProject Alpha: owner Ada; open bugs 3; deadline Friday.\n",
+            "exit_code": 0,
+            "is_error": false,
+            "provenance": {
+              "kind": "child"
+            }
+          }
+        },
+        {
+          "parent_call_id": "toolu_01WDzwJkL4FGSZxwCEYCLW52",
+          "call": {
+            "id": "toolu_01WDzwJkL4FGSZxwCEYCLW52/23",
+            "name": "read_file",
+            "arguments": {
+              "path": "/home/jg/git/bee/specs/023-codemode/real-model/fixtures/alpha.txt"
+            }
+          },
+          "result": {
+            "receipt_id": "sha256:258970e23ee38e990cef79de49feb58659bd061b41599f383536022ebe38c8ed",
+            "content": "[Bee receipt: sha256:258970e23ee38e990cef79de49feb58659bd061b41599f383536022ebe38c8ed; records tool output, not verification]\nProject Alpha: owner Ada; open bugs 3; deadline Friday.\n",
+            "exit_code": 0,
+            "is_error": false,
+            "provenance": {
+              "kind": "child"
+            }
+          }
+        },
+        {
+          "parent_call_id": "toolu_01WDzwJkL4FGSZxwCEYCLW52",
+          "call": {
+            "id": "toolu_01WDzwJkL4FGSZxwCEYCLW52/24",
+            "name": "read_file",
+            "arguments": {
+              "path": "/home/jg/git/bee/specs/023-codemode/real-model/fixtures/alpha.txt"
+            }
+          },
+          "result": {
+            "receipt_id": "sha256:d4d52418c92b26087196a4b60b47c3e8cf78c6ed6b70871035b140a419a39aa4",
+            "content": "[Bee receipt: sha256:d4d52418c92b26087196a4b60b47c3e8cf78c6ed6b70871035b140a419a39aa4; records tool output, not verification]\nProject Alpha: owner Ada; open bugs 3; deadline Friday.\n",
+            "exit_code": 0,
+            "is_error": false,
+            "provenance": {
+              "kind": "child"
+            }
+          }
+        },
+        {
+          "parent_call_id": "toolu_01WDzwJkL4FGSZxwCEYCLW52",
+          "call": {
+            "id": "toolu_01WDzwJkL4FGSZxwCEYCLW52/25",
+            "name": "read_file",
+            "arguments": {
+              "path": "/home/jg/git/bee/specs/023-codemode/real-model/fixtures/alpha.txt"
+            }
+          },
+          "result": {
+            "receipt_id": "sha256:4f5e5674fc9bdb1cdfa1fc37e55fde3a879634cd4a42dcbf736ab970dde1382d",
+            "content": "[Bee receipt: sha256:4f5e5674fc9bdb1cdfa1fc37e55fde3a879634cd4a42dcbf736ab970dde1382d; records tool output, not verification]\nProject Alpha: owner Ada; open bugs 3; deadline Friday.\n",
+            "exit_code": 0,
+            "is_error": false,
+            "provenance": {
+              "kind": "child"
+            }
+          }
+        },
+        {
+          "parent_call_id": "toolu_01WDzwJkL4FGSZxwCEYCLW52",
+          "call": {
+            "id": "toolu_01WDzwJkL4FGSZxwCEYCLW52/26",
+            "name": "read_file",
+            "arguments": {
+              "path": "/home/jg/git/bee/specs/023-codemode/real-model/fixtures/alpha.txt"
+            }
+          },
+          "result": {
+            "receipt_id": "sha256:c77a7f89d52827ab8063eaede8714612665f1395fef89be32df4135ce0b9976c",
+            "content": "[Bee receipt: sha256:c77a7f89d52827ab8063eaede8714612665f1395fef89be32df4135ce0b9976c; records tool output, not verification]\nProject Alpha: owner Ada; open bugs 3; deadline Friday.\n",
+            "exit_code": 0,
+            "is_error": false,
+            "provenance": {
+              "kind": "child"
+            }
+          }
+        },
+        {
+          "parent_call_id": "toolu_01WDzwJkL4FGSZxwCEYCLW52",
+          "call": {
+            "id": "toolu_01WDzwJkL4FGSZxwCEYCLW52/27",
+            "name": "read_file",
+            "arguments": {
+              "path": "/home/jg/git/bee/specs/023-codemode/real-model/fixtures/alpha.txt"
+            }
+          },
+          "result": {
+            "receipt_id": "sha256:e7412f85f70bd23c266c83b6843f7b58187557fc72184320a7b5df92f778b53b",
+            "content": "[Bee receipt: sha256:e7412f85f70bd23c266c83b6843f7b58187557fc72184320a7b5df92f778b53b; records tool output, not verification]\nProject Alpha: owner Ada; open bugs 3; deadline Friday.\n",
+            "exit_code": 0,
+            "is_error": false,
+            "provenance": {
+              "kind": "child"
+            }
+          }
+        },
+        {
+          "parent_call_id": "toolu_01WDzwJkL4FGSZxwCEYCLW52",
+          "call": {
+            "id": "toolu_01WDzwJkL4FGSZxwCEYCLW52/28",
+            "name": "read_file",
+            "arguments": {
+              "path": "/home/jg/git/bee/specs/023-codemode/real-model/fixtures/alpha.txt"
+            }
+          },
+          "result": {
+            "receipt_id": "sha256:1ec109d3afcf3abf0070d2a8187d3339836b95e5a3f6e113af38d2c5f54c6751",
+            "content": "[Bee receipt: sha256:1ec109d3afcf3abf0070d2a8187d3339836b95e5a3f6e113af38d2c5f54c6751; records tool output, not verification]\nProject Alpha: owner Ada; open bugs 3; deadline Friday.\n",
+            "exit_code": 0,
+            "is_error": false,
+            "provenance": {
+              "kind": "child"
+            }
+          }
+        },
+        {
+          "parent_call_id": "toolu_01WDzwJkL4FGSZxwCEYCLW52",
+          "call": {
+            "id": "toolu_01WDzwJkL4FGSZxwCEYCLW52/29",
+            "name": "read_file",
+            "arguments": {
+              "path": "/home/jg/git/bee/specs/023-codemode/real-model/fixtures/alpha.txt"
+            }
+          },
+          "result": {
+            "receipt_id": "sha256:59931444322bb1de8966cd696312c804860d9fe9eef0c0c3ed46bc6282c3a6f9",
+            "content": "[Bee receipt: sha256:59931444322bb1de8966cd696312c804860d9fe9eef0c0c3ed46bc6282c3a6f9; records tool output, not verification]\nProject Alpha: owner Ada; open bugs 3; deadline Friday.\n",
+            "exit_code": 0,
+            "is_error": false,
+            "provenance": {
+              "kind": "child"
+            }
+          }
+        },
+        {
+          "parent_call_id": "toolu_01WDzwJkL4FGSZxwCEYCLW52",
+          "call": {
+            "id": "toolu_01WDzwJkL4FGSZxwCEYCLW52/30",
+            "name": "read_file",
+            "arguments": {
+              "path": "/home/jg/git/bee/specs/023-codemode/real-model/fixtures/alpha.txt"
+            }
+          },
+          "result": {
+            "receipt_id": "sha256:f7a957795a4b58638bfc431ff526e518a073e696cef488ce314e5464010aa888",
+            "content": "[Bee receipt: sha256:f7a957795a4b58638bfc431ff526e518a073e696cef488ce314e5464010aa888; records tool output, not verification]\nProject Alpha: owner Ada; open bugs 3; deadline Friday.\n",
+            "exit_code": 0,
+            "is_error": false,
+            "provenance": {
+              "kind": "child"
+            }
+          }
+        },
+        {
+          "parent_call_id": "toolu_01WDzwJkL4FGSZxwCEYCLW52",
+          "call": {
+            "id": "toolu_01WDzwJkL4FGSZxwCEYCLW52/31",
+            "name": "read_file",
+            "arguments": {
+              "path": "/home/jg/git/bee/specs/023-codemode/real-model/fixtures/alpha.txt"
+            }
+          },
+          "result": {
+            "receipt_id": "sha256:e800c48636a2e0a3d1a8af9ef02b40cfa711573a37b710d9c0202722c5a0e2d7",
+            "content": "[Bee receipt: sha256:e800c48636a2e0a3d1a8af9ef02b40cfa711573a37b710d9c0202722c5a0e2d7; records tool output, not verification]\nProject Alpha: owner Ada; open bugs 3; deadline Friday.\n",
+            "exit_code": 0,
+            "is_error": false,
+            "provenance": {
+              "kind": "child"
+            }
+          }
+        },
+        {
+          "parent_call_id": "toolu_01WDzwJkL4FGSZxwCEYCLW52",
+          "call": {
+            "id": "toolu_01WDzwJkL4FGSZxwCEYCLW52/32",
+            "name": "read_file",
+            "arguments": {
+              "path": "/home/jg/git/bee/specs/023-codemode/real-model/fixtures/alpha.txt"
+            }
+          },
+          "result": {
+            "receipt_id": "sha256:5abc066bd003fec84f5be389e58bf852d8e55bb2d217cd4b92254241096df695",
+            "content": "[Bee receipt: sha256:5abc066bd003fec84f5be389e58bf852d8e55bb2d217cd4b92254241096df695; records tool output, not verification]\nProject Alpha: owner Ada; open bugs 3; deadline Friday.\n",
+            "exit_code": 0,
+            "is_error": false,
+            "provenance": {
+              "kind": "child"
+            }
+          }
+        },
+        {
+          "call": {
+            "id": "toolu_01WDzwJkL4FGSZxwCEYCLW52",
+            "name": "codemode",
+            "arguments": {
+              "source": "results = []\nerrors = []\nfor i in range(33):\n    try:\n        r = call_tool(\"read_file\", {\"path\": \"/home/jg/git/bee/specs/023-codemode/real-model/fixtures/alpha.txt\"})\n        results.append((i, r))\n    except Exception as e:\n        errors.append((i, str(e)))\n{\"num_results\": len(results), \"num_errors\": len(errors), \"errors\": errors, \"first_result_index\": results[0][0] if results else None, \"last_result_index\": results[-1][0] if results else None}"
+            }
+          },
+          "result": {
+            "content": "{\"error\":\"codemode requested an unavailable tool or exceeded its call or nesting limit\",\"status\":\"error\",\"worker_invocations\":33,\"worker_time_charge_ms\":2119}",
+            "is_error": true
+          }
+        }
+      ],
+      "duration_ms": 6001
+    },
+    {
+      "index": 1,
+      "assistant_text": "The error occurred, but I got an aggregate error rather than my structured return value. The script was terminated when it hit the limit, so my `results`/`errors` accumulation was never returned. Let me verify what happened by reading the fixture directly and checking a receipt approach — but first, let me recover the retained results by using a design that returns incrementally. However, the instructions say **do not retry the limit probe**. \n\nI will not re-run the 33-call probe. Instead, let me confirm the fixture contents with a single allowed read so my summary is grounded in real data.",
+      "calls": [
+        {
+          "call": {
+            "id": "toolu_01RXFnbWnHqRha4ZkwJRfDeF",
+            "name": "read_file",
+            "arguments": {
+              "path": "/home/jg/git/bee/specs/023-codemode/real-model/fixtures/alpha.txt"
+            }
+          },
+          "result": {
+            "receipt_id": "sha256:e833984dbf7d2efac18638b0f3f2db30535f613f26756ce4223e0edea7da4589",
+            "content": "[Bee receipt: sha256:e833984dbf7d2efac18638b0f3f2db30535f613f26756ce4223e0edea7da4589; records tool output, not verification]\nProject Alpha: owner Ada; open bugs 3; deadline Friday.\n",
+            "exit_code": 0,
+            "is_error": false,
+            "provenance": {
+              "kind": "child"
+            }
+          }
+        }
+      ],
+      "duration_ms": 4490
+    },
+    {
+      "index": 2,
+      "assistant_text": "I have grounded observations. Now let me submit feedback before my final answer.",
+      "calls": [
+        {
+          "call": {
+            "id": "toolu_01CHezLvY2XjKKPVnEp7JsWB",
+            "name": "feedback",
+            "arguments": {
+              "category": "bug",
+              "message": "When a codemode script exceeds the shared inner-call limit, the whole invocation fails with an opaque aggregate error (\"codemode requested an unavailable tool or exceeded its call or nesting limit\", status=error, worker_invocations=33) and the script's accumulated return value is DISCARDED. In my probe I made 33 sequential read_file calls, accumulating successful results into a list; try/except around call_tool did NOT catch the limit breach (it aborts the interpreter rather than raising a catchable exception), and the final expression was never returned. Consequently earlier successful results are not retained/observable from the caller side even though worker_invocations=33 confirms calls were made. Suggestion: (1) surface a distinct, specific error code for \"inner-call limit exceeded\" vs \"unavailable tool\" since the message conflates them; (2) consider returning partial state or at least the count of successful calls before the limit so callers can observe retained earlier results as the docs imply; (3) document that the limit is enforced as a non-catchable abort, not a Python-level exception."
+            }
+          },
+          "result": {
+            "receipt_id": "sha256:5bc84e208d827b2f458090c395af6e9295318a0599065f901fe05e19b207907b",
+            "content": "[Bee receipt: sha256:5bc84e208d827b2f458090c395af6e9295318a0599065f901fe05e19b207907b; records tool output, not verification]\nFeedback accepted for this run's transcript.",
+            "is_error": false
+          }
+        }
+      ],
+      "duration_ms": 6834
+    },
+    {
+      "index": 3,
+      "assistant_text": "## Summary\n\n**Probe design.** In a single codemode invocation I ran a loop of 33 sequential `read_file` calls on `alpha.txt`, appending each successful result into a `results` list (wrapped in `try/except`) and intending to return an aggregate summary (counts, first/last indices, any caught errors).\n\n**Observed limit / error.** The invocation did not return my summary object. Instead the entire codemode call failed with an opaque aggregate tool error:\n\n- message: `\"codemode requested an unavailable tool or exceeded its call or nesting limit\"`\n- `status: \"error\"`\n- `worker_invocations: 33`\n- `worker_time_charge_ms: 2119`\n\nThis is consistent with the documented shared inner-call cap of **32 inner calls**: the 33rd call pushed the invocation over the limit. The `worker_invocations: 33` field confirms calls were actually attempted up to the breach.\n\n**Retained earlier results.** None were retained *at the caller level*. The limit breach aborted the interpreter rather than raising a catchable Python exception — my `try/except` around `call_tool` did not catch it, and the script's final return expression never executed. So although roughly 32 reads presumably succeeded inside the worker, their accumulated values (`results`) were discarded and are not observable from the outside. The only evidence they occurred is the `worker_invocations: 33` counter.\n\n**No retry.** Per instructions I did not re-run the 33-call probe. I confirmed fixture grounding with a single separate `read_file`: `alpha.txt` contains `\"Project Alpha: owner Ada; open bugs 3; deadline Friday.\"` (receipt `sha256:e833984d…`).\n\n**Feedback.** I filed a `bug` note observing that the limit error is opaque (conflating \"unavailable tool\" with \"limit exceeded\"), that the limit is enforced as a non-catchable abort rather than a Python exception, and that accumulated partial results are not surfaced despite documentation suggesting earlier results are retained.",
+      "duration_ms": 9468
+    }
+  ],
+  "timing": {
+    "started_at": "2026-11-01T15:01:14.639Z",
+    "ended_at": "2026-11-01T15:01:49.032Z",
+    "total_ms": 34393
+  },
+  "usage": {
+    "input_tokens": 8,
+    "output_tokens": 1621,
+    "cache_read_tokens": 8823,
+    "cache_write_tokens": 1495
+  },
+  "durable_budget": {
+    "reservations": [
+      {
+        "attempt": {
+          "session": "limit",
+          "activation": "52116896521937717110464080363622480706",
+          "operation": 1,
+          "number": 1
+        },
+        "kind": "Model",
+        "charge": {
+          "Settled": {
+            "usage": {
+              "input_tokens": 2,
+              "output_tokens": 260,
+              "cache_read_tokens": 1760,
+              "cache_write_tokens": 236
+            },
+            "duration_ms": 3735
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "limit",
+          "activation": "52116896521937717110464080363622480706",
+          "operation": 2,
+          "number": 1
+        },
+        "kind": "Tool",
+        "charge": {
+          "Settled": {
+            "usage": null,
+            "duration_ms": 2119
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "limit",
+          "activation": "52116896521937717110464080363622480706",
+          "operation": 3,
+          "number": 1
+        },
+        "kind": "Tool",
+        "charge": {
+          "Settled": {
+            "usage": null,
+            "duration_ms": 5
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "limit",
+          "activation": "52116896521937717110464080363622480706",
+          "operation": 4,
+          "number": 1
+        },
+        "kind": "Tool",
+        "charge": {
+          "Settled": {
+            "usage": null,
+            "duration_ms": 5
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "limit",
+          "activation": "52116896521937717110464080363622480706",
+          "operation": 5,
+          "number": 1
+        },
+        "kind": "Tool",
+        "charge": {
+          "Settled": {
+            "usage": null,
+            "duration_ms": 5
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "limit",
+          "activation": "52116896521937717110464080363622480706",
+          "operation": 6,
+          "number": 1
+        },
+        "kind": "Tool",
+        "charge": {
+          "Settled": {
+            "usage": null,
+            "duration_ms": 6
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "limit",
+          "activation": "52116896521937717110464080363622480706",
+          "operation": 7,
+          "number": 1
+        },
+        "kind": "Tool",
+        "charge": {
+          "Settled": {
+            "usage": null,
+            "duration_ms": 3
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "limit",
+          "activation": "52116896521937717110464080363622480706",
+          "operation": 8,
+          "number": 1
+        },
+        "kind": "Tool",
+        "charge": {
+          "Settled": {
+            "usage": null,
+            "duration_ms": 4
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "limit",
+          "activation": "52116896521937717110464080363622480706",
+          "operation": 9,
+          "number": 1
+        },
+        "kind": "Tool",
+        "charge": {
+          "Settled": {
+            "usage": null,
+            "duration_ms": 4
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "limit",
+          "activation": "52116896521937717110464080363622480706",
+          "operation": 10,
+          "number": 1
+        },
+        "kind": "Tool",
+        "charge": {
+          "Settled": {
+            "usage": null,
+            "duration_ms": 6
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "limit",
+          "activation": "52116896521937717110464080363622480706",
+          "operation": 11,
+          "number": 1
+        },
+        "kind": "Tool",
+        "charge": {
+          "Settled": {
+            "usage": null,
+            "duration_ms": 5
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "limit",
+          "activation": "52116896521937717110464080363622480706",
+          "operation": 12,
+          "number": 1
+        },
+        "kind": "Tool",
+        "charge": {
+          "Settled": {
+            "usage": null,
+            "duration_ms": 5
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "limit",
+          "activation": "52116896521937717110464080363622480706",
+          "operation": 13,
+          "number": 1
+        },
+        "kind": "Tool",
+        "charge": {
+          "Settled": {
+            "usage": null,
+            "duration_ms": 3
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "limit",
+          "activation": "52116896521937717110464080363622480706",
+          "operation": 14,
+          "number": 1
+        },
+        "kind": "Tool",
+        "charge": {
+          "Settled": {
+            "usage": null,
+            "duration_ms": 5
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "limit",
+          "activation": "52116896521937717110464080363622480706",
+          "operation": 15,
+          "number": 1
+        },
+        "kind": "Tool",
+        "charge": {
+          "Settled": {
+            "usage": null,
+            "duration_ms": 6
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "limit",
+          "activation": "52116896521937717110464080363622480706",
+          "operation": 16,
+          "number": 1
+        },
+        "kind": "Tool",
+        "charge": {
+          "Settled": {
+            "usage": null,
+            "duration_ms": 4
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "limit",
+          "activation": "52116896521937717110464080363622480706",
+          "operation": 17,
+          "number": 1
+        },
+        "kind": "Tool",
+        "charge": {
+          "Settled": {
+            "usage": null,
+            "duration_ms": 4
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "limit",
+          "activation": "52116896521937717110464080363622480706",
+          "operation": 18,
+          "number": 1
+        },
+        "kind": "Tool",
+        "charge": {
+          "Settled": {
+            "usage": null,
+            "duration_ms": 6
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "limit",
+          "activation": "52116896521937717110464080363622480706",
+          "operation": 19,
+          "number": 1
+        },
+        "kind": "Tool",
+        "charge": {
+          "Settled": {
+            "usage": null,
+            "duration_ms": 4
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "limit",
+          "activation": "52116896521937717110464080363622480706",
+          "operation": 20,
+          "number": 1
+        },
+        "kind": "Tool",
+        "charge": {
+          "Settled": {
+            "usage": null,
+            "duration_ms": 6
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "limit",
+          "activation": "52116896521937717110464080363622480706",
+          "operation": 21,
+          "number": 1
+        },
+        "kind": "Tool",
+        "charge": {
+          "Settled": {
+            "usage": null,
+            "duration_ms": 4
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "limit",
+          "activation": "52116896521937717110464080363622480706",
+          "operation": 22,
+          "number": 1
+        },
+        "kind": "Tool",
+        "charge": {
+          "Settled": {
+            "usage": null,
+            "duration_ms": 6
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "limit",
+          "activation": "52116896521937717110464080363622480706",
+          "operation": 23,
+          "number": 1
+        },
+        "kind": "Tool",
+        "charge": {
+          "Settled": {
+            "usage": null,
+            "duration_ms": 3
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "limit",
+          "activation": "52116896521937717110464080363622480706",
+          "operation": 24,
+          "number": 1
+        },
+        "kind": "Tool",
+        "charge": {
+          "Settled": {
+            "usage": null,
+            "duration_ms": 3
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "limit",
+          "activation": "52116896521937717110464080363622480706",
+          "operation": 25,
+          "number": 1
+        },
+        "kind": "Tool",
+        "charge": {
+          "Settled": {
+            "usage": null,
+            "duration_ms": 6
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "limit",
+          "activation": "52116896521937717110464080363622480706",
+          "operation": 26,
+          "number": 1
+        },
+        "kind": "Tool",
+        "charge": {
+          "Settled": {
+            "usage": null,
+            "duration_ms": 4
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "limit",
+          "activation": "52116896521937717110464080363622480706",
+          "operation": 27,
+          "number": 1
+        },
+        "kind": "Tool",
+        "charge": {
+          "Settled": {
+            "usage": null,
+            "duration_ms": 5
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "limit",
+          "activation": "52116896521937717110464080363622480706",
+          "operation": 28,
+          "number": 1
+        },
+        "kind": "Tool",
+        "charge": {
+          "Settled": {
+            "usage": null,
+            "duration_ms": 3
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "limit",
+          "activation": "52116896521937717110464080363622480706",
+          "operation": 29,
+          "number": 1
+        },
+        "kind": "Tool",
+        "charge": {
+          "Settled": {
+            "usage": null,
+            "duration_ms": 6
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "limit",
+          "activation": "52116896521937717110464080363622480706",
+          "operation": 30,
+          "number": 1
+        },
+        "kind": "Tool",
+        "charge": {
+          "Settled": {
+            "usage": null,
+            "duration_ms": 6
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "limit",
+          "activation": "52116896521937717110464080363622480706",
+          "operation": 31,
+          "number": 1
+        },
+        "kind": "Tool",
+        "charge": {
+          "Settled": {
+            "usage": null,
+            "duration_ms": 3
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "limit",
+          "activation": "52116896521937717110464080363622480706",
+          "operation": 32,
+          "number": 1
+        },
+        "kind": "Tool",
+        "charge": {
+          "Settled": {
+            "usage": null,
+            "duration_ms": 4
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "limit",
+          "activation": "52116896521937717110464080363622480706",
+          "operation": 33,
+          "number": 1
+        },
+        "kind": "Tool",
+        "charge": {
+          "Settled": {
+            "usage": null,
+            "duration_ms": 4
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "limit",
+          "activation": "52116896521937717110464080363622480706",
+          "operation": 34,
+          "number": 1
+        },
+        "kind": "Tool",
+        "charge": {
+          "Settled": {
+            "usage": null,
+            "duration_ms": 4
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "limit",
+          "activation": "52116896521937717110464080363622480706",
+          "operation": 35,
+          "number": 1
+        },
+        "kind": "Model",
+        "charge": {
+          "Settled": {
+            "usage": {
+              "input_tokens": 2,
+              "output_tokens": 258,
+              "cache_read_tokens": 1996,
+              "cache_write_tokens": 330
+            },
+            "duration_ms": 4487
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "limit",
+          "activation": "52116896521937717110464080363622480706",
+          "operation": 36,
+          "number": 1
+        },
+        "kind": "Tool",
+        "charge": {
+          "Settled": {
+            "usage": null,
+            "duration_ms": 3
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "limit",
+          "activation": "52116896521937717110464080363622480706",
+          "operation": 37,
+          "number": 1
+        },
+        "kind": "Model",
+        "charge": {
+          "Settled": {
+            "usage": {
+              "input_tokens": 2,
+              "output_tokens": 435,
+              "cache_read_tokens": 2326,
+              "cache_write_tokens": 415
+            },
+            "duration_ms": 6833
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "limit",
+          "activation": "52116896521937717110464080363622480706",
+          "operation": 38,
+          "number": 1
+        },
+        "kind": "Tool",
+        "charge": {
+          "Settled": {
+            "usage": null,
+            "duration_ms": 1
+          }
+        }
+      },
+      {
+        "attempt": {
+          "session": "limit",
+          "activation": "52116896521937717110464080363622480706",
+          "operation": 39,
+          "number": 1
+        },
+        "kind": "Model",
+        "charge": {
+          "Settled": {
+            "usage": {
+              "input_tokens": 2,
+              "output_tokens": 668,
+              "cache_read_tokens": 2741,
+              "cache_write_tokens": 514
+            },
+            "duration_ms": 9468
+          }
+        }
+      }
+    ]
+  }
+}

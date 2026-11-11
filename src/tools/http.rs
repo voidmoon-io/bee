@@ -77,6 +77,7 @@ impl Tool for HttpTool {
 }
 
 /// The refusal every HTTP tool gives when there is no live proxy.
+#[allow(clippy::result_large_err)] // the refusal is the tool's own result
 async fn live(icpt: &Option<Interceptor>) -> Result<&Interceptor, ToolResult> {
     match icpt {
         None => Err(unavailable(

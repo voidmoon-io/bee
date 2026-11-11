@@ -1812,3 +1812,46 @@ async fn crash_during_overlap_keeps_completed_siblings_and_blocks_on_ambiguity()
     );
     assert_eq!(probe.started.load(Ordering::SeqCst), 2);
 }
+
+#[tokio::test]
+async fn feedback_is_logged_inside_codemode_and_survives_reopen() {
+    let root = tempfile::tempdir().unwrap();
+    let source = "call_tool('feedback', {'category': 'confusion', 'message': 'The batch width limit needs an example.'})";
+    let mut original = None;
+    for replay in [false, true] {
+        let session = open(root.path(), None).await;
+        let mut tools = bee::tools::registry_for(&["feedback".into()], None);
+        tools.enable_evidence(session.evidence());
+        let (report, _) = session
+            .run(
+                "feedback-request",
+                if replay { None } else { Some("go") },
+                "system",
+                limits(),
+                &model(source),
+                &mut tools,
+                &mut Sandbox::host(vec![]),
+                &Output,
+                None,
+            )
+            .await
+            .unwrap();
+        let calls = &report.turns[0].calls;
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].call.name, "feedback");
+        assert_eq!(calls[0].call.arguments["category"], "confusion");
+        assert_eq!(
+            calls[0].call.arguments["message"],
+            "The batch width limit needs an example."
+        );
+        assert!(!calls[0].result.is_error);
+        assert!(!calls[0].result.terminal);
+        assert!(calls[0].result.receipt_id.is_some());
+        let recorded = serde_json::to_value(calls).unwrap();
+        if let Some(previous) = &original {
+            assert_eq!(&recorded, previous);
+        } else {
+            original = Some(recorded);
+        }
+    }
+}

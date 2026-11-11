@@ -213,6 +213,7 @@ pub(crate) fn kernel_sandbox(
     if let Some(p) = &prepared {
         compiled = p.tool_policy(compiled);
     }
+    let compiled = crate::tools::exec::tool_scope(compiled)?;
     let plan = EnforcementPlan::prepare(&compiled, ScopeMode::Enforce)
         .map_err(|e| format!("enforcement plan: {e}"))?;
     // The session's enforcement owner (018) — its own, or the process's when several sessions share

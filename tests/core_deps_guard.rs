@@ -37,6 +37,8 @@ const FORBIDDEN: &[&str] = &[
     // the core fails here rather than in review.
     "tui-markdown",
     "ratatui-markdown",
+    // Host-side provider HTTP clients.
+    "reqwest",
     // MCP client
     "rmcp",
     // Security analysis tooling (016-native-tools, SC-009). These are the application's business:

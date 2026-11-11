@@ -34,3 +34,6 @@ Thumbs.db
 # `.bee/findings/` is deliberately NOT ignored — the finding ledger is meant to be committed,
 # diffed, and reviewed in a pull request (FR-023, Constitution IV).
 .bee/scan/
+
+# Python bytecode (the VM gates import validate_results.py)
+__pycache__/

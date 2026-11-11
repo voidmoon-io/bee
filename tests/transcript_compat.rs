@@ -72,3 +72,35 @@ async fn a_run_without_025_features_writes_no_new_key() {
         );
     }
 }
+
+// 026 T008: a delegation record written before 026 — counts as plain numbers, no harness — still
+// reads, and writes back unchanged; a harness's uncounted turns are absent, never zero.
+#[test]
+fn a_pre_026_delegation_record_reads_and_writes_back_unchanged() {
+    use bee::transcript::DelegationRecord;
+    let pre = serde_json::json!({
+        "agent": "reader",
+        "scope_id": "bee-episode-x-sub-reader-0",
+        "enforced": true,
+        "depth": 1,
+        "outcome": {"kind": "completed"},
+        "tokens_used": 1234,
+        "turns_used": 3
+    });
+    let r: DelegationRecord = serde_json::from_value(pre.clone()).expect("reads");
+    assert_eq!(r.turns_used, Some(3));
+    assert_eq!(r.tokens_used, Some(1234));
+    assert!(r.harness.is_none());
+    assert_eq!(serde_json::to_value(&r).unwrap(), pre);
+
+    let harness = DelegationRecord {
+        turns_used: None,
+        tokens_used: None,
+        ..r
+    };
+    let v = serde_json::to_value(&harness).unwrap();
+    assert!(
+        v.get("turns_used").is_none() && v.get("tokens_used").is_none(),
+        "{v}"
+    );
+}

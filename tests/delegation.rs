@@ -525,9 +525,9 @@ async fn a_subagent_draws_from_the_sessions_turns_and_cannot_exceed_them() {
         "{}",
         rec.result.content
     );
-    assert_eq!(child.turns_used, 4);
+    assert_eq!(child.turns_used, Some(4));
     assert_eq!(
-        r.t.turns.len() as u32 + child.turns_used,
+        r.t.turns.len() as u32 + child.turns_used.unwrap(),
         5,
         "parent and child together spent exactly the pool"
     );

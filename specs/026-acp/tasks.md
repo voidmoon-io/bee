@@ -30,7 +30,7 @@ harness tasks (US3+US4), **PR4** = Phase 8.
 
 - [x] T001 Add `agent-client-protocol = "5.1"` (default-features = false) and `tokio-util` (`compat`) to `[dependencies]` in `Cargo.toml`, behind a new feature `acp = ["dep:agent-client-protocol", "dep:tokio-util", "tokio/io-std"]`; add `acp` to the CI feature lists in `.github/workflows/ci.yml` (check + clippy + test steps)
 - [x] T002 [P] Create `src/acp/mod.rs` (module docs naming both directions, `PROTOCOL_VERSION = 1`) and wire `#[cfg(feature = "acp")] pub mod acp;` in `src/lib.rs`
-- [ ] T003 [P] Create the test binary `tests/bin/acp_fake_harness.rs` (registered as `[[bin]] required-features = ["acp", "test-support"]` or a `[[test]]` helper per repo convention): an ACP v1 agent that, on `session/prompt`, executes the action script in env `FAKE_HARNESS_SCRIPT` (JSON list: `write`, `read`, `connect_via_proxy {host,port}`, `fork_sleeper`, `call_fs_read`, `ask_permission`, `say {text}`, `sleep {secs}`) and reports each action's outcome as an `agent_message_chunk`
+- [x] T003 [P] Create the test binary `tests/bin/acp_fake_harness.rs` (registered as `[[bin]] required-features = ["acp", "test-support"]` or a `[[test]]` helper per repo convention): an ACP v1 agent that, on `session/prompt`, executes the action script in env `FAKE_HARNESS_SCRIPT` (JSON list: `write`, `read`, `connect_via_proxy {host,port}`, `fork_sleeper`, `call_fs_read`, `ask_permission`, `say {text}`, `sleep {secs}`) and reports each action's outcome as an `agent_message_chunk`
 
 ---
 
@@ -40,7 +40,7 @@ harness tasks (US3+US4), **PR4** = Phase 8.
 - [x] T005 [P] Unit test in `src/sandbox.rs` tests: a host sandbox with `cwd = Some(tmp)` runs `pwd` → `tmp`; `None` → bee's cwd
 - [x] T006 Add `EntryPoint::Acp` in `src/session/spec.rs`; in `src/session/mod.rs` derive the scope id and run id from `SessionSpec.label` for `Acp` (not `bee-session-{pid}`), and allow `prebuilt_sandbox` for `Acp` (the concurrent-batch path, `src/concurrent.rs:112`); keep `refuse_unsupported` permitting MCP for `Acp`
 - [x] T007 [P] Add the operator-only `[acp]` section (`client_mcp: bool`, `max_sessions: u32` default 8 clamp 1..=32, `harness_env_passthrough: Vec<String>`) to `src/app/config/file.rs` and `EffectiveConfig` in `src/app/config/mod.rs`; reject `[acp]` in a project layer in `FileConfig::user_only_sections`; tests beside the existing `[mcp]` rejection test
-- [ ] T008 Make `DelegationRecord.turns_used` and `tokens_used` `Option<_>` (`None` = not counted) in `src/transcript.rs`, with `skip_serializing_if`; keep reading old records (add a round-trip test with a pre-026 JSON fixture in `tests/transcript_compat.rs`); update `src/delegate.rs` and the progress line to print "not counted"
+- [x] T008 Make `DelegationRecord.turns_used` and `tokens_used` `Option<_>` (`None` = not counted) in `src/transcript.rs`, with `skip_serializing_if`; keep reading old records (add a round-trip test with a pre-026 JSON fixture in `tests/transcript_compat.rs`); update `src/delegate.rs` and the progress line to print "not counted"
 
 **Checkpoint**: foundation ready — US1/US2 and US3 can proceed in parallel.
 
@@ -113,22 +113,22 @@ harness tasks (US3+US4), **PR4** = Phase 8.
 
 ### Tests (write first, must fail)
 
-- [ ] T030 [P] [US3] Unit tests in `src/skills.rs`: `runtime.acp` parses (absolute command, args, env); relative command, non-empty `tools`, a stripped credential key in `env` → malformed-definition warnings; absent `runtime` → `AgentRuntime::Loop`
-- [ ] T031 [P] [US3] Host test (`test-support`) `tests/acp_harness.rs::a_harness_reports_its_final_turn_and_its_calls_stay_in_its_record`: delegate to `acp_fake_harness` (`say`, one permission ask); assert the parent's result is the final text + the FR-021 note, `HarnessRecord.permissions` has one `allow_once`, the parent's conversation has no harness tool calls
-- [ ] T032 [P] [US3] Host test `tests/acp_harness.rs::fs_and_terminal_calls_are_refused_and_recorded`: `call_fs_read` → `method_not_found`, `refused_methods` lists it, harness continues
-- [ ] T033 [P] [US3] Host test `tests/acp_harness.rs::a_harness_is_refused_without_a_kernel_scope`: host sandbox → `Refused` naming the reason, nothing spawned (FR-017)
-- [ ] T034 [P] [US3] Host tests `tests/acp_harness.rs::deadline_cancels_then_cuts_short` and `::a_harness_that_exits_early_fails_with_its_stderr`
-- [ ] T035 [P] [US3] VM case `harness-contained` (S7) in `test/vm/remote-matrix.sh` + `cases.txt`: in-scope write ok; outside write kernel-denied in the delegation's audit with the child scope id; `fs/read_text_file` refused; detached sleeper gone; child scope gone
+- [x] T030 [P] [US3] Unit tests in `src/skills.rs`: `runtime.acp` parses (absolute command, args, env); relative command, non-empty `tools`, a stripped credential key in `env` → malformed-definition warnings; absent `runtime` → `AgentRuntime::Loop`
+- [x] T031 [P] [US3] Host test (`test-support`) `tests/acp_harness.rs::a_harness_reports_its_final_turn_and_its_calls_stay_in_its_record`: delegate to `acp_fake_harness` (`say`, one permission ask); assert the parent's result is the final text + the FR-021 note, `HarnessRecord.permissions` has one `allow_once`, the parent's conversation has no harness tool calls
+- [x] T032 [P] [US3] Host test `tests/acp_harness.rs::fs_and_terminal_calls_are_refused_and_recorded`: `call_fs_read` → `method_not_found`, `refused_methods` lists it, harness continues
+- [x] T033 [P] [US3] Host test `tests/acp_harness.rs::a_harness_is_refused_without_a_kernel_scope`: host sandbox → `Refused` naming the reason, nothing spawned (FR-017)
+- [x] T034 [P] [US3] Host tests `tests/acp_harness.rs::deadline_cancels_then_cuts_short` and `::a_harness_that_exits_early_fails_with_its_stderr`
+- [x] T035 [P] [US3] VM case `harness-contained` (S7) in `test/vm/remote-matrix.sh` + `cases.txt`: in-scope write ok; outside write kernel-denied in the delegation's audit with the child scope id; `fs/read_text_file` refused; detached sleeper gone; child scope gone
 
 ### Implementation
 
-- [ ] T036 [US3] `AgentRuntime` (`Loop` | `Acp{command,args,env}`) on `Agent` in `src/skills.rs`, parsed in `load_as_agent` with the T030 validation; `runtime` added to the `Frontmatter` struct; document in `specs/018-subagent-scopes/contracts/agent-definition.md` (pointer to 026's harness-runtime contract)
-- [ ] T037 [US3] `HarnessRecord`, `HarnessTurn`, `HarnessToolCall`, `PermissionRecord` in `src/transcript.rs`; `DelegationRecord.harness: Option<Box<HarnessRecord>>` with `skip_serializing_if`; compat fixture test
-- [ ] T038 [US3] `src/acp/harness.rs` spawn: from the child `Sandbox`, `tool_command_as` with the harness command/args, env = cleared env + agent `env` + passthrough keys valued from bee's env (`[acp] harness_env_passthrough`), `cwd` from `ChildEnv`; convert to tokio `Command`, pipe stdin/stdout, capture stderr tail (4 KiB ring), `kill_on_drop(true)`
-- [ ] T039 [US3] `src/acp/harness.rs` client: `Client.v1()` over the pipes (`ByteStreams` via compat); `initialize` (v1, fs/terminal false, `clientInfo` bee) — reject other versions; `session/new { cwd, mcpServers: [] }`; `session/prompt` with the task text; handlers: `SessionNotification` → `HarnessRecord.turns` + progress sink; `RequestPermissionRequest` → research R11 choice, recorded; any other client request → `method_not_found` + `refused_methods`
-- [ ] T040 [US3] Bounds in `src/acp/harness.rs`: race the prompt against the shared deadline (`ParentView.deadline` ∧ `Budget.deadline`); on deadline send `session/cancel`, answer pending permissions `cancelled`, 5 s grace, then teardown; map stop reasons / exits to `DelegationOutcome` per contracts/harness-runtime.md
-- [ ] T041 [US3] Branch in `delegate::run_inner` (`src/delegate.rs`): for `AgentRuntime::Acp` — refuse when `child_sandbox` reports no kernel scope; skip the tool-surface checks (tools empty); run `acp::harness::run` instead of `run_loop`; drain the child scope's audit on each update and at the end into the record; teardown as today (a scope that will not empty → `Failed`); report header `(harness, <stopReason>)` + FR-021 note
-- [ ] T042 [US3] Make T030–T035 pass; record S7
+- [x] T036 [US3] `AgentRuntime` (`Loop` | `Acp{command,args,env}`) on `Agent` in `src/skills.rs`, parsed in `load_as_agent` with the T030 validation; `runtime` added to the `Frontmatter` struct; document in `specs/018-subagent-scopes/contracts/agent-definition.md` (pointer to 026's harness-runtime contract)
+- [x] T037 [US3] `HarnessRecord`, `HarnessTurn`, `HarnessToolCall`, `PermissionRecord` in `src/transcript.rs`; `DelegationRecord.harness: Option<Box<HarnessRecord>>` with `skip_serializing_if`; compat fixture test
+- [x] T038 [US3] `src/acp/harness.rs` spawn: from the child `Sandbox`, `tool_command_as` with the harness command/args, env = cleared env + agent `env` + passthrough keys valued from bee's env (`[acp] harness_env_passthrough`), `cwd` from `ChildEnv`; convert to tokio `Command`, pipe stdin/stdout, capture stderr tail (4 KiB ring), `kill_on_drop(true)`
+- [x] T039 [US3] `src/acp/harness.rs` client: `Client.v1()` over the pipes (`ByteStreams` via compat); `initialize` (v1, fs/terminal false, `clientInfo` bee) — reject other versions; `session/new { cwd, mcpServers: [] }`; `session/prompt` with the task text; handlers: `SessionNotification` → `HarnessRecord.turns` + progress sink; `RequestPermissionRequest` → research R11 choice, recorded; any other client request → `method_not_found` + `refused_methods`
+- [x] T040 [US3] Bounds in `src/acp/harness.rs`: race the prompt against the shared deadline (`ParentView.deadline` ∧ `Budget.deadline`); on deadline send `session/cancel`, answer pending permissions `cancelled`, 5 s grace, then teardown; map stop reasons / exits to `DelegationOutcome` per contracts/harness-runtime.md
+- [x] T041 [US3] Branch in `delegate::run_inner` (`src/delegate.rs`): for `AgentRuntime::Acp` — refuse when `child_sandbox` reports no kernel scope; skip the tool-surface checks (tools empty); run `acp::harness::run` instead of `run_loop`; drain the child scope's audit on each update and at the end into the record; teardown as today (a scope that will not empty → `Failed`); report header `(harness, <stopReason>)` + FR-021 note
+- [x] T042 [US3] Make T030–T035 pass; record S7
 
 **Checkpoint**: harnesses run contained (no network yet).
 
@@ -142,10 +142,10 @@ harness tasks (US3+US4), **PR4** = Phase 8.
 
 ### Tests (write first, must fail)
 
-- [ ] T043 [P] [US4] Property test in `crates/core/src/attenuation.rs` (extend the derive property suite): a harness derivation routes `requires.net` names only when each is held by the parent by exact name (non-intercepting parent: `network.allow`; intercepting: `http.targets ∪ http.egress`); never yields a kernel net rule other than the proxy port
-- [ ] T044 [P] [US4] Unit tests in `crates/core/src/compiler.rs`: a harness policy compiles the harness protected list (`~/.claude`, `~/.claude.json`, `~/.codex`, `~/.local/share/opencode`, `~/.config/opencode`) as DENY unless named in the child **and** the parent; the global `PROTECTED_DEFAULTS` are unchanged for non-harness policies
+- [x] T043 [P] [US4] Property test in `crates/core/src/attenuation.rs` (extend the derive property suite): a harness derivation routes `requires.net` names only when each is held by the parent by exact name (non-intercepting parent: `network.allow`; intercepting: `http.targets ∪ http.egress`); never yields a kernel net rule other than the proxy port
+- [x] T044 [P] [US4] Unit tests in `crates/core/src/compiler.rs`: a harness policy compiles the harness protected list (`~/.claude`, `~/.claude.json`, `~/.codex`, `~/.local/share/opencode`, `~/.config/opencode`) as DENY unless named in the child **and** the parent; the global `PROTECTED_DEFAULTS` are unchanged for non-harness policies
 - [x] T045 [P] [US4] Unit tests for resolve-and-admit in `src/intercept/session.rs`: a non-declared host → error, no reload; a declared host with a new address → exactly one reload, then answer; the same address again → no reload; >16 addresses → oldest evicted
-- [ ] T046 [P] [US4] VM cases `harness-egress-by-name` (S8, incl. the `/etc/hosts` address change) and `harness-credentials` (S9a) in `test/vm/remote-matrix.sh` + `cases.txt`
+- [x] T046 [P] [US4] VM cases `harness-egress-by-name` (S8, incl. the `/etc/hosts` address change) and `harness-credentials` (S9a) in `test/vm/remote-matrix.sh` + `cases.txt`
 - [x] T047 [P] [US4] VM case `proxy-admit-on-resolve`: a session (not a harness) with `[policy.http]` egress `prov.test:8443` whose address changes mid-session still reaches it, and the proxy scope's reload is recorded
 
 ### Implementation — proxy scopes per sandbox (019 T092; PR2)
@@ -157,10 +157,10 @@ harness tasks (US3+US4), **PR4** = Phase 8.
 
 ### Implementation — harness network and credentials (PR3)
 
-- [ ] T052 [US4] Harness derivation in `crates/core/src/attenuation.rs` (or a `derive_harness` beside `derive`): check `requires.net` names against the parent per T043; produce the child policy with `network.allow` empty and an `http` section `{ targets: parent's targets if intercepting, egress: requires.net }`
-- [ ] T053 [US4] Harness protected list in `crates/core/src/compiler.rs` (applied when compiling a harness child), overridable only by an explicit child rule the parent also names (reuse `check_protected`)
-- [ ] T054 [US4] In `src/acp/harness.rs` / `src/delegate.rs`: create the harness's proxy scope (T049) before spawning; add `comb::client::child_env` proxy variables with the harness's credential; add the CA bundle variables only if the harness's `inspect` is non-empty
-- [ ] T055 [US4] Make T043–T047 pass; record S8, S9a
+- [x] T052 [US4] Harness derivation in `crates/core/src/attenuation.rs` (or a `derive_harness` beside `derive`): check `requires.net` names against the parent per T043; produce the child policy with `network.allow` empty and an `http` section `{ targets: parent's targets if intercepting, egress: requires.net }`
+- [x] T053 [US4] Harness protected list in `crates/core/src/compiler.rs` (applied when compiling a harness child), overridable only by an explicit child rule the parent also names (reuse `check_protected`)
+- [x] T054 [US4] In `src/acp/harness.rs` / `src/delegate.rs`: create the harness's proxy scope (T049) before spawning; add `comb::client::child_env` proxy variables with the harness's credential; add the CA bundle variables only if the harness's `inspect` is non-empty
+- [x] T055 [US4] Make T043–T047 pass; record S8, S9a
 
 ---
 
@@ -182,6 +182,13 @@ harness tasks (US3+US4), **PR4** = Phase 8.
 > - **Attribution (T051):** a new `attribution` table, not new columns. Every child proxy has its own store session id, which every exchange, tunnel and refusal row already carries. The table maps that id to the child's `scope_id`, `delegation_id` (the parent's `task` call id, now on `ParentView` and `PendingDelegation`), `parent_session` and agent, indexed by scope and delegation. Both tables are `CREATE TABLE IF NOT EXISTS`, so no migration is needed.
 > - **Tests:** T045 is covered by unit tests in `src/proxy_scope.rs` and by the end-to-end host test `tests/intercept_proxy.rs::a_moved_address_is_admitted_once_then_reached`. The reload there is counted, not made. T057 is `tests/intercept_delegation.rs`, which needs the intercept harness that `tests/delegation.rs` does not build with.
 > - **VM:** `proxy-admit-on-resolve` and `subagent-intercept-attributed` both pass. Negative control: a build with no admit hook and no child attribution fails both.
+
+> **PR3 as built (2026-11-10).**
+> - **Fake harness (T003):** a hidden `bee acp-fake-harness` subcommand (`src/acp/fake_harness.rs`, built with `test-support` or `vm-test`) rather than a separate test binary, so the VM matrix can run it from the one release build. Its script is the JSON in `FAKE_HARNESS_SCRIPT`.
+> - **Counts (T008):** `tokens_used` / `turns_used` are `Option`. A loop child always has `Some`; a harness has `None` ("not counted"). Records written before 026 read and write back byte-for-byte (`tests/transcript_compat.rs`).
+> - **Runtime (T036–T041):** a harness needs a bee built with `acp`, `intercept` and `enforce`; any other build refuses it as `Unavailable`. Kernel network rules that are empty mean unrestricted egress, so a harness always gets its own proxy. One with no provider hosts, under a parent that does not intercept, is refused. Its audit is drained once, at the end, not on every update: the supervisor buffers it until then. The proxy events from its side call are not stored on the record, because the store already keeps the refusals.
+> - **Derivation (T052, T053):** `Policy::derive_harness`. The harness protected list is applied at the policy level (deny entries in the child's filesystem), not in the compiler, and `PROTECTED_DEFAULTS` is unchanged. Unmatched reads are allowed, so each denied store is a kernel rule, and the eBPF backend holds 8. Only the stores present on the machine are denied. A store created after the scope is built is therefore not covered.
+> - **Tests:** T031–T034 call `acp::harness::run` directly on a host sandbox. T033 goes through `run_loop`. T043/T044 are in `crates/core/tests/harness_attenuation.rs`.
 
 **Checkpoint (PR2 = T048–T051 + Phase 7; PR3 = Phase 5 + T052–T055)**
 

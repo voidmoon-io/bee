@@ -196,7 +196,7 @@ harness tasks (US3+US4), **PR4** = Phase 8.
 
 ## Phase 8: Polish & cross-cutting (PR4)
 
-- [ ] T060 Real harness on `bee-build` (S10, SC-004): install the `claude-agent-acp` Linux binary; agent per contracts/harness-runtime.md; `[acp] harness_env_passthrough = ["ANTHROPIC_API_KEY"]`; record the transcript highlights and every tunnel host in `specs/026-acp/quickstart.md`
+- [x] T060 Real harness on `bee-build` (S10, SC-004): install the `claude-agent-acp` Linux binary; agent per contracts/harness-runtime.md; `[acp] harness_env_passthrough = ["ANTHROPIC_API_KEY"]`; record the transcript highlights and every tunnel host in `specs/026-acp/quickstart.md`
 - [ ] T061 [P] Codex and OpenCode adapters on `bee-build`: does each honour `HTTPS_PROXY` and run inside a bee scope (Codex's own sandbox nested)? Record findings and any required agent `env` in `specs/026-acp/research.md` (open risk)
 - [ ] T062 [P] Benchmark harness spawn (derive → scopes → spawn → `initialize`) in `benches/`; ≤ 500 ms p95 excluding harness start-up
 - [ ] T063 [P] Docs: `docs/acp.md` (t3code setup, `[acp]`, writing a harness agent, what bee does and does not confine — FR-021); glossary entries **ACP session**, **Harness**, **Proxy scope** in `CONTEXT.md`

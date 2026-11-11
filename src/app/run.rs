@@ -300,6 +300,7 @@ async fn run(args: RunArgs) -> ExitCode {
         },
         stuck: cfg.stuck,
         delegation: cfg.delegation,
+        harness_env: cfg.acp.harness_env_passthrough.clone().unwrap_or_default(),
     };
     // The policies the tools will run under: the scenario's, and the ceiling a grant may widen it
     // to. `--host` runs them unscoped whatever the scenario says.

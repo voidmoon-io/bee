@@ -148,6 +148,9 @@ pub struct Delegation {
     pub budget: Option<Budget>,
     /// Where delegation lines and the child's own progress go, indented by depth.
     pub progress: Option<SharedProgress>,
+    /// Credential variables the operator passes to every harness subagent from bee's own
+    /// environment (`[acp] harness_env_passthrough`, 026). Never from an agent definition.
+    pub harness_env: Vec<String>,
 }
 
 impl Delegation {
@@ -161,7 +164,14 @@ impl Delegation {
             max_concurrent,
             budget: None,
             progress,
+            harness_env: Vec::new(),
         }
+    }
+
+    /// These settings passing `keys` to every harness subagent, valued from bee's environment.
+    pub fn with_harness_env(mut self, keys: Vec<String>) -> Self {
+        self.harness_env = keys;
+        self
     }
 
     /// These settings under `limits` (the `[delegation]` table).
@@ -324,6 +334,10 @@ async fn run_inner(
             detail: "this loop has no session policy to derive a subagent's from".into(),
         });
     };
+    // 026: an external harness is a different child — not a loop of bee's.
+    if let crate::skills::AgentRuntime::Acp { .. } = &agent.runtime {
+        return harness(d, req, parent, agent, parent_policy, depth).await;
+    }
     // FR-012: every tool the agent names must be one the session holds — checked before anything
     // is built, by name.
     let child_may_delegate = depth < cfg.max_depth;
@@ -388,11 +402,16 @@ async fn run_inner(
 
     // The child's sandbox: its own scope on the session's supervisor, or — with no kernel scope to
     // give it — a host sandbox that says so.
-    let (mut sandbox, scope_id, enforced, prepared) =
-        match child_sandbox(parent.sandbox, &req.agent, &derived, proxies.as_deref()) {
-            Ok(v) => v,
-            Err(detail) => return failed(&req.agent, depth, String::new(), false, detail),
-        };
+    let (mut sandbox, scope_id, enforced, prepared) = match child_sandbox(
+        parent.sandbox,
+        &req.agent,
+        &derived,
+        proxies.as_deref(),
+        false,
+    ) {
+        Ok(v) => v,
+        Err(detail) => return failed(&req.agent, depth, String::new(), false, detail),
+    };
     cfg.emit(&format!(
         "delegate '{}' → scope {} ({}, depth {depth})",
         req.agent,
@@ -503,9 +522,10 @@ async fn run_inner(
     }
     let teardown = sandbox.teardown();
     let turns_used = transcript.turns.len() as u32;
-    let tokens_used = transcript.usage.as_ref().map_or(0, |u| {
-        u64::from(u.input_tokens) + u64::from(u.output_tokens)
-    });
+    let tokens_used = transcript
+        .usage
+        .as_ref()
+        .map(|u| u64::from(u.input_tokens) + u64::from(u.output_tokens));
     let (outcome, header) = match teardown {
         Err(e) => (
             DelegationOutcome::Failed {
@@ -555,7 +575,9 @@ async fn run_inner(
             outcome,
             tokens_used,
             transcript: Some(Box::new(transcript)),
-            turns_used,
+            turns_used: Some(turns_used),
+            harness: None,
+            audit: Vec::new(),
         },
     }
 }
@@ -590,6 +612,286 @@ fn child_escalation(
     }
 }
 
+/// The harness credential stores present on this machine. Each one denied costs a kernel rule, so a
+/// store that is not there is not denied (see [`bee_core::Policy::derive_harness`]).
+#[cfg(all(feature = "acp", feature = "intercept", feature = "enforce"))]
+fn present_stores() -> Vec<&'static str> {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    bee_core::compiler::HARNESS_STORES
+        .iter()
+        .copied()
+        .filter(|s| match (s.strip_prefix("~/"), &home) {
+            (Some(rest), Some(h)) => std::fs::symlink_metadata(h.join(rest)).is_ok(),
+            _ => true,
+        })
+        .collect()
+}
+
+/// FR-021: what bee does not confine in a harness, said on every report.
+pub const HARNESS_NOTE: &str =
+    "NOTE: this subagent is an external harness. bee confined its files \
+                                and network; it did not narrow which programs it ran.";
+
+/// Delegate to an external harness (026 US3/US4, contracts/harness-runtime.md): derive its policy,
+/// give it a kernel scope and a proxy scope of its own, run it as an ACP client, and report its
+/// final turn. Refused before anything exists when the session has no kernel scope.
+async fn harness(
+    d: &Delegator<'_>,
+    req: &DelegationRequest,
+    parent: ParentView<'_>,
+    agent: &crate::skills::Agent,
+    parent_policy: &bee_core::Policy,
+    depth: u32,
+) -> Delegated {
+    let refuse = |reason: RefusalReason| refused(&req.agent, depth, reason);
+    #[cfg(not(all(feature = "acp", feature = "intercept", feature = "enforce")))]
+    {
+        let _ = (d, parent, agent, parent_policy);
+        refuse(RefusalReason::Unavailable {
+            detail: format!(
+                "the harness '{}' needs a bee built with --features acp,intercept,enforce",
+                req.agent
+            ),
+        })
+    }
+    #[cfg(all(feature = "acp", feature = "intercept", feature = "enforce"))]
+    {
+        let cfg = d.config;
+        let crate::skills::AgentRuntime::Acp { command, args, env } = &agent.runtime else {
+            unreachable!("called for harness agents only")
+        };
+        // FR-017: a harness's own prompts are not a boundary; without a kernel scope there is none.
+        if parent.sandbox.scope_handle().is_none() {
+            return refuse(RefusalReason::Unavailable {
+                detail: format!(
+                    "the harness '{}' needs a kernel scope, and this session has none",
+                    req.agent
+                ),
+            });
+        }
+        let derived =
+            match parent_policy.derive_harness(agent.requested_policy(), &present_stores()) {
+                Ok(p) => p,
+                Err(e) => {
+                    return refuse(RefusalReason::OverGrant {
+                        detail: e.to_string(),
+                    })
+                }
+            };
+        let deps = parent.registry.deps();
+        let parent_session = deps
+            .interceptor
+            .as_ref()
+            .map(|i| i.session_id().to_string())
+            .unwrap_or_default();
+        let proxies = match &deps.child_proxies {
+            Some(p) => p.clone(),
+            None => {
+                let root = parent
+                    .sandbox
+                    .cwd()
+                    .map(std::path::PathBuf::from)
+                    .or_else(|| std::env::current_dir().ok())
+                    .unwrap_or_default();
+                match crate::intercept::session::ChildProxies::for_harness(root) {
+                    Ok(p) => Arc::new(p),
+                    Err(detail) => return failed(&req.agent, depth, String::new(), false, detail),
+                }
+            }
+        };
+        // The pass-through credentials, valued from bee's own environment; a key it does not have
+        // is not passed.
+        let mut child_env: Vec<(String, String)> =
+            env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        for key in &cfg.harness_env {
+            if let Ok(v) = std::env::var(key) {
+                child_env.push((key.clone(), v));
+            }
+        }
+
+        let (mut sandbox, scope_id, _, prepared) =
+            match child_sandbox(parent.sandbox, &req.agent, &derived, Some(&proxies), true) {
+                Ok(v) => v,
+                Err(detail) => return failed(&req.agent, depth, String::new(), false, detail),
+            };
+        cfg.emit(&format!(
+            "delegate '{}' → scope {scope_id} (harness {}, enforced, depth {depth})",
+            req.agent,
+            command.display()
+        ));
+        let Some(prepared) = prepared else {
+            let _ = sandbox.teardown();
+            return failed(
+                &req.agent,
+                depth,
+                scope_id,
+                true,
+                "no proxy was prepared".into(),
+            );
+        };
+        static NEXT_PROXY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let session_id = format!(
+            "{}-sub-{}-{}",
+            if parent_session.is_empty() {
+                "harness"
+            } else {
+                &parent_session
+            },
+            crate::session::parts::sanitize(&req.agent),
+            NEXT_PROXY.fetch_add(1, Ordering::Relaxed)
+        );
+        let attribution = crate::intercept::sidecar::Attribution {
+            scope_id: scope_id.clone(),
+            delegation_id: parent.call_id.to_string(),
+            parent_session,
+            agent: req.agent.clone(),
+        };
+        let http = match proxies
+            .start(prepared, &mut sandbox, &session_id, attribution)
+            .await
+        {
+            Ok(h) => h,
+            Err(detail) => {
+                let _ = sandbox.teardown();
+                return failed(
+                    &req.agent,
+                    depth,
+                    scope_id,
+                    true,
+                    format!("could not start its HTTP proxy: {detail}"),
+                );
+            }
+        };
+
+        let deadline = match &cfg.budget {
+            Some(b) => parent.deadline.min(b.deadline),
+            None => parent.deadline,
+        };
+        let progress = cfg.progress.clone().map(|p| {
+            let prefix = format!("{}[{}] ", "  ".repeat(depth as usize + 1), req.agent);
+            Arc::new(move |line: &str| p(&format!("{prefix}{line}")))
+                as Arc<dyn Fn(&str) + Send + Sync>
+        });
+        let mut run = crate::acp::harness::run(
+            &mut sandbox,
+            crate::acp::harness::HarnessSpec {
+                agent: &req.agent,
+                command,
+                args,
+                env: child_env,
+                prompt: &req.prompt,
+                deadline,
+                progress,
+            },
+        )
+        .await;
+        http.shutdown().await;
+        let mut audit = std::mem::take(&mut run.audit);
+        audit.extend(sandbox.drain_sidecar_audit());
+        let teardown = sandbox.teardown();
+        drop(http);
+
+        use crate::acp::harness::HarnessEnd;
+        let stderr_hint = run
+            .record
+            .stderr_tail
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .map(|l| format!("; its stderr ended: {}", crate::safe_text::safe_line(l)))
+            .unwrap_or_default();
+        let (outcome, header) = match (&teardown, &run.end) {
+            (Err(e), _) => (
+                DelegationOutcome::Failed {
+                    detail: format!("subagent scope did not tear down: {e}"),
+                },
+                format!("FAILED: its scope did not tear down cleanly ({e})"),
+            ),
+            (Ok(()), HarnessEnd::Stopped(r)) if r == "end_turn" => (
+                DelegationOutcome::Completed,
+                "completed (harness, end_turn)".to_string(),
+            ),
+            (Ok(()), HarnessEnd::Stopped(r)) if r == "refusal" => (
+                DelegationOutcome::Completed,
+                "completed (harness, refusal): the harness refused to continue".to_string(),
+            ),
+            (Ok(()), HarnessEnd::Stopped(r)) if r == "max_tokens" || r == "max_turn_requests" => (
+                DelegationOutcome::CutShort {
+                    reason: CutShortReason::Turns,
+                },
+                format!("CUT SHORT (harness, {r}). The task was NOT completed."),
+            ),
+            (Ok(()), HarnessEnd::Stopped(r)) => {
+                let detail = format!("the harness ended its turn '{r}'");
+                (
+                    DelegationOutcome::Failed {
+                        detail: detail.clone(),
+                    },
+                    format!("FAILED: {detail}"),
+                )
+            }
+            (Ok(()), HarnessEnd::Deadline) => (
+                DelegationOutcome::CutShort {
+                    reason: CutShortReason::Deadline,
+                },
+                "CUT SHORT: the shared deadline was reached; bee cancelled the harness. The task \
+                 was NOT completed."
+                    .to_string(),
+            ),
+            (Ok(()), HarnessEnd::Failed(why)) => {
+                let detail = format!("{why}{stderr_hint}");
+                (
+                    DelegationOutcome::Failed {
+                        detail: detail.clone(),
+                    },
+                    format!("FAILED: {detail}"),
+                )
+            }
+        };
+        cfg.emit(&format!(
+            "delegate '{}' ← {} (harness, {} permissions, {} refused methods)",
+            req.agent,
+            outcome_label(&outcome),
+            run.record.permissions.len(),
+            run.record.refused_methods.len()
+        ));
+        let body = match run.report() {
+            t if t.is_empty() => "(the harness said nothing in its final turn)".to_string(),
+            t => t,
+        };
+        let content = format!(
+            "subagent '{}' — {header}\n\n{body}\n\n{HARNESS_NOTE}\n",
+            req.agent
+        );
+        let is_error = !matches!(outcome, DelegationOutcome::Completed);
+        let (content, truncated, original_len) =
+            crate::transcript::truncate(content, crate::transcript::DEFAULT_OUTPUT_CAP);
+        Delegated {
+            result: ToolResult {
+                is_error,
+                truncated,
+                original_len,
+                provenance: Provenance::Remote {
+                    source: format!("subagent:{}", req.agent),
+                },
+                ..ToolResult::ok(content)
+            },
+            record: DelegationRecord {
+                agent: req.agent.clone(),
+                scope_id,
+                enforced: true,
+                depth,
+                outcome,
+                tokens_used: None,
+                transcript: None,
+                turns_used: None,
+                harness: Some(Box::new(run.record)),
+                audit,
+            },
+        }
+    }
+}
+
 /// How a child of an intercepting session gets its own proxy (026 T058).
 #[cfg(feature = "intercept")]
 type ChildProxyRef<'a> = Option<&'a crate::intercept::session::ChildProxies>;
@@ -611,11 +913,17 @@ fn child_sandbox(
     agent: &str,
     policy: &bee_core::Policy,
     proxies: ChildProxyRef<'_>,
+    harness: bool,
 ) -> Result<(Sandbox, String, bool, ChildPrepared), String> {
-    let intercepts = policy.http.as_ref().is_some_and(|h| h.is_active());
+    let intercepts = harness || policy.http.as_ref().is_some_and(|h| h.is_active());
     #[cfg(feature = "intercept")]
     let prepared = match (intercepts, proxies) {
         (false, _) => None,
+        // A harness's proxy is its only network: egress alone is enough, and nothing is refused.
+        (true, Some(p)) if harness => Some(p.prepare_harness(policy)?.ok_or(
+            "it declares no provider hosts (requires.net) and its parent does not intercept: a \
+             harness reaches the network only through its own proxy",
+        )?),
         (true, Some(p)) => p.prepare(policy)?,
         (true, None) => {
             return Err(
@@ -800,9 +1108,11 @@ fn refused(agent: &str, depth: u32, reason: RefusalReason) -> Delegated {
             enforced: false,
             depth,
             outcome: DelegationOutcome::Refused { reason },
-            tokens_used: 0,
+            tokens_used: None,
             transcript: None,
-            turns_used: 0,
+            turns_used: Some(0),
+            harness: None,
+            audit: Vec::new(),
         },
     }
 }
@@ -816,9 +1126,11 @@ fn failed(agent: &str, depth: u32, scope_id: String, enforced: bool, detail: Str
             enforced,
             depth,
             outcome: DelegationOutcome::Failed { detail },
-            tokens_used: 0,
+            tokens_used: None,
             transcript: None,
-            turns_used: 0,
+            turns_used: Some(0),
+            harness: None,
+            audit: Vec::new(),
         },
     }
 }

@@ -110,6 +110,11 @@ pub fn prepare_for(
     else {
         return Ok(None);
     };
+    bind(compiled, worker_exe).map(Some)
+}
+
+/// Bind the proxy listener for `compiled`.
+fn bind(compiled: CompiledHttp, worker_exe: PathBuf) -> Result<Prepared, String> {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
         .map_err(|e| format!("cannot bind the proxy listener: {e}"))?;
     let port = listener
@@ -121,13 +126,13 @@ pub fn prepare_for(
     } else {
         Some(ca_bundle_dir()?.join("ca-bundle.pem"))
     };
-    Ok(Some(Prepared {
+    Ok(Prepared {
         compiled,
         listener,
         port,
         worker_exe,
         ca_bundle,
-    }))
+    })
 }
 
 /// How a subagent of an intercepting session gets a proxy of its own (026 T058, 019 T092): the
@@ -156,6 +161,37 @@ impl ChildProxies {
             hosts: &self.hosts,
         };
         prepare_for(policy, &resolver, self.worker_exe.clone())
+    }
+
+    /// The settings for a harness's proxy under a session that does not intercept (026 R8): this
+    /// bee as the worker, the system resolver, kernel enforcement — a harness only ever runs in a
+    /// kernel scope.
+    pub fn for_harness(project_root: PathBuf) -> Result<ChildProxies, String> {
+        let worker_exe = std::env::current_exe()
+            .and_then(|p| p.canonicalize())
+            .map_err(|e| format!("cannot resolve the bee binary for the proxy worker: {e}"))?;
+        Ok(ChildProxies {
+            worker_exe,
+            hosts: Vec::new(),
+            project_root,
+            enforcement: Enforcement::Kernel,
+        })
+    }
+
+    /// Compile a **harness's** `[policy.http]` — egress alone is enough (026 R8) — and bind its
+    /// listener. `Ok(None)` when it can reach nothing at all.
+    pub fn prepare_harness(&self, policy: &Policy) -> Result<Option<Prepared>, String> {
+        let resolver = WithHosts {
+            system: bee_userspace::SystemResolver::current(),
+            hosts: &self.hosts,
+        };
+        let Some(compiled) = policy
+            .compile_http_egress(&resolver, &self.worker_exe)
+            .map_err(|e| format!("[policy.http]: {e}"))?
+        else {
+            return Ok(None);
+        };
+        bind(compiled, self.worker_exe.clone()).map(Some)
     }
 
     /// Whether the child's proxy runs in a kernel scope of its own.

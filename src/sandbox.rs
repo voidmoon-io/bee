@@ -65,6 +65,8 @@ pub enum CallOrigin {
     Tool,
     /// A long-lived MCP stdio server, named.
     Mcp(String),
+    /// An external harness subagent (026), named by its agent.
+    Harness(String),
 }
 
 /// Extra environment variables for one tool child, applied **after** [`restrict_env`] (research R6).
@@ -272,6 +274,18 @@ pub struct HostSandbox {
     scripted: Option<std::sync::Arc<ScriptedAudit>>,
 }
 
+impl HostSandbox {
+    /// The next scripted audit batch — the proxy's or the tool scope's. Empty outside tests.
+    fn next_scripted(&self, proxy: bool) -> Vec<AuditEvent> {
+        #[cfg(feature = "test-support")]
+        if let Some(s) = &self.scripted {
+            return if proxy { s.pop_proxy() } else { s.pop_tool() };
+        }
+        let _ = proxy;
+        Vec::new()
+    }
+}
+
 /// Audit batches a host test hands the sandbox in place of a kernel (024 R1, `test-support` only).
 ///
 /// Each [`Sandbox::drain_audit`] pops one batch from `tool`, and each
@@ -371,7 +385,7 @@ pub struct BatchSandbox {
 pub enum Sandbox {
     #[cfg(feature = "enforce")]
     Batch(Box<BatchSandbox>),
-    Host(HostSandbox),
+    Host(Box<HostSandbox>),
     #[cfg(feature = "enforce")]
     Enforced(Box<EnforcedSandbox>),
 }
@@ -481,20 +495,20 @@ pub fn key_vars(api_key_env: Option<&str>) -> Vec<String> {
 impl Sandbox {
     /// A no-scope sandbox that strips `strip_env` from every child.
     pub fn host(strip_env: Vec<String>) -> Self {
-        Sandbox::Host(HostSandbox {
+        Sandbox::Host(Box::new(HostSandbox {
             env: ChildEnv::new(strip_env),
             #[cfg(feature = "test-support")]
             scripted: None,
-        })
+        }))
     }
 
     /// A host sandbox whose drains return `audit`'s scripted batches (024 R1). Test-only.
     #[cfg(feature = "test-support")]
     pub fn host_scripted(strip_env: Vec<String>, audit: std::sync::Arc<ScriptedAudit>) -> Self {
-        Sandbox::Host(HostSandbox {
+        Sandbox::Host(Box::new(HostSandbox {
             env: ChildEnv::new(strip_env),
             scripted: Some(audit),
-        })
+        }))
     }
 
     fn child_env(&self) -> &ChildEnv {
@@ -769,15 +783,13 @@ impl Sandbox {
                 Some(side) => e.drain_handle(side.handle()),
                 None => Vec::new(),
             },
-            #[cfg(feature = "test-support")]
-            Sandbox::Host(HostSandbox {
-                scripted: Some(s), ..
-            }) => {
-                let mut events = s.pop_proxy();
+            Sandbox::Host(h) => {
+                let mut events = h.next_scripted(true);
                 self.retain_audit(&mut events);
                 events
             }
-            _ => Vec::new(),
+            #[cfg(feature = "enforce")]
+            Sandbox::Batch(_) => Vec::new(),
         }
     }
 
@@ -813,6 +825,18 @@ impl Sandbox {
     pub async fn begin_side_call(&self, call: &CallContext) {
         if let Some(h) = self.child_env().hooks.clone() {
             h.begin(call).await;
+        }
+    }
+
+    /// Run [`CallHooks::end`] for a side call and return the proxy events it produced — e.g.
+    /// revoke a harness's proxy credential once it has exited.
+    pub async fn end_side_call(&self, call: &CallContext) -> Vec<crate::proxy_event::ProxyEvent> {
+        match self.child_env().hooks.clone() {
+            Some(h) => {
+                h.end(call).await;
+                h.take_events(call)
+            }
+            None => Vec::new(),
         }
     }
 
@@ -1078,13 +1102,9 @@ impl Sandbox {
 
     fn drain_scope_audit(&mut self) -> Vec<AuditEvent> {
         let mut out = match self {
-            #[cfg(feature = "test-support")]
-            Sandbox::Host(HostSandbox {
-                scripted: Some(s), ..
-            }) => s.pop_tool(),
             #[cfg(feature = "enforce")]
             Sandbox::Batch(_) => Vec::new(),
-            Sandbox::Host(_) => Vec::new(),
+            Sandbox::Host(h) => h.next_scripted(false),
             #[cfg(feature = "enforce")]
             // Retained inside the drain, with the scope's own health counters.
             Sandbox::Enforced(e) => return e.drain_handle(&e.scope),

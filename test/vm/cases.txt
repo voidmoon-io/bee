@@ -60,3 +60,6 @@ http-proxy-fs-deny
 http-latency
 proxy-admit-on-resolve
 subagent-intercept-attributed
+harness-contained
+harness-credentials
+harness-egress-by-name

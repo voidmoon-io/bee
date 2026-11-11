@@ -114,6 +114,7 @@ pub fn wire_ctx(call: &CallContext) -> WireCtx {
         origin: match &call.origin {
             CallOrigin::Tool => "tool".into(),
             CallOrigin::Mcp(s) => format!("mcp:{s}"),
+            CallOrigin::Harness(s) => format!("harness:{s}"),
         },
     }
 }

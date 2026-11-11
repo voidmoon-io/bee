@@ -41,7 +41,11 @@ requires:
    refused: `the harness 'claude' needs a kernel scope, and this session has none`.
 2. Derive the child policy. For a harness, protected stores (`~/.claude`, `~/.claude.json`,
    `~/.codex`, `~/.local/share/opencode`, `~/.config/opencode`) are denied unless the agent names them
-   and the parent names them too.
+   and the parent names them too. Only the stores present on the machine are denied: unmatched reads
+   are allowed, so each deny is a kernel rule, and the eBPF backend holds 8 filesystem rules per scope
+   (4 of them bee's own protected defaults). A harness policy must fit in what is left.
+   A scope that denies unmatched writes also denies writes to `/dev/null`; a harness that opens it
+   (most do) needs `"/dev/null" = "write"`.
 3. Create the child scope **and its proxy scope**: child kernel network = proxy loopback only; proxy
    egress = `requires.net`; proxy targets = the parent's targets when the parent intercepts.
 4. Spawn `command args` through the child sandbox (cgroup join before exec, env cleared + `env` +
@@ -58,7 +62,7 @@ requires:
      and recorded. Never shown to a person.
    - `fs/*`, `terminal/*`, any other client method → JSON-RPC `method_not_found`, recorded in
      `refused_methods`.
-   - The child scope's audit is drained on each update and at the end.
+   - The child scope's audit is drained at the end (the supervisor buffers it until then).
 7. End:
    - `stopReason` received → `Completed` (`end_turn`), or `CutShort` (`max_tokens`,
      `max_turn_requests`), or `Completed` with the refusal stated (`refusal`).

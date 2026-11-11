@@ -7,10 +7,17 @@
 //! answers. bee never uses the client's file-system or terminal methods: they would run outside the
 //! scope.
 //!
+//! **Outward** ([`harness`]): bee is the ACP *client* of an external harness — Claude Code, Codex,
+//! OpenCode — run as a subagent inside its own kernel scope, its permission requests answered by
+//! bee and its web traffic through a proxy scope of its own.
+//!
 //! The protocol is ACP version 1, through the `agent-client-protocol` crate with no features: bee
 //! supplies its own byte streams, and its own tokio runtime drives the connection.
 
 pub mod agent;
+#[cfg(any(feature = "test-support", feature = "vm-test"))]
+pub mod fake_harness;
+pub mod harness;
 pub mod output;
 
 use std::path::PathBuf;

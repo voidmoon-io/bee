@@ -142,6 +142,11 @@ enum Cmd {
         #[arg(long)]
         session: String,
     },
+    /// Test-only (026 T003): a scripted ACP agent standing in for an external harness. Never in a
+    /// shipping build.
+    #[cfg(all(feature = "acp", any(feature = "test-support", feature = "vm-test")))]
+    #[command(hide = true)]
+    AcpFakeHarness,
 }
 
 fn main() -> ExitCode {
@@ -196,6 +201,8 @@ fn main() -> ExitCode {
         Cmd::SarifWorker(args) => cmd_sarif_worker(&args),
         #[cfg(feature = "intercept")]
         Cmd::ProxyWorker { session } => bee::intercept::worker::run(&session),
+        #[cfg(all(feature = "acp", any(feature = "test-support", feature = "vm-test")))]
+        Cmd::AcpFakeHarness => bee::acp::fake_harness::main(),
     }
 }
 

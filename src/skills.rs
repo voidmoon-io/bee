@@ -88,6 +88,88 @@ struct Frontmatter {
     /// Parsed per kind: a skill's [`SkillRequires`], an agent's [`AgentRequires`].
     #[serde(default)]
     requires: Option<serde_yaml_ng::Value>,
+    /// What runs an agent (026): absent ⇒ bee's own loop; `acp:` ⇒ an external harness.
+    #[serde(default)]
+    runtime: Option<serde_yaml_ng::Value>,
+}
+
+/// What runs a subagent (026 data-model.md, "Agent runtime").
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum AgentRuntime {
+    /// bee's own loop (018).
+    #[default]
+    Loop,
+    /// An external harness spoken to over ACP (026, contracts/harness-runtime.md): `command` is an
+    /// absolute path run with `args` — no shell — in the child scope, with `env` added to the
+    /// scope's cleared environment.
+    Acp {
+        command: PathBuf,
+        args: Vec<String>,
+        env: BTreeMap<String, String>,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeSection {
+    acp: Option<AcpRuntime>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AcpRuntime {
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+}
+
+/// Parse an agent's `runtime` block, refusing what bee cannot run as written.
+fn parse_runtime(v: Option<serde_yaml_ng::Value>) -> Result<AgentRuntime, String> {
+    let Some(v) = v else {
+        return Ok(AgentRuntime::Loop);
+    };
+    let section: RuntimeSection = serde_yaml_ng::from_value(v)
+        .map_err(|e| format!("frontmatter: runtime: {e} (the one runtime is `acp:`)"))?;
+    let acp = section
+        .acp
+        .ok_or("frontmatter: runtime: names no runtime (the one runtime is `acp:`)")?;
+    reject_controls("runtime.acp.command", &acp.command)?;
+    let command = PathBuf::from(&acp.command);
+    // No shell, no `npx`: an absolute path to an installed executable (research R15).
+    if !command.is_absolute() {
+        return Err(format!(
+            "runtime.acp.command '{}' must be an absolute path (bee runs no shell and no package \
+             runner)",
+            acp.command
+        ));
+    }
+    for a in &acp.args {
+        reject_controls("runtime.acp.args entry", a)?;
+    }
+    for (k, v) in &acp.env {
+        reject_controls("runtime.acp.env key", k)?;
+        reject_controls("runtime.acp.env value", v)?;
+        if k.is_empty() || k.contains('=') || k.contains('\0') || k.starts_with("LD_") {
+            return Err(format!(
+                "runtime.acp.env: '{k}' is not a variable bee passes"
+            ));
+        }
+        // A credential never comes from a file: the operator passes one by name from bee's own
+        // environment (`[acp] harness_env_passthrough`).
+        if crate::sandbox::DEFAULT_KEY_VARS.contains(&k.as_str()) {
+            return Err(format!(
+                "runtime.acp.env: '{k}' is a credential bee strips; the operator passes it from \
+                 bee's environment with [acp] harness_env_passthrough, never from a definition"
+            ));
+        }
+    }
+    Ok(AgentRuntime::Acp {
+        command,
+        args: acp.args,
+        env: acp.env,
+    })
 }
 
 /// The capabilities an agent definition declares (018, contracts/agent-definition.md). It is
@@ -122,6 +204,8 @@ pub struct Agent {
     pub dir: PathBuf,
     pub skill_md: PathBuf,
     pub source: SkillSource,
+    /// What runs it (026). A harness has no `tools` and no turn limit of bee's.
+    pub runtime: AgentRuntime,
 }
 
 impl Agent {
@@ -455,16 +539,28 @@ fn load_as_agent(
     skill_md: &Path,
     source: SkillSource,
 ) -> Result<Agent, String> {
-    let tools = fm
-        .tools
-        .ok_or("an agent needs `tools` (it may be empty: `tools: []`)")?;
+    let runtime = parse_runtime(fm.runtime)?;
+    let harness = matches!(runtime, AgentRuntime::Acp { .. });
+    let tools = match (fm.tools, harness) {
+        // A harness's tools are its own: the model chooses it by name and description alone.
+        (Some(t), true) if !t.is_empty() => {
+            return Err(
+                "a harness agent (runtime.acp) takes no `tools`: its tools are its own".into(),
+            )
+        }
+        (_, true) => Vec::new(),
+        (Some(t), false) => t,
+        (None, false) => return Err("an agent needs `tools` (it may be empty: `tools: []`)".into()),
+    };
     for t in &tools {
         reject_controls("tools entry", t)?;
     }
-    let turn_limit = match fm.turn_limit {
-        None => return Err("an agent needs `turn-limit`".into()),
-        Some(0) => return Err("`turn-limit` must be at least 1".into()),
-        Some(n) => n,
+    let turn_limit = match (fm.turn_limit, harness) {
+        (Some(0), _) => return Err("`turn-limit` must be at least 1".into()),
+        // Not observable over ACP: the harness counts its own turns (research R14).
+        (n, true) => n.unwrap_or(1),
+        (None, false) => return Err("an agent needs `turn-limit`".into()),
+        (Some(n), false) => n,
     };
     let requires: Option<AgentRequires> = fm
         .requires
@@ -512,6 +608,7 @@ fn load_as_agent(
         dir: dir.to_path_buf(),
         skill_md: skill_md.to_path_buf(),
         source,
+        runtime,
     })
 }
 
@@ -659,6 +756,75 @@ mod tests {
         assert_eq!(p.filesystem.get("/src"), Some(&bee_core::Access::Read));
         assert_eq!(p.network.allow, vec!["127.0.0.1:9".to_string()]);
         assert_eq!(p.mode, bee_core::Mode::Enforce);
+    }
+
+    // 026 T030: `runtime.acp` parses; a relative command, harness `tools`, or a stripped
+    // credential in `env` is a malformed definition; no runtime is bee's own loop.
+    #[test]
+    fn a_harness_runtime_parses_and_is_validated() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().to_path_buf();
+        write_skill(
+            &dir,
+            "claude",
+            "---\nname: claude\nkind: agent\ndescription: Claude Code\nruntime:\n  acp:\n    \
+             command: /opt/claude-agent-acp\n    args: [\"--x\"]\n    env:\n      \
+             CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: \"1\"\nrequires:\n  net: \
+             [\"api.anthropic.com:443\"]\n---\nunused\n",
+        );
+        let reg = SkillRegistry::discover(std::slice::from_ref(&dir));
+        assert!(reg.warnings().is_empty(), "{:?}", reg.warnings());
+        let a = reg.agent("claude").unwrap();
+        assert!(a.tools.is_empty());
+        let AgentRuntime::Acp { command, args, env } = &a.runtime else {
+            panic!("{:?}", a.runtime)
+        };
+        assert_eq!(command, std::path::Path::new("/opt/claude-agent-acp"));
+        assert_eq!(args, &vec!["--x".to_string()]);
+        assert_eq!(
+            env.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
+                .map(String::as_str),
+            Some("1")
+        );
+
+        for (body, why) in [
+            (
+                "runtime:\n  acp:\n    command: claude-agent-acp",
+                "absolute",
+            ),
+            (
+                "tools: [bash]\nruntime:\n  acp:\n    command: /opt/h",
+                "takes no `tools`",
+            ),
+            (
+                "runtime:\n  acp:\n    command: /opt/h\n    env:\n      ANTHROPIC_API_KEY: sk",
+                "harness_env_passthrough",
+            ),
+            ("runtime:\n  mcp:\n    command: /opt/h", "runtime"),
+        ] {
+            let t = tempfile::tempdir().unwrap();
+            write_skill(
+                t.path(),
+                "bad",
+                &format!("---\nname: bad\nkind: agent\ndescription: d\n{body}\n---\nb\n"),
+            );
+            let reg = SkillRegistry::discover(&[t.path().into()]);
+            assert!(reg.agent("bad").is_none(), "{body}");
+            assert!(
+                reg.warnings().iter().any(|w| w.reason.contains(why)),
+                "{body}: {:?}",
+                reg.warnings()
+            );
+        }
+
+        let t = tempfile::tempdir().unwrap();
+        write_skill(
+            t.path(),
+            "plain",
+            "---\nname: plain\nkind: agent\ndescription: d\ntools: []\nturn-limit: 2\n---\nb\n",
+        );
+        let reg = SkillRegistry::discover(&[t.path().into()]);
+        assert_eq!(reg.agent("plain").unwrap().runtime, AgentRuntime::Loop);
     }
 
     #[test]

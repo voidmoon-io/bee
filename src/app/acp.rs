@@ -228,9 +228,10 @@ impl SessionFactory for Factory {
             mcp_summary: built.mcp.as_ref().map(|b| b.summary()),
             tool_refresh: built.tool_refresh.clone(),
             skills: built.skills.clone(),
-            delegation: built
-                .delegation(None)
-                .map(|d| d.with_limits(cfg.delegation)),
+            delegation: built.delegation(None).map(|d| {
+                d.with_limits(cfg.delegation)
+                    .with_harness_env(cfg.acp.harness_env_passthrough.clone().unwrap_or_default())
+            }),
             visual: cfg.visual,
             escalation,
             context: context_inputs,

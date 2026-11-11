@@ -1970,6 +1970,155 @@ else
   done
 fi
 
+# ------------------------------------------------ 026 PR3: external harnesses as scoped subagents
+# One headless session delegates to three agents run by `bee acp-fake-harness` (a scripted ACP agent)
+# through `runtime.acp`. Each harness runs in its own child scope with a proxy scope of its own.
+# harness-contained (S7): an in-scope write lands, an outside write is kernel-denied in the
+#   delegation's own audit under the child scope; `fs/read_text_file` is refused and recorded; a
+#   detached sleeper it forked is gone afterwards, and so is its scope.
+# harness-credentials (S9a): an agent naming ~/.claude (which its parent names too) reads it; another
+#   harness's store, ~/.codex, is kernel-denied.
+# harness-egress-by-name (S8): its provider host is reached through its proxy by name and tunnelled
+#   (a TunnelRecord); another name on the same address is refused by the proxy; a direct connect is
+#   kernel-denied; after the provider's address moves, it is reached again (resolve-and-admit).
+HN_CASES="harness-contained harness-credentials harness-egress-by-name"
+if [ -x "$BEE" ] && "$BEE" acp-fake-harness --help >/dev/null 2>&1; then
+  HW=/home/ubuntu/hwork
+  rm -rf "$HW" /home/ubuntu/harness-outside.txt; mkdir -p "$HW/skills/contained" "$HW/skills/creds" "$HW/skills/egress"
+  cp /etc/hosts "$HW/hosts.bak"
+  printf '127.0.0.2 prov.test\n127.0.0.2 other.test\n' >>/etc/hosts
+  HOME_CREATED=""
+  for f in "$HOME/.claude/.credentials.json" "$HOME/.codex/auth.json"; do
+    if [ ! -e "$f" ]; then mkdir -p "$(dirname "$f")"; echo '{"test":true}' >"$f"; HOME_CREATED="$HOME_CREATED $f"; fi
+  done
+  openssl req -x509 -newkey rsa:2048 -nodes -subj "/CN=prov.test" -days 1 \
+    -keyout "$HW/key.pem" -out "$HW/cert.pem" >/dev/null 2>&1
+  openssl s_server -accept 127.0.0.2:18443 -cert "$HW/cert.pem" -key "$HW/key.pem" -www -quiet >/dev/null 2>&1 &
+  H2=$!
+  openssl s_server -accept 127.0.0.3:18443 -cert "$HW/cert.pem" -key "$HW/key.pem" -www -quiet >/dev/null 2>&1 &
+  H3=$!
+  sleep 1
+  printf '%s\n' '[policy]' 'name = "harness-vm"' 'mode = "enforce"' \
+    '[policy.exec]' "allow = [\"$BEE\", \"curl\", \"sleep\", \"dash\"]" \
+    '[policy.filesystem]' "\"$HW\" = \"write\"" '"~/.claude" = "write"' '"/dev/null" = "write"' \
+    '[policy.network]' 'allow = ["prov.test:18443"]' >"$HW/policy.toml"
+  agent() { # name script-json extra-requires
+    cat >"$HW/skills/$1/SKILL.md" <<EOF
+---
+name: $1
+kind: agent
+description: A scripted harness ($1).
+runtime:
+  acp:
+    command: $BEE
+    args: [acp-fake-harness]
+    env:
+      FAKE_HARNESS_SCRIPT: '$2'
+requires:
+  net: ["prov.test:18443"]
+$3
+---
+unused
+EOF
+  }
+  agent contained "[{\"write\": {\"path\": \"$HW/in.txt\", \"text\": \"inside\"}}, {\"write\": {\"path\": \"/home/ubuntu/harness-outside.txt\", \"text\": \"outside\"}}, {\"call_fs_read\": \"/etc/hostname\"}, {\"fork_sleeper\": 300}, {\"say\": \"contained done\"}]" ""
+  agent creds "[{\"read\": \"$HOME/.claude/.credentials.json\"}, {\"read\": \"$HOME/.codex/auth.json\"}, {\"say\": \"creds done\"}]" "  filesystem:
+    \"~/.claude\": write"
+  CURL='"curl", "-sk", "--max-time", "10", "-w", "code=%{http_code}"'
+  agent egress "[{\"run\": [$CURL, \"-o\", \"$HW/e1.html\", \"https://prov.test:18443/\"]}, {\"run\": [$CURL, \"-o\", \"$HW/e2.html\", \"https://other.test:18443/\"]}, {\"connect_direct\": {\"host\": \"127.0.0.2\", \"port\": 18443}}, {\"write\": {\"path\": \"$HW/flip\", \"text\": \"1\"}}, {\"wait_file\": {\"path\": \"$HW/flipped\", \"secs\": 15}}, {\"run\": [$CURL, \"-o\", \"$HW/e3.html\", \"https://prov.test:18443/\"]}, {\"say\": \"egress done\"}]" ""
+  printf '%s\n' '[scenario]' 'finish = false' 'id = "harness"' "policy_path = \"$HW/policy.toml\"" \
+    'system_prompt = "test"' 'task = "delegate"' 'turn_limit = 8' 'timeout_secs = 120' \
+    'tools = ["task"]' "skills = [\"$HW/skills\"]" >"$HW/scn.toml"
+  printf '%s\n' '[provider]' 'provider = "mock"' \
+    '[[provider.script]]' 'tool = "task"' 'args = { agent = "contained", prompt = "go" }' \
+    '[[provider.script]]' 'tool = "task"' 'args = { agent = "creds", prompt = "go" }' \
+    '[[provider.script]]' 'tool = "task"' 'args = { agent = "egress", prompt = "go" }' \
+    '[[provider.script]]' 'text = "done"' >"$HW/prov.toml"
+  ( for _ in $(seq 1 900); do [ -f "$HW/flip" ] && break; sleep 0.1; done
+    sed -i 's/^127\.0\.0\.2 prov\.test$/127.0.0.3 prov.test/' /etc/hosts
+    kill "$H2" 2>/dev/null; sleep 0.3; : >"$HW/flipped" ) &
+  HF=$!
+  ( cd "$HW" && "$BEE" run --scenario "$HW/scn.toml" --provider "$HW/prov.toml" \
+      --out "$HW/t.json" ) >"$HW/run.log" 2>&1
+  kill "$HF" "$H2" "$H3" 2>/dev/null
+  cp "$HW/hosts.bak" /etc/hosts
+  while IFS='|' read -r c st note; do emit "$c" "$st" "$note"; done < <(python3 - "$HW" 2>&1 <<'PYCHECK'
+import json, os, re, sqlite3, sys
+hw = sys.argv[1]
+def out(case, checks, note):
+    bad = [k for k, v in checks.items() if not v]
+    print(f"{case}|{'PASS' if not bad else 'FAIL'}|{'; '.join(bad) or 'ok'}: {note}".replace("\n", " "))
+try:
+    t = json.load(open(f"{hw}/t.json"))
+except Exception as e:
+    for c in ("harness-contained", "harness-credentials", "harness-egress-by-name"):
+        print(f"{c}|FAIL|no transcript: {e}")
+    sys.exit()
+calls = [c for turn in t["turns"] for c in turn.get("calls", []) if c["call"]["name"] == "task"]
+by = {c["call"]["arguments"]["agent"]: c for c in calls}
+def kid(n): return (by.get(n) or {}).get("child") or {}
+def res(n): return ((by.get(n) or {}).get("result") or {}).get("content", "")
+def denied(k, op, frag):
+    return [e for e in k.get("audit", []) if e["op"] == op and e["decision"] == "denied" and frag in e.get("target", "")]
+NOTE = "NOTE: this subagent is an external harness"
+
+k, r = kid("contained"), res("contained")
+pid = re.search(r"fork_sleeper: pid (\d+)", r)
+alive = bool(pid) and os.path.exists(f"/proc/{pid.group(1)}")
+outside = open("/home/ubuntu/harness-outside.txt").read() if os.path.exists("/home/ubuntu/harness-outside.txt") else ""
+dn = denied(k, "file_open", "harness-outside")
+leftover = [d for d in os.listdir("/sys/fs/cgroup/bee") if d.startswith("fs-")] if os.path.isdir("/sys/fs/cgroup/bee") else []
+out("harness-contained", {
+    "completed and enforced": (k.get("outcome") or {}).get("kind") == "completed" and k.get("enforced") is True,
+    "harness record": bool(k.get("harness")) and k.get("transcript") is None,
+    "in-scope write": "in.txt: ok" in r and open(f"{hw}/in.txt").read() == "inside",
+    "outside write kernel-denied": "harness-outside.txt: denied" in r and outside != "outside" and bool(dn),
+    "denial under the child scope": bool(dn) and all(e.get("scope_id") == k.get("scope_id") for e in dn),
+    "fs/read_text_file refused and recorded": "fs/read_text_file: refused" in r and (k.get("harness") or {}).get("refused_methods") == ["fs/read_text_file"],
+    "FR-021 note": NOTE in r,
+    "sleeper gone": bool(pid) and not alive,
+    "scope gone": not any(k.get("scope_id", "?") in d for d in leftover),
+}, f"report={r[:160]!r} sleeper={pid.group(1) if pid else None} alive={alive} leftover={leftover}")
+
+k, r = kid("creds"), res("creds")
+out("harness-credentials", {
+    "completed": (k.get("outcome") or {}).get("kind") == "completed",
+    "its own store readable": ".credentials.json: ok" in r,
+    "another harness's store denied": "auth.json: denied" in r and bool(denied(k, "file_open", ".codex")),
+}, f"report={r[:200]!r}")
+
+k, r = kid("egress"), res("egress")
+runs = re.findall(r"run curl: exit -?\d+: (code=\d+)", r)
+try:
+    db = sqlite3.connect(f"file:{hw}/.bee/http/index.sqlite?mode=ro", uri=True)
+    sid = db.execute("SELECT session_id FROM attribution WHERE delegation_id = ?", (by["egress"]["call"]["id"],)).fetchone()
+    sid = sid[0] if sid else ""
+    tunnels = db.execute("SELECT COUNT(*) FROM tunnels WHERE session_id = ? AND host = 'prov.test'", (sid,)).fetchone()[0]
+    oos = db.execute("SELECT COUNT(*) FROM refusals WHERE session_id = ? AND host = 'other.test' AND kind = 'refused_out_of_scope'", (sid,)).fetchone()[0]
+    added = [a for (row,) in db.execute("SELECT added FROM admits WHERE session_id = ?", (sid,)) for a in json.loads(row)]
+except Exception as e:
+    sid, tunnels, oos, added = f"<{e}>", 0, 0, []
+out("harness-egress-by-name", {
+    "completed": (k.get("outcome") or {}).get("kind") == "completed",
+    "provider reached by name": runs[:1] == ["code=200"],
+    "other name refused": len(runs) > 1 and runs[1] == "code=000" and oos >= 1,
+    "direct connect kernel-denied": "connect_direct 127.0.0.2:18443: shut" in r and bool(denied(k, "connect", "127.0.0.2:18443")),
+    "flipped": "wait_file" in r and "flipped: true" in r,
+    "reached after the move": len(runs) > 2 and runs[2] == "code=200",
+    "tunnels recorded, no content": tunnels >= 2,
+    "admitted 127.0.0.3": "127.0.0.3" in added,
+}, f"runs={runs} session={sid} tunnels={tunnels} oos={oos} admits={added}")
+PYCHECK
+)
+  for f in $HOME_CREATED; do rm -f "$f"; done
+  rmdir "$HOME/.codex" "$HOME/.claude" 2>/dev/null
+  rm -rf "$HW" /home/ubuntu/harness-outside.txt
+else
+  for c in $HN_CASES; do
+    emit "$c" FAIL "bee was not built with --features acp,vm-test (see test/vm/README.md)"
+  done
+fi
+
 rm -rf "$WORK"
 echo "SUMMARY|pass=$pass|fail=$fail"
 [ "$fail" -eq 0 ]

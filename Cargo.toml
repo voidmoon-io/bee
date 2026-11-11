@@ -3,6 +3,8 @@ resolver = "2"
 members = [
     "crates/common",
     "crates/core",
+    "crates/comb",
+    "crates/comb-cli",
     "crates/userspace",
 ]
 # crates/ebpf targets bpfel-unknown-none (nightly + bpf-linker) and is built out-of-band
@@ -28,6 +30,7 @@ rust-version = "1.85"
 # Shared POD map layouts (no_std) live here; both user-space and eBPF depend on it.
 bee-common = { path = "crates/common" }
 bee-core = { path = "crates/core" }
+comb = { path = "crates/comb" }
 bee-userspace = { path = "crates/userspace" }
 
 # User-space eBPF stack (stable Rust).
@@ -104,16 +107,18 @@ durable-sessions = ["durable-store", "findings", "tokio/signal"]
 # stripped host processes with NO scope — enough for offline (MockModel) tests and live-provider
 # smoke, and keeping the default workspace build runtime-/bpf-toolchain-free (Constitution V, SC-005).
 enforce = ["bee-userspace/enforce"]
-# Concurrent batch episodes: the async audit demux + shared-engine runner.
-# Concurrent episodes (US4): the async audit demux + shared-engine runner. Pulls bee-userspace's
-# `tokio` feature (which implies `enforce`) and turns on the harness `enforce` path it builds on.
-# Kept separate from `enforce` so the plain enforce build stays async-runtime-free (SC-005).
-concurrent = ["enforce", "bee-userspace/tokio"]
+# Concurrent batch episodes (US4): `bee run --batch --concurrent`, one shared Supervisor for every
+# episode's scope. Since 018 every enforced session audits through the Supervisor's synchronous
+# per-scope routing, so this adds only the runner; bee-userspace's async demux is no longer used here.
+concurrent = ["enforce"]
 # MCP client (004-mcp-client). Default-off so the plain build stays rmcp-free (NFR-004/006, SC-026/027):
 # no MCP code compiles and `rmcp` never enters bee-core/bee-common's tree unless this is enabled. Gates
 # the optional `rmcp` dep below. Stdio (`transport-child-process`) ships first; the remote
 # Streamable-HTTP transport feature is added with the domain-gating slice (US9, task T024).
 mcp = ["dep:rmcp"]
+# ACP (026): `bee acp`, bee as an Agent Client Protocol agent for clients such as t3code. The library
+# is runtime-neutral; tokio-util adapts tokio's stdio to its `futures` I/O.
+acp = ["dep:agent-client-protocol", "dep:tokio-util", "tokio/io-std", "tokio/io-util"]
 # Full-screen TUI front-end (008-grid-tui, M3–M4), and `bee repl`'s default. On by default; build with
 # `--no-default-features` for a headless binary free of a terminal backend (Constitution V / SC-005).
 # It turns on ratatui's crossterm backend and pulls the optional terminal deps below. Without it,
@@ -174,6 +179,8 @@ sec = ["findings", "astgrep", "gitlog", "cvss", "scanners", "source", "repro"]
 # tests/core_deps_guard.rs). NB: `rcgen` 0.14 declares MSRV 1.88, which equals this package's own
 # floor — see the `rust-version` note on `[package]` (research R20).
 intercept = [
+    # The interceptor library (.scratch/comb).
+    "dep:comb",
     "dep:hyper",
     "dep:hyper-util",
     "dep:http-body-util",
@@ -181,13 +188,8 @@ intercept = [
     "dep:rustls",
     "dep:webpki-roots",
     "dep:httparse",
-    "dep:flate2",
-    "dep:similar",
     "dep:rcgen",
     "dep:rusqlite",
-    "dep:brotli-decompressor",
-    "dep:ruzstd",
-    "dep:json-patch",
     # Content addressing for stored bodies (blobs/<aa>/<sha256>). Already optional for `findings`.
     "dep:sha2",
     "tokio/net",
@@ -200,7 +202,7 @@ intercept = [
 # the `http-proxy-scope` and `http-proxy-fs-deny` VM cases use to probe the proxy scope from inside.
 # NEVER in a shipping build — only `test/vm/matrix.sh` enables it; every other build fails to decode
 # those frames (asserted in `src/intercept/control.rs`).
-vm-test = ["intercept"]
+vm-test = ["intercept", "comb/vm-test"]
 # Test-only (024 R1): a host-only scripted audit source for orchestration tests, so the call
 # lifecycle's retry paths are testable without a BPF-LSM kernel. NEVER in a shipping build — a
 # scripted batch can fabricate the denials that drive grants. Test targets that need it declare
@@ -273,6 +275,8 @@ tachyonfx = { version = "0.25", default-features = false, features = [
 # sandboxed stdio transport (research R3); `transport-streamable-http-client-reqwest` is the
 # domain-gated remote transport (US9 — rmcp 2.x removed the SSE client, so `transport = "sse"` is a
 # deprecated alias routed here, research R2).
+agent-client-protocol = { version = "5.1", default-features = false, optional = true }
+tokio-util = { version = "0.7", features = ["compat"], optional = true }
 rmcp = { version = "2.2", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"], optional = true }
 
 # Markdown → ratatui `Text` (010, application package only — MUST NOT propagate to bee-core/bee-common).
@@ -333,6 +337,7 @@ sha2 = { version = "0.10", optional = true }
 # Already in Cargo.lock through rig-core's reqwest stack; declared here directly because the proxy
 # worker uses them itself. hyper 1.x is the forwarded-traffic proxy (it preserves header case, R1);
 # the crypto provider is `aws-lc-rs`, matching what the lockfile already resolved.
+comb = { workspace = true, optional = true }
 hyper = { version = "1", features = ["http1", "server", "client"], optional = true }
 hyper-util = { version = "0.1", features = ["tokio"], optional = true }
 http-body-util = { version = "0.1", optional = true }
@@ -341,21 +346,16 @@ rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", 
 webpki-roots = { version = "1", optional = true }
 # The raw HTTP/1.1 writer frames responses with httparse (byte-exact requests, FR-018, R1).
 httparse = { version = "1.10", optional = true }
-# Body decoding for `http_get` slices (gzip/deflate), the replay diff, and grep over bodies.
-flate2 = { version = "1.1", optional = true }
-similar = { version = "2.7", optional = true }
+# Intercept-rule path matching, and the file worker's line matchers (`src/fileops.rs`), which every
+# build carries. Body decoding, the replay diff and the store moved to `comb`.
 regex = "1"
 #
 # New with 019. `rcgen` mints the per-session CA and leaf certificates in worker memory (`zeroize`
 # wipes the key on drop, R9). `rusqlite` `bundled` is the exchange index — multi-column filtered
-# history over ~100k rows, two writers (R8). `brotli-decompressor`/`ruzstd` are decode-only, pure
-# Rust. `json-patch` gives the JSON body diff as pointer paths (R10).
+# history over ~100k rows, two writers (R8); the store itself is in `comb`.
 # The lockfile holds rcgen at 0.14.9: 0.14.10 requires aws-lc-rs ^1.18, which would move the
 # aws-lc-rs every default build already links (SC-009 — the default tree must not change).
 rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem", "zeroize"], optional = true }
-brotli-decompressor = { version = "6", optional = true }
-ruzstd = { version = "0.9", optional = true }
-json-patch = { version = "4.2", optional = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -367,6 +367,8 @@ time = { workspace = true }
 libc = { workspace = true }
 
 [dev-dependencies]
+# The fixture target (tests/support/vuln_target.rs) serves gzip bodies.
+flate2 = "1.1"
 # 019: tests assert against the kernel rule budget and access bits the core compiles to.
 bee-common = { workspace = true }
 # 019 SC-007: the interception latency bench (benches/intercept_latency.rs).
@@ -443,6 +445,11 @@ required-features = ["test-support"]
 [[test]]
 name = "intercept_tools"
 path = "tests/intercept_tools.rs"
+required-features = ["intercept", "test-support"]
+
+[[test]]
+name = "intercept_delegation"
+path = "tests/intercept_delegation.rs"
 required-features = ["intercept", "test-support"]
 
 [[test]]

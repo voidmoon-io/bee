@@ -30,6 +30,7 @@ pub mod search;
 pub mod skill;
 #[cfg(feature = "source")]
 pub mod source;
+pub mod task;
 
 // Security analysis tools (016-native-tools). Each is gated by its family's feature so a build that
 // selects none of them compiles none of them; `outcome` above is NOT gated, because the fail-closed
@@ -44,22 +45,6 @@ pub mod finding;
 pub mod gitlog;
 #[cfg(feature = "intercept")]
 pub mod http;
-#[cfg(feature = "intercept")]
-pub mod http_fuzz;
-#[cfg(feature = "intercept")]
-pub mod http_get;
-#[cfg(feature = "intercept")]
-pub mod http_history;
-#[cfg(feature = "intercept")]
-pub mod http_intercept;
-#[cfg(feature = "intercept")]
-pub mod http_leads;
-#[cfg(feature = "intercept")]
-pub mod http_replay;
-#[cfg(feature = "intercept")]
-pub mod http_send;
-#[cfg(feature = "intercept")]
-pub mod http_sitemap;
 #[cfg(feature = "findings")]
 pub mod receipt;
 #[cfg(feature = "scanners")]
@@ -100,6 +85,10 @@ pub const RENDER_TOOLS: &[&str] = &["render"];
 /// from a name alone. The caller inserts [`skill::SkillTool`] with the registry (auto-enabled when
 /// discovery finds ≥1 model-facing skill).
 pub const SKILL_TOOLS: &[&str] = &["skill"];
+
+/// The delegation tool (018). **Not** in `DEFAULT_TOOLS`: a scenario opts in by listing `"task"`, and
+/// it registers only when at least one agent definition was discovered.
+pub const TASK_TOOLS: &[&str] = &["task"];
 
 /// The native security-analysis tools (016-native-tools). **Not** in `DEFAULT_TOOLS`: a scenario or
 /// the REPL config opts in by listing them, exactly as it does for `render`.
@@ -155,6 +144,7 @@ pub fn is_known_tool(name: &str) -> bool {
         || RUN_TOOLS.contains(&name)
         || RENDER_TOOLS.contains(&name)
         || SKILL_TOOLS.contains(&name)
+        || TASK_TOOLS.contains(&name)
         || SEC_TOOLS.contains(&name)
         || SCANNER_TOOLS.contains(&name)
         || HTTP_TOOLS.contains(&name)
@@ -225,6 +215,19 @@ pub struct ToolResult {
     /// being treated as data, and every path that relays child or remote bytes does.
     #[serde(default, skip_serializing_if = "Provenance::is_harness")]
     pub provenance: Provenance,
+    /// A delegation the `task` tool asks for (018). The call lifecycle fulfils it and replaces this
+    /// result with the subagent's report; **no result carrying one ever reaches the model**. A path
+    /// that cannot fulfil it refuses instead ([`ToolRegistry::execute`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegate: Option<Box<DelegationRequest>>,
+}
+
+/// What the `task` tool hands the loop (018, contracts/task-tool.md): which agent, and the task. No
+/// capability, tool list or policy — those come from the agent's definition (FR-003).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DelegationRequest {
+    pub agent: String,
+    pub prompt: String,
 }
 
 impl ToolResult {
@@ -243,6 +246,7 @@ impl ToolResult {
             panel_ops: Vec::new(),
             inline_effect: None,
             provenance: Provenance::Harness,
+            delegate: None,
         }
     }
 
@@ -261,6 +265,7 @@ impl ToolResult {
             panel_ops: Vec::new(),
             inline_effect: None,
             provenance: Provenance::Harness,
+            delegate: None,
         }
     }
 
@@ -379,6 +384,8 @@ pub struct ToolDeps {
     pub reproductions: std::collections::BTreeMap<String, crate::security::ReproductionProfile>,
     /// Discovered skills (006). `skill` is registered only when they are set.
     pub skills: Option<std::sync::Arc<crate::skills::SkillRegistry>>,
+    /// The registry holding agent definitions (018). `task` is registered only when it is set.
+    pub agents: Option<std::sync::Arc<crate::skills::SkillRegistry>>,
     /// The finding ledger the security tools write to (016). `None` is each tool's own default: the
     /// ledger under the working directory.
     #[cfg(feature = "findings")]
@@ -396,6 +403,10 @@ pub struct ToolDeps {
     /// The session's HTTP interception proxy (019). `None` means the HTTP tools refuse.
     #[cfg(feature = "intercept")]
     pub interceptor: Option<crate::intercept::sidecar::Interceptor>,
+    /// How a subagent of an intercepting session gets a proxy of its own (026 T058). Set with
+    /// [`interceptor`](Self::interceptor), and inherited by every child's dependencies.
+    #[cfg(feature = "intercept")]
+    pub child_proxies: Option<std::sync::Arc<crate::intercept::session::ChildProxies>>,
 }
 
 impl ToolDeps {
@@ -644,7 +655,13 @@ impl ToolRegistry {
     /// Execute a model-requested call. An unknown tool name yields an error result (fed back to the
     /// model), never a panic (FR-016).
     pub async fn execute(&self, call: &ToolCall, sandbox: &Sandbox) -> ToolResult {
-        let result = self.execute_unrecorded(call, sandbox).await;
+        undelegated(call, self.execute_delegable(call, sandbox).await)
+    }
+
+    /// [`execute`](Self::execute), leaving a delegation request on the result for the caller to
+    /// fulfil (018). Only `crate::call` uses it.
+    pub(crate) async fn execute_delegable(&self, call: &ToolCall, sandbox: &Sandbox) -> ToolResult {
+        let result = self.dispatch(call, sandbox).await;
         #[cfg(feature = "findings")]
         if let Some(store) = self.deps.evidence.as_ref().filter(|_| {
             [
@@ -680,7 +697,12 @@ impl ToolRegistry {
         result
     }
 
+    #[cfg_attr(not(feature = "findings"), allow(dead_code))]
     async fn execute_unrecorded(&self, call: &ToolCall, sandbox: &Sandbox) -> ToolResult {
+        undelegated(call, self.dispatch(call, sandbox).await)
+    }
+
+    async fn dispatch(&self, call: &ToolCall, sandbox: &Sandbox) -> ToolResult {
         if let Err(error) = sandbox.check_cleanup() {
             return ToolResult::error(error);
         }
@@ -689,6 +711,19 @@ impl ToolRegistry {
             None => ToolResult::error(format!("unknown tool: {}", call.name)),
         }
     }
+}
+
+/// `result`, unless it asks for a delegation: only the call lifecycle can run a subagent, so every
+/// other path (a durable executor, a codemode script) refuses rather than hand the model an empty
+/// result (018).
+fn undelegated(call: &ToolCall, result: ToolResult) -> ToolResult {
+    if result.delegate.is_none() {
+        return result;
+    }
+    ToolResult::error(format!(
+        "{}: delegation is not available here (only a direct tool call can delegate)",
+        call.name
+    ))
 }
 
 #[cfg(feature = "findings")]
@@ -745,6 +780,10 @@ fn build(name: &str, deps: &ToolDeps) -> Result<Option<Box<dyn Tool>>, UnknownTo
         "search" => Box::new(search::Search),
         "skill" => match &deps.skills {
             Some(skills) => Box::new(skill::SkillTool::new(skills.clone())),
+            None => return Ok(None),
+        },
+        "task" => match &deps.agents {
+            Some(agents) => Box::new(task::TaskTool::new(agents.clone())),
             None => return Ok(None),
         },
 

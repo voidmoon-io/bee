@@ -1,17 +1,14 @@
-//! Concurrent episode runner (US4, `concurrent` feature). One shared [`Engine`] owns the attached
-//! eBPF programs and the single `AUDIT_RB` ring; an [`AuditDemux`] fans that ring out to per-scope
-//! subscribers by `cgroup_id`. Scopes are created **sequentially** on this task (BPF map writes are
-//! not concurrent); each episode's loop then runs in its own [`tokio::spawn`] task with a
-//! [`Sandbox::Concurrent`] whose audit comes from a demux subscription (no audit cross-contamination
-//! — US4 AS-1 / SC-004).
-//!
-//! The engine is not `Send` (aya's `Ebpf`), so it stays on this task; only the `Send`
-//! [`Sandbox::Concurrent`] and the boxed model cross into spawned tasks.
+//! Concurrent episode runner (US4, `concurrent` feature). One [`Supervisor`] owns the attached eBPF
+//! programs and the single `AUDIT_RB` ring for the whole batch (018); each episode's scope is created
+//! on it **sequentially** on this task, then each episode's loop runs in its own [`tokio::spawn`]
+//! task with a [`Sandbox::Enforced`] holding that scope's handle. A drain files every event under the
+//! scope it belongs to and returns only its own, so episodes never see each other's audit (US4 AS-1
+//! / SC-004), and each episode can reload its own scope mid-run (018 SC-007).
 
 #![cfg(feature = "concurrent")]
 
 use bee_core::Policy;
-use bee_userspace::{AuditDemux, EnforcementPlan, Engine, ScopeMode, SystemResolver};
+use bee_userspace::{EnforcementPlan, ScopeMode, SystemResolver};
 use tokio::task::JoinSet;
 
 use crate::config::ProviderConfig;
@@ -47,7 +44,7 @@ fn prepare_episodes(
 
     for (index, (scenario, provider)) in episodes.into_iter().enumerate() {
         // The session this episode asks for, as a concurrent batch entry. What a shared-engine batch
-        // cannot run — MCP servers, `[policy.http]`, a widening ceiling, skills — is refused here, by
+        // cannot run — MCP servers, `[policy.http]`, skills — is refused here, by
         // name, before any scope exists (024 FR-008); it used to be silently left out.
         let strip_env = sandbox::key_vars(
             (!provider.api_key_env.is_empty()).then_some(provider.api_key_env.as_str()),
@@ -113,28 +110,9 @@ pub async fn run_concurrent(
         return indexed.into_iter().map(|(_, t)| t).collect();
     }
 
-    let mut engine = match Engine::init() {
-        Ok(e) => e,
-        Err(e) => {
-            for episode in prepared {
-                indexed.push((
-                    episode.index,
-                    EpisodeTranscript::setup_error(
-                        episode.scenario.id,
-                        episode.provider.model_id(),
-                        EpisodeStatus::InfraError {
-                            detail: format!("engine init: {e}"),
-                        },
-                    ),
-                ));
-            }
-            indexed.sort_by_key(|(i, _)| *i);
-            return indexed.into_iter().map(|(_, t)| t).collect();
-        }
-    };
-    let stream = match engine.take_async_audit_stream("bee-concurrent") {
+    let supervisor = match crate::supervisor::Supervisor::start() {
         Ok(s) => s,
-        Err(e) => {
+        Err(detail) => {
             for episode in prepared {
                 indexed.push((
                     episode.index,
@@ -142,7 +120,7 @@ pub async fn run_concurrent(
                         episode.scenario.id,
                         episode.provider.model_id(),
                         EpisodeStatus::InfraError {
-                            detail: format!("async audit stream: {e}"),
+                            detail: detail.clone(),
                         },
                     ),
                 ));
@@ -151,10 +129,8 @@ pub async fn run_concurrent(
             return indexed.into_iter().map(|(_, t)| t).collect();
         }
     };
-    let demux = AuditDemux::start(stream);
 
     let mut tasks: JoinSet<(usize, EpisodeTranscript)> = JoinSet::new();
-    let mut cgroups: Vec<u64> = Vec::new();
 
     for PreparedEpisode {
         index: i,
@@ -196,32 +172,21 @@ pub async fn run_concurrent(
             sanitize(&scenario.id),
             std::process::id()
         );
-        let scope =
-            match engine.create_scope(&scope_id, bee_userspace::cgroup::DEFAULT_PARENT, &plan) {
-                Ok(s) => s,
-                Err(e) => fail!(EpisodeStatus::InfraError {
-                    detail: format!("create scope: {e}")
-                }),
-            };
-        let cgroup_id = scope.cgroup_id;
-        // Subscribe BEFORE the episode runs so no early events are missed.
-        let subscription = demux.subscribe(cgroup_id);
+        // The scope's audit is routed from the moment it exists, so no early event is missed.
+        let scope = match supervisor.create_scope(&scope_id, &scope_id, None, &plan) {
+            Ok(s) => s,
+            Err(detail) => fail!(EpisodeStatus::InfraError { detail }),
+        };
 
         // Materialize the workdir sequentially on this task (avoids cross-episode fs races).
         if let Err(e) = materialize_workdir(&scenario.workdir) {
-            demux.unsubscribe(cgroup_id);
             let _ = scope.teardown();
             fail!(EpisodeStatus::InfraError {
                 detail: format!("workdir setup failed: {e}")
             });
         }
 
-        spec.prebuilt_sandbox = Some(Sandbox::concurrent(
-            scope,
-            subscription,
-            spec.strip_env.clone(),
-        ));
-        cgroups.push(cgroup_id);
+        spec.prebuilt_sandbox = Some(Sandbox::enforced(scope, spec.strip_env.clone()));
         // The rest of the session — tool surface, escalation, system prompt — is built the way every
         // entry point builds it (024 FR-006), around the scope created on the shared engine.
         let mut session = match crate::session::build(spec, &|_| {}).await {
@@ -284,10 +249,8 @@ pub async fn run_concurrent(
         }
     }
 
-    for cg in cgroups {
-        demux.unsubscribe(cg);
-    }
-    demux.shutdown().await;
+    // Every episode tore its own scope down; the engine detaches when the last handle drops.
+    drop(supervisor);
 
     indexed.sort_by_key(|(i, _)| *i);
     indexed.into_iter().map(|(_, t)| t).collect()

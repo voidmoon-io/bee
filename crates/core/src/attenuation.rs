@@ -90,6 +90,78 @@ impl Policy {
         Ok(self.inherit_restrictions(request))
     }
 
+    /// Derive a **harness** subagent's policy (026 research R8, R10): `request` is the agent's
+    /// requested policy, whose `network.allow` lists its model provider's hosts *by name*.
+    ///
+    /// Those names are checked against what the parent holds by exact name — its `network.allow`, or
+    /// when it intercepts its `[policy.http]` targets and egress — and become the egress of the
+    /// harness's own proxy. They never become kernel address rules: the harness's kernel network is
+    /// its proxy's loopback port alone. When the parent intercepts, the harness's proxy also gets the
+    /// parent's targets (so its tests are recorded too), inspect and limits.
+    ///
+    /// Each harness credential store in `stores` is denied, unless the agent *and* the parent both
+    /// name it explicitly: one harness must not read another's sign-in. The caller passes the
+    /// [`HARNESS_STORES`](crate::compiler::HARNESS_STORES) present on this machine: unmatched reads
+    /// are allowed, so every deny is a kernel rule, and the eBPF backend holds few of them. A store
+    /// created after the scope is built is not denied.
+    ///
+    /// Everything else is [`derive`](Self::derive): the result is ⊆ `self`.
+    pub fn derive_harness(
+        &self,
+        mut request: Policy,
+        stores: &[&str],
+    ) -> Result<Policy, AttenuationError> {
+        let parent_http = self.http.as_ref().filter(|h| h.is_active());
+        let provider = std::mem::take(&mut request.network.allow);
+        let mut egress = Vec::with_capacity(provider.len());
+        for entry in &provider {
+            let hp = crate::policy::HostPort::try_from(entry.clone())
+                .map_err(|e| AttenuationError::new(format!("network:{entry}"), e))?;
+            let held = match parent_http {
+                Some(h) => h.targets.contains(&hp) || h.egress.contains(&hp),
+                None => self.network.allow.iter().any(|p| p == entry),
+            };
+            if !held {
+                return Err(AttenuationError::new(
+                    format!("network:{entry}"),
+                    if parent_http.is_some() {
+                        "provider host not in parent's [policy.http] targets or egress (by name)"
+                    } else {
+                        "provider host not in parent's network allowlist (by name)"
+                    },
+                ));
+            }
+            if !egress.contains(&hp) {
+                egress.push(hp);
+            }
+        }
+        let requested_fs = request.filesystem.clone();
+        let mut child = self.derive(request)?;
+
+        // Its kernel network is the proxy port alone; every name it reaches is in its proxy's scope.
+        child.network.allow.clear();
+        let mut http = parent_http.cloned().unwrap_or_default();
+        if parent_http.is_none() {
+            http.targets.clear();
+        }
+        // The provider hosts, and nothing else the parent tunnels: a harness reaches what it
+        // declared.
+        http.egress = egress
+            .into_iter()
+            .filter(|hp| !http.targets.contains(hp))
+            .collect();
+        child.http = Some(http);
+
+        for store in stores {
+            let named =
+                |fs: &BTreeMap<String, Access>| fs.get(*store).is_some_and(|a| *a != Access::Deny);
+            if !(named(&requested_fs) && named(&self.filesystem)) {
+                child.filesystem.insert((*store).to_string(), Access::Deny);
+            }
+        }
+        Ok(child)
+    }
+
     /// Close what the request left unsaid. Every rule added here is a parent rule, so the result is
     /// still ⊆ `self`; what changes is that the child can no longer *widen by omission*.
     fn inherit_restrictions(&self, mut child: Policy) -> Policy {

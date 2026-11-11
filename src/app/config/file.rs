@@ -79,7 +79,56 @@ pub struct FileConfig {
     /// end a run sooner or remind the model, never widen what it may do.
     #[serde(default)]
     pub stuck: Option<StuckSection>,
+    /// Delegation limits (018 US4). Not operator-only, but a project layer can only **lower** them:
+    /// they bound how many scopes and how much spend one session can multiply into.
+    #[serde(default)]
+    pub delegation: Option<DelegationSection>,
+    /// `bee acp` (026). **Operator-only** — see [`FileConfig::user_only_sections`].
+    #[serde(default)]
+    pub acp: Option<AcpSection>,
 }
+
+/// The `[acp]` table (026 data-model): what an ACP client may bring into a session, how many sessions
+/// one `bee acp` process serves, and which credential variables a harness agent may receive.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcpSection {
+    /// Start a client's stdio MCP servers, under the operator's MCP policy. Default: no.
+    pub client_mcp: Option<bool>,
+    /// Sessions one process serves at once. Default 8, at most 32.
+    pub max_sessions: Option<u32>,
+    /// Credential-bearing variables a harness agent may receive, valued from bee's own environment.
+    pub harness_env_passthrough: Option<Vec<String>>,
+}
+
+impl AcpSection {
+    pub const DEFAULT_MAX_SESSIONS: u32 = 8;
+    pub const HARD_MAX_SESSIONS: u32 = 32;
+
+    /// `self`, with each key `later` sets taking its place.
+    pub fn merge(self, later: AcpSection) -> AcpSection {
+        AcpSection {
+            client_mcp: later.client_mcp.or(self.client_mcp),
+            max_sessions: later.max_sessions.or(self.max_sessions),
+            harness_env_passthrough: later
+                .harness_env_passthrough
+                .or(self.harness_env_passthrough),
+        }
+    }
+
+    pub fn client_mcp(&self) -> bool {
+        self.client_mcp.unwrap_or(false)
+    }
+
+    pub fn max_sessions(&self) -> usize {
+        self.max_sessions
+            .unwrap_or(Self::DEFAULT_MAX_SESSIONS)
+            .clamp(1, Self::HARD_MAX_SESSIONS) as usize
+    }
+}
+
+/// The `[delegation]` table (018): `max_depth`, `max_concurrent`.
+pub use bee::delegate::DelegationLimits as DelegationSection;
 
 /// The `[context]` table (025 contracts/config.md). The shape lives in the library, which also reads
 /// it from a scenario file; every key is optional, and layers merge key by key.
@@ -186,6 +235,13 @@ impl FileConfig {
             found.push((
                 "[security]",
                 "it configures what a granted scanner does with the access the operator gave it",
+            ));
+        }
+        if self.acp.is_some() {
+            found.push((
+                "[acp]",
+                "it decides what an ACP client may add to a session and which credentials a harness \
+                 receives",
             ));
         }
         found
@@ -398,6 +454,7 @@ mod tests {
             ("[policy]\nceiling = \"c.toml\"\n", "[policy] ceiling"),
             ("[mcp]\nconfig = \"m.toml\"\n", "[mcp]"),
             ("[security.reproductions.fixture]\nprogram = \"/bin/sh\"\ntimeout_secs = 2\nmax_repetitions = 3\n", "[security]"),
+            ("[acp]\nclient_mcp = true\n", "[acp]"),
         ] {
             let path = write(dir.path(), "config.toml", body);
             let err = load(&path, Origin::Project).unwrap_err();
@@ -409,6 +466,38 @@ mod tests {
             assert!(load(&path, Origin::User).unwrap().is_some());
             assert!(load(&path, Origin::Explicit).unwrap().is_some());
         }
+    }
+
+    // 026: `[acp]` keys merge one by one, with defaults and a hard cap on sessions.
+    #[test]
+    fn acp_keys_merge_and_resolve_with_defaults() {
+        let base = AcpSection::default();
+        assert!(!base.client_mcp());
+        assert_eq!(base.max_sessions(), 8);
+        let user = AcpSection {
+            client_mcp: Some(true),
+            max_sessions: Some(99),
+            harness_env_passthrough: Some(vec!["ANTHROPIC_API_KEY".into()]),
+        };
+        let explicit = AcpSection {
+            max_sessions: Some(2),
+            ..AcpSection::default()
+        };
+        let merged = base.merge(user).merge(explicit);
+        assert!(
+            merged.client_mcp(),
+            "a key the later layer leaves out is kept"
+        );
+        assert_eq!(merged.max_sessions(), 2);
+        assert_eq!(
+            AcpSection {
+                max_sessions: Some(99),
+                ..AcpSection::default()
+            }
+            .max_sessions(),
+            32,
+            "hard cap"
+        );
     }
 
     #[test]

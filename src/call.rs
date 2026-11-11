@@ -111,6 +111,11 @@ pub struct CallOutcome {
     pub escalations: Vec<EscalationRecord>,
     /// A hook refused the call before it ran (FR-031): the tool never executed, and `result` says so.
     pub refused_by_hook: Option<String>,
+    /// The delegation this call ran (018); `result` is then its report.
+    pub delegation: Option<Box<crate::transcript::DelegationRecord>>,
+    /// A delegation this call asked for and a deferring delegator left for the loop to run with
+    /// its siblings (018 US5). The loop resolves it before the result is used.
+    pub pending_delegation: Option<Box<crate::delegate::PendingDelegation>>,
 }
 
 impl CallOutcome {
@@ -153,6 +158,7 @@ impl CallOutcome {
             timed_out: self.timed_out,
             not_run: false,
             refused_by_hook: self.refused_by_hook.clone(),
+            child: self.delegation.clone(),
         }
     }
 }
@@ -170,6 +176,8 @@ fn stopped(reason: String, timed_out: bool, terminate: bool) -> CallOutcome {
         timed_out,
         escalations: Vec::new(),
         refused_by_hook: None,
+        delegation: None,
+        pending_delegation: None,
     }
 }
 
@@ -178,6 +186,18 @@ pub async fn run_call(
     sandbox: &mut Sandbox,
     registry: &mut ToolRegistry,
     esc: Option<Escalation<'_>>,
+) -> CallOutcome {
+    run_call_with(input, sandbox, registry, esc, None).await
+}
+
+/// [`run_call`], for a loop that can delegate: a `task` call is fulfilled through `delegator` (018),
+/// under this call's deadline. Without one, a delegation the call asks for is refused.
+pub async fn run_call_with(
+    input: CallInput<'_>,
+    sandbox: &mut Sandbox,
+    registry: &mut ToolRegistry,
+    esc: Option<Escalation<'_>>,
+    delegator: Option<&crate::delegate::Delegator<'_>>,
 ) -> CallOutcome {
     let deadline = match input.timeout {
         TimeoutPolicy::Deadline(d) => d,
@@ -201,6 +221,7 @@ pub async fn run_call(
             sandbox,
             registry,
             esc,
+            delegator,
             deadline,
             &timeout_message,
             &mut outcome,
@@ -230,6 +251,7 @@ async fn run_call_inner(
     sandbox: &mut Sandbox,
     registry: &mut ToolRegistry,
     mut esc: Option<Escalation<'_>>,
+    delegator: Option<&crate::delegate::Delegator<'_>>,
     deadline: Instant,
     timeout_message: &str,
     outcome: &mut CallOutcome,
@@ -346,6 +368,44 @@ async fn run_call_inner(
     outcome.proxy_audit = sandbox.drain_sidecar_audit();
     outcome.audit.extend(sandbox.drain_audit(server));
 
+    // 8. A delegation the call asked for (018): run the subagent, in its own scope, and put its
+    //    report in the call's place. The parent's own call is closed and drained by now, so nothing
+    //    the child does can land in it.
+    if let Some(req) = outcome.result.delegate.take() {
+        match delegator {
+            Some(d) if d.defer => {
+                // The child is derived from what the session holds now, as if it ran now.
+                outcome.pending_delegation = Some(Box::new(crate::delegate::PendingDelegation {
+                    request: req,
+                    call_id: tc.id.clone(),
+                    policy: esc.as_ref().map(|e| e.active.active().clone()),
+                }));
+            }
+            Some(d) => {
+                let done = crate::delegate::run(
+                    d,
+                    &req,
+                    crate::delegate::ParentView {
+                        policy: esc.as_ref().map(|e| e.active.active()),
+                        registry: &*registry,
+                        sandbox: &*sandbox,
+                        deadline,
+                        call_id: &tc.id,
+                    },
+                )
+                .await;
+                outcome.result = done.result;
+                outcome.delegation = Some(Box::new(done.record));
+            }
+            None => {
+                outcome.result = ToolResult::error(format!(
+                    "{}: delegation is not available here (only a direct tool call can delegate)",
+                    tc.name
+                ));
+            }
+        }
+    }
+
     if outcome.terminated.is_none() {
         if let Some(e) = esc.as_mut() {
             if let Err(reason) = crate::grants::escalate::lifecycle_step(
@@ -383,7 +443,7 @@ async fn attempt(
     if Instant::now() >= deadline {
         return (ToolResult::error(timeout_message), true);
     }
-    match tokio::time::timeout_at(deadline.into(), registry.execute(tc, sandbox)).await {
+    match tokio::time::timeout_at(deadline.into(), registry.execute_delegable(tc, sandbox)).await {
         Ok(r) => (r, false),
         Err(_) => (ToolResult::error(timeout_message), true),
     }
@@ -588,4 +648,22 @@ fn _assert_send<'a>(
 ) {
     fn send<T: Send>(_: T) {}
     send(run_call(input, sandbox, registry, esc));
+}
+
+/// And with a delegator: a delegation runs a whole child loop inside the call.
+#[allow(dead_code)]
+fn _assert_send_delegating<'a>(
+    input: CallInput<'a>,
+    sandbox: &'a mut Sandbox,
+    registry: &'a mut ToolRegistry,
+    delegator: &'a crate::delegate::Delegator<'a>,
+) {
+    fn send<T: Send>(_: T) {}
+    send(run_call_with(
+        input,
+        sandbox,
+        registry,
+        None,
+        Some(delegator),
+    ));
 }

@@ -84,6 +84,8 @@ async fn fixture() -> Fixture {
                 reason: "bench".into(),
             },
             resolver: bee::intercept::sidecar::system_resolver(),
+            admit: None,
+            attribution: None,
         },
         listener,
         spawn,

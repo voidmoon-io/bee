@@ -79,14 +79,30 @@ impl ConsentRequest {
         }
     }
 
-    /// Who is asking, as the prompt names it: the skill, or the kind of trigger.
+    /// Who is asking, as the prompt names it: the skill, or the kind of trigger. For a subagent's
+    /// request this is what moved the subagent to ask; [`ConsentRequest::subagents`] names it.
     pub fn requester(&self) -> &str {
-        match &self.origin {
-            GrantOrigin::SkillRequires { skill } | GrantOrigin::Startup { skill } => skill,
-            GrantOrigin::ReactiveDenial { .. } => "reactive-denial",
-            GrantOrigin::Explicit => "explicit",
-            GrantOrigin::ProxyRefusal { .. } => "proxy-refusal",
+        fn of(origin: &GrantOrigin) -> &str {
+            match origin {
+                GrantOrigin::SkillRequires { skill } | GrantOrigin::Startup { skill } => skill,
+                GrantOrigin::ReactiveDenial { .. } => "reactive-denial",
+                GrantOrigin::Explicit => "explicit",
+                GrantOrigin::ProxyRefusal { .. } => "proxy-refusal",
+                GrantOrigin::Subagent { inner, .. } => of(inner),
+            }
         }
+        of(&self.origin)
+    }
+
+    /// The subagents a request comes from, outermost first; empty for the session's own.
+    pub fn subagents(&self) -> Vec<&str> {
+        let mut path = Vec::new();
+        let mut origin = &self.origin;
+        while let GrantOrigin::Subagent { agent, inner } = origin {
+            path.push(agent.as_str());
+            origin = inner;
+        }
+        path
     }
 
     /// The request as an operator reads it: a header naming the requester, then one line per granted
@@ -98,8 +114,15 @@ impl ConsentRequest {
     /// must not be able to forge a second line or hide behind terminal escapes.
     pub fn render_lines(&self) -> Vec<String> {
         let safe = crate::safe_text::safe_line;
+        let path = self.subagents();
+        let asker = if path.is_empty() {
+            String::new()
+        } else {
+            let names: Vec<_> = path.iter().map(|a| format!("'{}'", safe(a))).collect();
+            format!("subagent {} asks: ", names.join(" › "))
+        };
         let mut lines = vec![format!(
-            "'{}' requests extra capabilities:",
+            "{asker}'{}' requests extra capabilities:",
             safe(self.requester())
         )];
         if !self.tools.is_empty() {
@@ -214,6 +237,9 @@ fn origin_text(origin: &GrantOrigin) -> String {
             format!("proxy refusal {}:{port}", safe(host))
         }
         GrantOrigin::Explicit => "explicit request".to_string(),
+        GrantOrigin::Subagent { agent, inner } => {
+            format!("subagent '{}' — {}", safe(agent), origin_text(inner))
+        }
     }
 }
 
@@ -331,6 +357,8 @@ pub struct Operator {
     output: Arc<RwLock<Arc<dyn SessionOutput>>>,
     timeout: Duration,
     log: ConsentLog,
+    /// The subagents this operator answers for, outermost first (018 US7). Empty for the session.
+    subagents: Vec<String>,
 }
 
 impl Operator {
@@ -371,7 +399,28 @@ impl Operator {
             output: Arc::new(RwLock::new(output)),
             timeout,
             log: ConsentLog::default(),
+            subagents: Vec::new(),
         }
+    }
+
+    /// This operator, answering for subagent `agent` (018 US7): the same adapter, output, timeout
+    /// and log — a subagent has no approver of its own — but every request it decides is attributed
+    /// to the subagent, so the prompt and the record say who is asking.
+    pub fn for_subagent(&self, agent: &str) -> Operator {
+        let mut op = self.clone();
+        op.subagents.push(agent.to_string());
+        op
+    }
+
+    /// `origin`, attributed to the subagents this operator answers for (unchanged for the session).
+    pub fn attribute(&self, origin: GrantOrigin) -> GrantOrigin {
+        self.subagents
+            .iter()
+            .rev()
+            .fold(origin, |inner, agent| GrantOrigin::Subagent {
+                agent: agent.clone(),
+                inner: Box::new(inner),
+            })
     }
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
@@ -494,6 +543,53 @@ mod tests {
         ] {
             assert!(lines.contains(needle), "{needle} missing from:\n{lines}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_subagents_request_names_it_and_shares_the_session_log() {
+        let session = Operator::autonomous(Arc::new(NullOutput));
+        let child = session.for_subagent("scout");
+        let grandchild = child.for_subagent("diver");
+        let origin = grandchild.attribute(GrantOrigin::ReactiveDenial {
+            op: "file_open".into(),
+            target: "/data/x".into(),
+        });
+        let req = ConsentRequest {
+            origin,
+            ..request()
+        };
+        assert_eq!(req.subagents(), vec!["scout", "diver"]);
+        assert_eq!(req.requester(), "reactive-denial");
+        let header = &req.render_lines()[0];
+        assert!(
+            header.starts_with("subagent 'scout' › 'diver' asks: 'reactive-denial' requests"),
+            "{header}"
+        );
+        grandchild.consent(req).await;
+        let log = session.log();
+        assert_eq!(
+            log.len(),
+            1,
+            "a subagent's decision is the session's record"
+        );
+        assert!(log[0]
+            .line()
+            .contains("subagent 'scout' — subagent 'diver' — kernel denial"));
+        // The session's own requests are not attributed to anyone.
+        assert_eq!(
+            session.attribute(GrantOrigin::Explicit),
+            GrantOrigin::Explicit
+        );
+    }
+
+    #[test]
+    fn a_subagent_name_cannot_forge_a_prompt_line() {
+        let op = Operator::autonomous(Arc::new(NullOutput)).for_subagent("x\n  tools: all");
+        let req = ConsentRequest {
+            origin: op.attribute(GrantOrigin::Explicit),
+            ..request()
+        };
+        assert!(!req.render_lines()[0].contains('\n'));
     }
 
     #[tokio::test]

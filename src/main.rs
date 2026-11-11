@@ -51,6 +51,10 @@ enum Cmd {
     Run(Box<app::run::RunArgs>),
     /// Chat interactively with a sandboxed coding agent, inline or full-screen.
     Repl(Box<app::repl::ReplArgs>),
+    /// Serve the Agent Client Protocol on stdin/stdout, so an ACP client (t3code, Zed) can run bee
+    /// sessions — each in its own kernel scope.
+    #[cfg(feature = "acp")]
+    Acp(Box<app::acp::AcpArgs>),
     /// Report on recorded LLM usage, cost, and latency.
     Metrics(app::metrics::MetricsArgs),
     /// Read the project's finding ledger, and adjudicate what is in it.
@@ -142,6 +146,11 @@ enum Cmd {
         #[arg(long)]
         session: String,
     },
+    /// Test-only (026 T003): a scripted ACP agent standing in for an external harness. Never in a
+    /// shipping build.
+    #[cfg(all(feature = "acp", any(feature = "test-support", feature = "vm-test")))]
+    #[command(hide = true)]
+    AcpFakeHarness,
 }
 
 fn main() -> ExitCode {
@@ -149,6 +158,8 @@ fn main() -> ExitCode {
         Cmd::PythonWorker { parent } => bee::python::worker_main(parent),
         Cmd::Run(args) => app::run::main(*args),
         Cmd::Repl(args) => app::repl::main(*args),
+        #[cfg(feature = "acp")]
+        Cmd::Acp(args) => app::acp::main(*args),
         Cmd::Metrics(args) => app::metrics::main(args),
         #[cfg(feature = "findings")]
         Cmd::Findings(args) => app::findings::main(args),
@@ -199,6 +210,8 @@ fn main() -> ExitCode {
         Cmd::SarifWorker(args) => cmd_sarif_worker(&args),
         #[cfg(feature = "intercept")]
         Cmd::ProxyWorker { session } => bee::intercept::worker::run(&session),
+        #[cfg(all(feature = "acp", any(feature = "test-support", feature = "vm-test")))]
+        Cmd::AcpFakeHarness => bee::acp::fake_harness::main(),
     }
 }
 
@@ -418,6 +431,8 @@ fn cmd_exec(
     let _ = &plan;
 
     // Fail-closed: refuse to run if the kernel cannot enforce (SC-007).
+    // `bee exec` keeps the engine and its sync audit reader to itself rather than going through a
+    // Supervisor (018): one process, one scope, no async runtime, nothing created beside it.
     match Engine::init() {
         Ok(engine) => {
             #[cfg(feature = "enforce")]

@@ -46,6 +46,12 @@ pub struct LoopOptions {
     pub context: crate::context::ContextInputs,
     /// User and project `[stuck]` (025 US2). The scenario's own `[stuck]` is merged over it.
     pub stuck: crate::stuck::StuckConfig,
+    /// Delegation (018), present when the session holds the `task` tool. `None`: a `task` call is
+    /// refused rather than run.
+    pub delegation: Option<crate::delegate::Delegation>,
+    /// The shared turn budget and deadline this loop draws from (018 FR-023). `None`: only the
+    /// scenario's own limits apply, as before 018.
+    pub budget: Option<crate::delegate::Budget>,
 }
 
 impl Default for LoopOptions {
@@ -60,6 +66,8 @@ impl Default for LoopOptions {
             escalation: None,
             context: crate::context::ContextInputs::default(),
             stuck: crate::stuck::StuckConfig::default(),
+            delegation: None,
+            budget: None,
         }
     }
 }
@@ -127,6 +135,7 @@ pub fn status_label(s: &EpisodeStatus) -> String {
         EpisodeStatus::Stuck { .. } => "stuck".into(),
         EpisodeStatus::Finished { outcome, .. } => format!("finished ({outcome})"),
         EpisodeStatus::EndedWithoutFinish => "ended without finish".into(),
+        EpisodeStatus::BudgetExhausted => "shared turn budget exhausted".into(),
     }
 }
 
@@ -149,7 +158,8 @@ pub fn exit_code(status: &EpisodeStatus, finish_offered: bool) -> u8 {
         EpisodeStatus::Terminated { .. }
         | EpisodeStatus::ContextExhausted { .. }
         | EpisodeStatus::Stuck { .. }
-        | EpisodeStatus::EndedWithoutFinish => EXIT_INCOMPLETE,
+        | EpisodeStatus::EndedWithoutFinish
+        | EpisodeStatus::BudgetExhausted => EXIT_INCOMPLETE,
         EpisodeStatus::Finished { outcome, .. } => match outcome {
             FinishOutcome::Completed => 0,
             FinishOutcome::Blocked | FinishOutcome::Abandoned => EXIT_INCOMPLETE,
@@ -205,6 +215,15 @@ pub async fn run_loop(
 ) -> EpisodeTranscript {
     #[cfg(feature = "durable-sessions")]
     if let Some(binding) = &opts.durable {
+        // The durable driver has no delegation path; refuse rather than let a `task` call reach
+        // its executor (018, tasks T054).
+        if registry.contains("task") {
+            return infra_error(
+                scenario,
+                model,
+                "durable sessions do not support the task tool yet".into(),
+            );
+        }
         return crate::session::driver::run_episode(
             model, scenario, registry, sandbox, opts, binding,
         )
@@ -212,7 +231,11 @@ pub async fn run_loop(
     }
     let started_at = OffsetDateTime::now_utc();
     let start = Instant::now();
-    let deadline = start + scenario.timeout();
+    // A loop in a delegation tree never outlives the shared deadline (018 FR-023).
+    let deadline = match &opts.budget {
+        Some(b) => (start + scenario.timeout()).min(b.deadline),
+        None => start + scenario.timeout(),
+    };
 
     emit(
         opts,
@@ -225,6 +248,10 @@ pub async fn run_loop(
     );
 
     let mut convo = Conversation::new(&scenario.system_prompt, &scenario.task);
+    // What a `task` call is fulfilled with (018): the session's agents, and this model.
+    let delegator = opts.delegation.as_ref().map(|config| {
+        crate::delegate::Delegator::new(config, model).with_escalation(opts.escalation.as_ref())
+    });
 
     // The context budget (025): never send a request over it, and cap each result the model sees.
     let mut ctx = match crate::context::ContextManager::for_session(
@@ -291,6 +318,12 @@ pub async fn run_loop(
         let turn_start = Instant::now();
         if Instant::now() >= deadline {
             status = EpisodeStatus::Timeout;
+            break;
+        }
+        // 018 FR-023: every model turn in a delegating session — its own and its subagents' —
+        // comes out of one shared pool.
+        if opts.budget.as_ref().is_some_and(|b| !b.take_turn()) {
+            status = EpisodeStatus::BudgetExhausted;
             break;
         }
 
@@ -478,192 +511,197 @@ pub async fn run_loop(
         });
 
         let mut recorded: Vec<RecordedCall> = Vec::new();
-        for (at, tc) in turn.tool_calls.iter().enumerate() {
-            any_tool_called = true;
-
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                status = EpisodeStatus::Timeout;
-                turns.push(TranscriptTurn {
-                    notes: std::mem::take(&mut turn_notes),
-                    index,
-                    assistant_text,
-                    calls: recorded,
-                    duration_ms: ms_since(turn_start),
-                });
-                break 'outer;
-            }
-
-            emit(
-                opts,
-                format!(
-                    "  call {} {}",
-                    tc.name,
-                    preview(&tc.arguments.to_string(), 100)
-                ),
-            );
-
-            // The call, start to finish: escalation, the timed attempt, its audit, at most one retry,
-            // the proxy and late drains (024, src/call.rs). Rendering the outcome stays here.
-            let outcome = crate::call::run_call(
-                crate::call::CallInput {
-                    call: tc,
-                    turn: index,
-                    origin: crate::sandbox::CallOrigin::Tool,
-                    timeout: crate::call::TimeoutPolicy::Deadline(deadline),
-                },
-                sandbox,
-                registry,
-                match (opts.escalation.as_ref(), active_policy.as_mut()) {
-                    (Some(config), Some(active)) => Some(crate::call::Escalation {
-                        config,
-                        active,
-                        lease_turn: index,
-                    }),
-                    _ => None,
-                },
-            )
-            .await;
-            audit_trail.extend(outcome.audit_trail().cloned());
-            if let Some(warning) = sandbox.audit_warning() {
-                emit(opts, warning);
-            }
-            if let Some(detail) = outcome
-                .terminated
-                .as_ref()
-                .cloned()
-                .or_else(|| sandbox.check_cleanup().err())
-            {
-                recorded.push(outcome.to_recorded(tc));
-                turns.push(TranscriptTurn {
-                    index,
-                    assistant_text,
-                    calls: recorded,
-                    duration_ms: ms_since(turn_start),
-                    notes: turn_notes,
-                });
-                status = EpisodeStatus::Terminated { detail };
-                break 'outer;
-            }
-            for rec in &outcome.escalations {
-                let kind = match rec.trigger {
-                    crate::call::Trigger::Proactive => "proactive",
-                    crate::call::Trigger::KernelDenial { .. } => "reactive",
-                    crate::call::Trigger::ProxyRefusal { .. } => "proxy",
-                };
-                emit(opts, format!("  escalate({kind}): {:?}", rec.outcome));
-            }
-            for ev in &outcome.proxy_events {
-                emit(opts, format!("  {}", crate::repl::render_proxy_event(ev)));
-            }
-
-            // `DENIED` is the tool's own denial only — never the proxy scope's (FR-022).
-            let tag = if outcome.tool_denials() > 0 {
-                "DENIED"
-            } else if outcome.result.is_error {
-                "ERR"
-            } else {
-                "ok"
+        // The turn's calls, in segments (018 US5): one call, or a run of consecutive `task` calls
+        // whose subagents run together. Each call still goes through the call lifecycle in order —
+        // its hooks, its audit, its own time — and the results are taken in call order; only the
+        // subagents overlap. Every other call is a segment of one, handled exactly as before.
+        let calls = &turn.tool_calls;
+        let mut next = 0;
+        while next < calls.len() {
+            let seg_end = match &delegator {
+                Some(d) if calls[next].name == "task" => {
+                    let run = calls[next..]
+                        .iter()
+                        .take_while(|c| c.name == "task")
+                        .count();
+                    next + run.min(d.config.max_concurrent.max(1))
+                }
+                _ => next + 1,
             };
-            let exit = outcome
-                .result
-                .exit_code
-                .map(|c| format!(" (exit {c})"))
-                .unwrap_or_default();
-            emit(
-                opts,
-                format!(
-                    "  result {tag}{exit}: {}",
-                    preview(&outcome.result.content, 120)
-                ),
-            );
-            for e in outcome.audit.iter().chain(&outcome.proxy_audit) {
-                if e.decision == "denied" {
-                    emit(opts, format!("  audit: {} denied {}", e.op, e.target));
+            let fan_out = seg_end - next > 1;
+            let mut seg: Vec<(usize, crate::call::CallOutcome)> = Vec::new();
+            let mut out_of_time = false;
+            for (at, tc) in calls.iter().enumerate().take(seg_end).skip(next) {
+                any_tool_called = true;
+                if deadline.saturating_duration_since(Instant::now()).is_zero() {
+                    out_of_time = true;
+                    break;
                 }
-            }
-            let timed_out = outcome.timed_out;
-            let result = &outcome.result;
 
-            convo.push(Message::ToolResult {
-                call_id: tc.id.clone(),
-                name: tc.name.clone(),
-                // The model sees the capped result; the record keeps the tool's own (025 FR-022).
-                content: ctx.cap(&result.content, result.original_len),
-                is_error: result.is_error,
-                provenance: result.provenance.clone(),
-            });
-            ctx.note_call(
-                &tc.id,
-                crate::context::compact::CallNote::from_outcome(tc, &outcome),
-            );
+                emit(
+                    opts,
+                    format!(
+                        "  call {} {}",
+                        tc.name,
+                        preview(&tc.arguments.to_string(), 100)
+                    ),
+                );
 
-            // A terminal tool (`submit_flag`/`give_up`, US3) ends the episode immediately. The loop
-            // stays tool-name-agnostic except for the one distinction that decides the status:
-            // `submit_flag` with a non-error (correct) result ⇒ Captured, anything else ⇒ NotCaptured.
-            if result.terminal {
-                status = match tc.name.as_str() {
-                    "submit_flag" if !result.is_error => EpisodeStatus::Captured { turn: index },
-                    // `finish` is terminal only for arguments it accepted, so they parse here.
-                    "finish" => match crate::tools::finish::parse(&tc.arguments) {
-                        Some((outcome, summary)) => EpisodeStatus::Finished {
-                            outcome,
-                            summary,
-                            turn: index,
-                        },
-                        None => EpisodeStatus::EndedWithoutFinish,
+                // The call, start to finish: escalation, the timed attempt, its audit, at most one
+                // retry, the proxy and late drains (024, src/call.rs). Rendering it stays here.
+                let call_delegator = delegator.as_ref().map(|d| d.deferring(fan_out));
+                let outcome = crate::call::run_call_with(
+                    crate::call::CallInput {
+                        call: tc,
+                        turn: index,
+                        origin: crate::sandbox::CallOrigin::Tool,
+                        timeout: crate::call::TimeoutPolicy::Deadline(deadline),
                     },
-                    _ => EpisodeStatus::NotCaptured,
-                };
-                recorded.push(outcome.to_recorded(tc));
-                // Calls after a terminal one in the same turn are recorded, never run (FR-034).
-                for skipped in &turn.tool_calls[at + 1..] {
-                    recorded.push(not_run(skipped));
+                    sandbox,
+                    registry,
+                    match (opts.escalation.as_ref(), active_policy.as_mut()) {
+                        (Some(config), Some(active)) => Some(crate::call::Escalation {
+                            config,
+                            active,
+                            lease_turn: index,
+                        }),
+                        _ => None,
+                    },
+                    call_delegator.as_ref(),
+                )
+                .await;
+                // Whatever ends the turn ends the segment: later calls are never dispatched.
+                let stop = outcome.terminated.is_some()
+                    || outcome.result.terminal
+                    || outcome.timed_out
+                    || sandbox.check_cleanup().is_err();
+                seg.push((at, outcome));
+                if stop {
+                    break;
                 }
-                turns.push(TranscriptTurn {
-                    notes: std::mem::take(&mut turn_notes),
-                    index,
-                    assistant_text,
-                    calls: recorded,
-                    duration_ms: ms_since(turn_start),
-                });
-                break 'outer;
+            }
+            next = seg.last().map_or(seg_end, |(at, _)| at + 1);
+
+            // US5: the segment's subagents run together, each in its own scope.
+            if let (true, Some(d)) = (fan_out, delegator.as_ref()) {
+                let mut slots = Vec::new();
+                let mut pending = Vec::new();
+                for (k, (_, o)) in seg.iter_mut().enumerate() {
+                    if let Some(p) = o.pending_delegation.take() {
+                        slots.push(k);
+                        pending.push(*p);
+                    }
+                }
+                let runner = d.deferring(false);
+                let done =
+                    crate::delegate::run_all(&runner, &pending, &*registry, &*sandbox, deadline)
+                        .await;
+                for (k, done) in slots.into_iter().zip(done) {
+                    seg[k].1.result = done.result;
+                    seg[k].1.delegation = Some(Box::new(done.record));
+                }
             }
 
-            recorded.push(outcome.to_recorded(tc));
-
-            if timed_out {
-                status = EpisodeStatus::Timeout;
-                turns.push(TranscriptTurn {
-                    notes: std::mem::take(&mut turn_notes),
-                    index,
-                    assistant_text,
-                    calls: recorded,
-                    duration_ms: ms_since(turn_start),
-                });
-                break 'outer;
-            }
-
-            match stuck.observe(tc, &outcome) {
-                crate::stuck::StuckSignal::None => {}
-                crate::stuck::StuckSignal::Remind(r) => pending.push(r.into_note()),
-                crate::stuck::StuckSignal::Stop {
-                    tool,
-                    arguments,
-                    repeats,
-                } => {
-                    emit(
-                        opts,
-                        format!(
-                            "  stuck: {tool} repeated {repeats} times with the same failing result \
-                             — ending run"
-                        ),
-                    );
-                    status = EpisodeStatus::Stuck {
-                        tool,
-                        arguments,
-                        repeats,
+            for (at, outcome) in seg {
+                let tc = &calls[at];
+                audit_trail.extend(outcome.audit_trail().cloned());
+                if let Some(warning) = sandbox.audit_warning() {
+                    emit(opts, warning);
+                }
+                if let Some(detail) = outcome
+                    .terminated
+                    .as_ref()
+                    .cloned()
+                    .or_else(|| sandbox.check_cleanup().err())
+                {
+                    recorded.push(outcome.to_recorded(tc));
+                    turns.push(TranscriptTurn {
+                        index,
+                        assistant_text,
+                        calls: recorded,
+                        duration_ms: ms_since(turn_start),
+                        notes: turn_notes,
+                    });
+                    status = EpisodeStatus::Terminated { detail };
+                    break 'outer;
+                }
+                for rec in &outcome.escalations {
+                    let kind = match rec.trigger {
+                        crate::call::Trigger::Proactive => "proactive",
+                        crate::call::Trigger::KernelDenial { .. } => "reactive",
+                        crate::call::Trigger::ProxyRefusal { .. } => "proxy",
                     };
+                    emit(opts, format!("  escalate({kind}): {:?}", rec.outcome));
+                }
+                for ev in &outcome.proxy_events {
+                    emit(opts, format!("  {}", crate::repl::render_proxy_event(ev)));
+                }
+
+                // `DENIED` is the tool's own denial only — never the proxy scope's (FR-022).
+                let tag = if outcome.tool_denials() > 0 {
+                    "DENIED"
+                } else if outcome.result.is_error {
+                    "ERR"
+                } else {
+                    "ok"
+                };
+                let exit = outcome
+                    .result
+                    .exit_code
+                    .map(|c| format!(" (exit {c})"))
+                    .unwrap_or_default();
+                emit(
+                    opts,
+                    format!(
+                        "  result {tag}{exit}: {}",
+                        preview(&outcome.result.content, 120)
+                    ),
+                );
+                for e in outcome.audit.iter().chain(&outcome.proxy_audit) {
+                    if e.decision == "denied" {
+                        emit(opts, format!("  audit: {} denied {}", e.op, e.target));
+                    }
+                }
+                let timed_out = outcome.timed_out;
+                let result = &outcome.result;
+
+                convo.push(Message::ToolResult {
+                    call_id: tc.id.clone(),
+                    name: tc.name.clone(),
+                    // The model sees the capped result; the record keeps the tool's own (025 FR-022).
+                    content: ctx.cap(&result.content, result.original_len),
+                    is_error: result.is_error,
+                    provenance: result.provenance.clone(),
+                });
+                ctx.note_call(
+                    &tc.id,
+                    crate::context::compact::CallNote::from_outcome(tc, &outcome),
+                );
+
+                // A terminal tool (`submit_flag`/`give_up`, US3) ends the episode immediately. The loop
+                // stays tool-name-agnostic except for the one distinction that decides the status:
+                // `submit_flag` with a non-error (correct) result ⇒ Captured, anything else ⇒ NotCaptured.
+                if result.terminal {
+                    status = match tc.name.as_str() {
+                        "submit_flag" if !result.is_error => {
+                            EpisodeStatus::Captured { turn: index }
+                        }
+                        // `finish` is terminal only for arguments it accepted, so they parse here.
+                        "finish" => match crate::tools::finish::parse(&tc.arguments) {
+                            Some((outcome, summary)) => EpisodeStatus::Finished {
+                                outcome,
+                                summary,
+                                turn: index,
+                            },
+                            None => EpisodeStatus::EndedWithoutFinish,
+                        },
+                        _ => EpisodeStatus::NotCaptured,
+                    };
+                    recorded.push(outcome.to_recorded(tc));
+                    // Calls after a terminal one in the same turn are recorded, never run (FR-034).
+                    for skipped in &turn.tool_calls[at + 1..] {
+                        recorded.push(not_run(skipped));
+                    }
                     turns.push(TranscriptTurn {
                         notes: std::mem::take(&mut turn_notes),
                         index,
@@ -673,6 +711,63 @@ pub async fn run_loop(
                     });
                     break 'outer;
                 }
+
+                recorded.push(outcome.to_recorded(tc));
+
+                if timed_out {
+                    status = EpisodeStatus::Timeout;
+                    turns.push(TranscriptTurn {
+                        notes: std::mem::take(&mut turn_notes),
+                        index,
+                        assistant_text,
+                        calls: recorded,
+                        duration_ms: ms_since(turn_start),
+                    });
+                    break 'outer;
+                }
+
+                match stuck.observe(tc, &outcome) {
+                    crate::stuck::StuckSignal::None => {}
+                    crate::stuck::StuckSignal::Remind(r) => pending.push(r.into_note()),
+                    crate::stuck::StuckSignal::Stop {
+                        tool,
+                        arguments,
+                        repeats,
+                    } => {
+                        emit(
+                            opts,
+                            format!(
+                                "  stuck: {tool} repeated {repeats} times with the same failing result \
+                                 — ending run"
+                            ),
+                        );
+                        status = EpisodeStatus::Stuck {
+                            tool,
+                            arguments,
+                            repeats,
+                        };
+                        turns.push(TranscriptTurn {
+                            notes: std::mem::take(&mut turn_notes),
+                            index,
+                            assistant_text,
+                            calls: recorded,
+                            duration_ms: ms_since(turn_start),
+                        });
+                        break 'outer;
+                    }
+                }
+            }
+
+            if out_of_time {
+                status = EpisodeStatus::Timeout;
+                turns.push(TranscriptTurn {
+                    notes: std::mem::take(&mut turn_notes),
+                    index,
+                    assistant_text,
+                    calls: recorded,
+                    duration_ms: ms_since(turn_start),
+                });
+                break 'outer;
             }
         }
 
@@ -744,6 +839,7 @@ fn not_run(call: &crate::provider::ToolCall) -> RecordedCall {
         timed_out: false,
         not_run: true,
         refused_by_hook: None,
+        child: None,
     }
 }
 
@@ -886,6 +982,8 @@ pub struct EpisodeOptions {
     /// What the episode runs under. `None`: the kernel whenever the build can enforce, else the host.
     /// `bee run --host` asks for `Host` on any build.
     pub enforcement: Option<crate::session::Enforcement>,
+    /// User and project `[delegation]` (018 US4): how deep and how wide the session may delegate.
+    pub delegation: crate::delegate::DelegationLimits,
 }
 
 /// Run a full episode: build the sandbox (a real bee scope under `--features enforce`), materialize
@@ -979,7 +1077,9 @@ async fn run_episode_inner(
     let mut opts = LoopOptions {
         #[cfg(feature = "durable-sessions")]
         durable,
-        progress: progress.map(|p| Box::new(move |line: &str| p(line)) as ProgressSink),
+        progress: progress
+            .clone()
+            .map(|p| Box::new(move |line: &str| p(line)) as ProgressSink),
         metrics: Recorder::new(
             "episode",
             format!("episode:{}:{}", scenario.id, std::process::id()),
@@ -1022,6 +1122,20 @@ async fn run_episode_inner(
     }
     opts.escalation = session.escalation.take();
     opts.tool_refresh = session.tool_refresh.clone();
+    opts.delegation = session
+        .delegation(progress.clone().map(|p| {
+            std::sync::Arc::new(move |line: &str| p(line)) as crate::delegate::SharedProgress
+        }))
+        .map(|d| d.with_limits(eopts.delegation));
+    // A delegating episode draws every turn — its own and its subagents' — from one pool the size
+    // of its turn limit, so delegating cannot buy it more (SC-005). A run that cannot delegate
+    // keeps exactly the limits it had.
+    if let Some(d) = opts.delegation.take() {
+        let budget =
+            crate::delegate::Budget::new(scenario.turn_limit, Instant::now() + scenario.timeout());
+        opts.budget = Some(budget.clone());
+        opts.delegation = Some(d.with_budget(budget));
+    }
 
     // The model is given the session's system prompt: the scenario's, plus the notes for the tools
     // the session holds — the same prompt the REPL builds (024 FR-007).
@@ -1188,9 +1302,13 @@ mod mcp_cgroup_spike {
         let policy =
             bee_core::Policy::from_path(&scenario.policy_path).expect("parse spike policy");
         let scope_id = format!("bee-episode-{}-{}", scenario.id, std::process::id());
-        let (sandbox, _http) =
-            crate::session::parts::kernel_sandbox(&policy, &scope_id, sandbox::key_vars(None))
-                .expect("build enforced sandbox (need root + BPF-LSM)");
+        let (sandbox, _http) = crate::session::parts::kernel_sandbox(
+            &policy,
+            &scope_id,
+            sandbox::key_vars(None),
+            None,
+        )
+        .expect("build enforced sandbox (need root + BPF-LSM)");
 
         let scope_cgid = match &sandbox {
             Sandbox::Enforced(e) => e.scope.cgroup_id,

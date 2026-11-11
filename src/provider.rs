@@ -270,6 +270,17 @@ pub fn model_from_config(
                         name: name.clone(),
                         arguments: step.args.clone().unwrap_or(serde_json::Value::Null),
                     }]),
+                    None if !step.calls.is_empty() => Turn::calls(
+                        step.calls
+                            .iter()
+                            .enumerate()
+                            .map(|(j, c)| ToolCall {
+                                id: format!("call-{i}-{j}"),
+                                name: c.tool.clone(),
+                                arguments: c.args.clone().unwrap_or(serde_json::Value::Null),
+                            })
+                            .collect(),
+                    ),
                     None => Turn::text(step.text.clone().unwrap_or_default()),
                 })
                 .collect();

@@ -1,0 +1,47 @@
+[package]
+name = "comb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+# rcgen 0.14 (the worker's CA, moving here with it) declares MSRV 1.88; match the application package.
+rust-version = "1.96"
+description = "HTTP(S) interception: proxy worker, exchange store, combq queries, replay, fuzz, diff."
+
+[features]
+# Test-only (019 T048): the worker's `debug.connect`/`debug.read` control frames. NEVER in a shipping
+# build — only the VM matrix enables it (through bee's `vm-test`).
+vm-test = []
+
+[dependencies]
+bee-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true }
+tokio = { workspace = true, features = ["net", "sync", "io-util", "io-std", "process", "time", "rt", "macros"] }
+libc = { workspace = true }
+# The worker: hyper 1.x forwards traffic (it preserves header case, R1); rustls/aws-lc-rs terminates
+# and originates TLS; rcgen mints the per-session CA and leaves in worker memory (zeroized, R9);
+# httparse frames the byte-exact raw writer (FR-018). Versions match bee's (SC-009: the lockfile
+# must not move). rcgen stays at 0.14.9 in the lockfile — 0.14.10 needs a newer aws-lc-rs.
+hyper = { version = "1", features = ["http1", "server", "client"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+webpki-roots = "1"
+httparse = "1.10"
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem", "zeroize"] }
+rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled", "limits"] }
+sha2 = "0.10"
+flate2 = "1.1"
+similar = "2.7"
+regex = "1"
+brotli-decompressor = "6"
+ruzstd = "0.9"
+json-patch = "4.2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+tempfile = "3"

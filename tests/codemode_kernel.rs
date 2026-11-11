@@ -56,25 +56,19 @@ fn sandbox_with_policy(policy: bee_core::Policy) -> Sandbox {
     )
 }
 fn sandbox_with_compiled(compiled: bee_core::CompiledPolicy) -> Sandbox {
-    use bee_userspace::{EnforcementPlan, Engine, ScopeMode};
+    use bee_userspace::{EnforcementPlan, ScopeMode};
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     substrate();
     let plan = EnforcementPlan::prepare(&compiled, ScopeMode::Enforce).unwrap();
-    let mut engine = Engine::init().unwrap();
-    let scope = engine
-        .create_scope(
-            &format!(
-                "codemode-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ),
-            bee_userspace::cgroup::DEFAULT_PARENT,
-            &plan,
-        )
-        .unwrap();
-    let reader = engine.take_audit_reader("codemode-kernel").unwrap();
-    Sandbox::enforced(engine, scope, reader, vec![])
+    let supervisor = bee::supervisor::Supervisor::start().unwrap();
+    let id = format!(
+        "codemode-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    );
+    let scope = supervisor.create_scope(&id, &id, None, &plan).unwrap();
+    Sandbox::enforced(scope, vec![])
 }
 fn scope(sandbox: &Sandbox) -> PathBuf {
     let Sandbox::Enforced(e) = sandbox else {

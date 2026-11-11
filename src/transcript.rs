@@ -74,6 +74,9 @@ pub enum EpisodeStatus {
     },
     /// `finish` was offered, and the model ended with a second text-only turn instead (025 FR-035).
     EndedWithoutFinish,
+    /// The session's shared turn budget ran out (018 FR-023): a subagent drew the last of it, or
+    /// this loop is one.
+    BudgetExhausted,
 }
 
 /// One recorded tool call within a turn: the request, the result, and the audit events the kernel
@@ -117,6 +120,160 @@ pub struct RecordedCall {
     /// A hook refused the call before it ran (024 FR-031); the tool never executed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refused_by_hook: Option<String>,
+    /// The subagent this call delegated to (018), with its own turn-by-turn record. Absent on every
+    /// call that did not delegate, so a session that never delegates records exactly what it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child: Option<Box<DelegationRecord>>,
+}
+
+/// What one delegation left behind (018, contracts/delegation-record.md): which agent ran, in which
+/// scope, how it ended, and its whole transcript. The child's kernel events are in that transcript,
+/// stamped with its scope id, and never in the parent's.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DelegationRecord {
+    pub agent: String,
+    /// The child's scope id; empty when it was refused before a scope existed.
+    pub scope_id: String,
+    /// Whether a kernel scope confined the child. Recorded when it was spawned, so a transcript
+    /// read later tells an enforced delegation from prompt isolation without knowing the build.
+    pub enforced: bool,
+    /// 1 for a subagent of the session itself.
+    pub depth: u32,
+    pub outcome: DelegationOutcome,
+    /// Tokens the child's model calls used, input plus output, as the provider reported them.
+    /// `None`: not counted — a harness's model use is not visible to bee (026 R14) — never zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_used: Option<u64>,
+    /// The child's own record. `None` when it never ran, and for a harness (see `harness`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<Box<EpisodeTranscript>>,
+    /// The child's model turns. `None`: not counted (a harness), never zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turns_used: Option<u32>,
+    /// What an external harness did (026): its turns, tool calls, the permissions bee answered for
+    /// it, and the client methods it was refused. `None` for bee's own loop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<Box<HarnessRecord>>,
+    /// The child's kernel events, when it has no transcript of its own to hold them (a harness).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audit: Vec<AuditEvent>,
+}
+
+/// An external harness's run, as bee saw it over ACP (026 data-model.md, research R13).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct HarnessRecord {
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    /// Keys only: values may be credentials.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env_keys: Vec<String>,
+    pub protocol_version: u16,
+    /// The harness's `agentInfo`, `name version`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_info: Option<String>,
+    /// One per prompt bee sent (one in this feature).
+    #[serde(default)]
+    pub turns: Vec<HarnessTurn>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub permissions: Vec<PermissionRecord>,
+    /// Client methods the harness called anyway (`fs/*`, `terminal/*`, …), each refused.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refused_methods: Vec<String>,
+    /// The prompt's `stopReason`, or why there was none (`exited`, `protocol_error`, `deadline`).
+    pub stop_reason: String,
+    /// The last 4 KiB of its stderr.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub stderr_tail: String,
+}
+
+/// What one prompt produced.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct HarnessTurn {
+    /// Its `agent_message_chunk` text, concatenated.
+    pub text: String,
+    /// Bytes of `agent_thought_chunk` text (the thoughts themselves are not kept).
+    #[serde(default)]
+    pub thoughts_len: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<HarnessToolCall>,
+}
+
+/// A tool call the harness reported, merged across its updates. Raw values are capped.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct HarnessToolCall {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_input: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_output: Option<String>,
+}
+
+/// A permission the harness asked for and bee answered (research R11). Never shown to a person.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PermissionRecord {
+    /// The tool call it was about.
+    pub tool_call: String,
+    pub title: String,
+    /// Each offered option as `kind:id`.
+    pub offered: Vec<String>,
+    /// The chosen option as `kind:id`, or `cancelled`.
+    pub chosen: String,
+    pub ts: String,
+}
+
+/// How a delegation ended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DelegationOutcome {
+    /// The child's loop ended on its own and its scope was torn down cleanly.
+    Completed,
+    /// A shared bound stopped the child before it ended on its own.
+    CutShort { reason: CutShortReason },
+    /// The delegation never got a scope.
+    Refused { reason: RefusalReason },
+    /// The child could not start, failed, or its scope would not tear down.
+    Failed { detail: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CutShortReason {
+    /// The agent's own turn limit.
+    Turns,
+    /// The session's shared turn budget (FR-023).
+    SharedTurns,
+    /// The shared wall-clock deadline.
+    Deadline,
+}
+
+/// Why a delegation was refused (contracts/task-tool.md). Each names its cause.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RefusalReason {
+    UnknownAgent {
+        name: String,
+    },
+    /// The agent lists a tool the delegating session does not hold, or cannot hand to a child.
+    ToolNotHeld {
+        tool: String,
+    },
+    /// The agent's declaration asks for more than the session holds.
+    OverGrant {
+        detail: String,
+    },
+    DepthExceeded {
+        max_depth: u32,
+    },
+    /// The session cannot delegate at all, and why.
+    Unavailable {
+        detail: String,
+    },
 }
 
 /// The interception session a transcript was recorded under (019 T044): how `[policy.http]` was
@@ -310,9 +467,37 @@ impl EpisodeTranscript {
         serde_json::to_string_pretty(self).expect("EpisodeTranscript is always serializable")
     }
 
-    /// Convenience: every denied audit event across the episode.
+    /// Convenience: every denied audit event across the episode — this scope's own, never a
+    /// subagent's (see [`audit_tree`](Self::audit_tree)).
     pub fn denials(&self) -> impl Iterator<Item = &AuditEvent> {
         self.audit_trail.iter().filter(|e| e.decision == "denied")
+    }
+
+    /// Every delegation in this transcript and its descendants, depth-first (018).
+    pub fn delegations(&self) -> Vec<&DelegationRecord> {
+        let mut out = Vec::new();
+        for call in self.turns.iter().flat_map(|t| &t.calls) {
+            if let Some(child) = &call.child {
+                out.push(child.as_ref());
+                if let Some(t) = &child.transcript {
+                    out.extend(t.delegations());
+                }
+            }
+        }
+        out
+    }
+
+    /// Every kernel event in this transcript and every descendant delegation's, in tree order:
+    /// this scope's first, then each subagent's (018). Each event appears once — it was routed to
+    /// exactly one scope.
+    pub fn audit_tree(&self) -> Vec<&AuditEvent> {
+        let mut out: Vec<&AuditEvent> = self.audit_trail.iter().collect();
+        for call in self.turns.iter().flat_map(|t| &t.calls) {
+            if let Some(t) = call.child.as_ref().and_then(|c| c.transcript.as_ref()) {
+                out.extend(t.audit_tree());
+            }
+        }
+        out
     }
 
     /// Every panel effect across the episode, in turn/call order (008-grid-tui, FR-010). Derived
@@ -556,6 +741,7 @@ pub fn tool_result_from_output(
         panel_ops: Vec::new(),
         inline_effect: None,
         provenance: crate::provider::Provenance::Harness,
+        delegate: None,
     }
 }
 

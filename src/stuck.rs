@@ -317,6 +317,8 @@ mod tests {
             timed_out: false,
             escalations: Vec::new(),
             refused_by_hook: None,
+            delegation: None,
+            pending_delegation: None,
         }
     }
 

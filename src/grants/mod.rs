@@ -88,6 +88,12 @@ pub enum GrantOrigin {
         port: u16,
         call: String,
     },
+    /// A subagent asked (018 US7): `inner` is why it asked, so a prompt can name both who and why.
+    /// A grandchild's request nests: the outermost `agent` is the session's direct subagent.
+    Subagent {
+        agent: String,
+        inner: Box<GrantOrigin>,
+    },
 }
 
 /// How long a grant lives. Turn counts are deterministic (the default, reproducible in scored runs);
@@ -688,6 +694,114 @@ mod tests {
                     let mut rebuilt = base.clone();
                     for lease in ap.leases() { fold_delta(&mut rebuilt, &lease.delta); }
                     prop_assert_eq!(&ap.active().filesystem, &rebuilt.filesystem);
+                }
+            }
+        }
+
+        // 018 T052 (FR-014, SC-003): the same, across a delegation tree. A subagent is spawned from
+        // any live node as `derive(request)` under a ceiling that is its parent's active policy at
+        // that moment (`delegate::child_escalation`); every node then applies, expires and releases
+        // grants on its own. Whatever the order, no node's authority leaves the ceiling it was
+        // given, that ceiling is the parent's authority at spawn — not the parent's later, possibly
+        // narrower one (FR-016) — and the session's ceiling bounds the whole tree.
+        #[derive(Debug, Clone)]
+        enum TreeOp {
+            Spawn(usize, Vec<(usize, bool)>), // parent node, requested (path, write?) pairs
+            Apply(usize, usize, u32),         // node, path, ttl turns
+            Expire(usize, u32),
+            Release(usize, usize),
+        }
+
+        const TREE_PATHS: [&str; 6] = ["/a/x", "/b/x", "/c/x", "/a", "/d", "/"];
+
+        fn tree_op() -> impl Strategy<Value = TreeOp> {
+            prop_oneof![
+                (
+                    0usize..8,
+                    prop::collection::vec((0usize..6, any::<bool>()), 0..3)
+                )
+                    .prop_map(|(n, r)| TreeOp::Spawn(n, r)),
+                (0usize..8, 0usize..6, 0u32..4).prop_map(|(n, p, t)| TreeOp::Apply(n, p, t)),
+                (0usize..8, 0u32..8).prop_map(|(n, t)| TreeOp::Expire(n, t)),
+                (0usize..8, 0usize..8).prop_map(|(n, i)| TreeOp::Release(n, i)),
+            ]
+        }
+
+        struct Node {
+            active: ActivePolicy,
+            /// The parent's active policy when this node was spawned; `None` for the session.
+            spawned_under: Option<Policy>,
+        }
+
+        proptest! {
+            #[test]
+            fn a_delegation_tree_stays_within_bounds(ops in prop::collection::vec(tree_op(), 0..60)) {
+                let session_ceiling = policy("ceiling", &[
+                    ("/a", Access::Write), ("/b", Access::Write), ("/c", Access::Write),
+                ]);
+                let base = session_ceiling.derive(policy("base", &[])).unwrap();
+                let mut nodes = vec![Node {
+                    active: ActivePolicy::new(base, session_ceiling.clone()).unwrap(),
+                    spawned_under: None,
+                }];
+                let mut turn = 0u32;
+
+                for op in ops {
+                    match op {
+                        TreeOp::Spawn(n, request) => {
+                            let parent = nodes[n % nodes.len()].active.active().clone();
+                            let fs: Vec<(&str, Access)> = request
+                                .iter()
+                                .map(|&(p, w)| {
+                                    (TREE_PATHS[p], if w { Access::Write } else { Access::Read })
+                                })
+                                .collect();
+                            // An over-broad request is refused before anything exists (FR-010).
+                            if let Ok(derived) = parent.derive(policy("child", &fs)) {
+                                let active = ActivePolicy::new(derived, parent.clone());
+                                prop_assert!(active.is_ok(), "a derived child fits under its parent");
+                                nodes.push(Node {
+                                    active: active.unwrap(),
+                                    spawned_under: Some(parent),
+                                });
+                            }
+                        }
+                        TreeOp::Apply(n, p, ttl) => {
+                            let n = n % nodes.len();
+                            let _ = nodes[n].active.try_apply(
+                                GrantOrigin::Explicit,
+                                fs_delta(TREE_PATHS[p], Access::Write),
+                                Ttl::Turns(ttl),
+                                turn,
+                            );
+                        }
+                        TreeOp::Expire(n, t) => {
+                            let n = n % nodes.len();
+                            let _ = nodes[n].active.expire(t).unwrap();
+                            turn = turn.max(t);
+                        }
+                        TreeOp::Release(n, i) => {
+                            let n = n % nodes.len();
+                            let ap = &mut nodes[n].active;
+                            if let Some(id) = ap.leases().get(i % ap.leases().len().max(1))
+                                .map(|l| l.id.clone()) {
+                                ap.release(&id).unwrap();
+                            }
+                        }
+                    }
+
+                    for node in &nodes {
+                        let active = node.active.active().clone();
+                        // Every node stays within its own ceiling…
+                        prop_assert!(node.active.ceiling().derive(active.clone()).is_ok());
+                        // …which for a subagent is exactly its parent's authority at spawn (FR-015)…
+                        if let Some(under) = &node.spawned_under {
+                            prop_assert_eq!(node.active.ceiling(), under);
+                            prop_assert!(under.derive(active.clone()).is_ok());
+                        }
+                        // …and the session's ceiling bounds the whole tree.
+                        prop_assert!(session_ceiling.derive(active).is_ok());
+                    }
                 }
             }
         }

@@ -30,6 +30,7 @@ pub mod call;
 #[cfg(feature = "concurrent")]
 pub mod concurrent;
 pub mod config;
+pub mod delegate;
 // Context budget and compaction for long runs (025-long-run-resilience).
 pub mod context;
 // The shared in-scope file worker behind `read_file` and `edit_file`.
@@ -57,15 +58,18 @@ pub mod mcp;
 pub mod metrics;
 pub mod operator;
 pub mod provider;
+pub mod proxy_scope;
 // Proxy-layer events (019). Ungated: transcripts carry them in every build.
-pub mod proxy_event;
+pub use bee_core::proxy_event;
+#[cfg(feature = "acp")]
+pub mod acp;
 pub mod render_api;
 pub mod render_spec;
 pub mod repl;
 #[cfg(feature = "repro")]
 pub mod reproduction;
 // Terminal-safety for untrusted text. Ungated: every front-end and the consent prompt need it.
-pub mod safe_text;
+pub use bee_core::safe_text;
 pub mod sandbox;
 // SARIF ingestion for the external scanner tier (016-native-tools US3).
 #[cfg(feature = "scanners")]
@@ -84,6 +88,7 @@ pub mod security;
 pub mod session;
 pub mod skills;
 pub mod stuck;
+pub mod supervisor;
 pub mod tools;
 pub mod transcript;
 // The top of a model turn: lease expiry, release, MCP refresh (024 FR-028–FR-030).

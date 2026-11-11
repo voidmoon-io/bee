@@ -103,6 +103,17 @@ impl Session {
         self.sandbox.teardown().map_err(|e| e.to_string())
     }
 
+    /// The delegation settings a loop over this session runs with (018): `Some` exactly when the
+    /// session holds the `task` tool.
+    pub fn delegation(
+        &self,
+        progress: Option<crate::delegate::SharedProgress>,
+    ) -> Option<crate::delegate::Delegation> {
+        self.registry
+            .contains("task")
+            .then(|| crate::delegate::Delegation::new(self.skills.clone(), progress))
+    }
+
     /// What every entry point's session must agree on (SC-001): the tools and their dependencies, the
     /// escalation floor and ceiling, how grants are decided, and the system prompt. Serializable, so
     /// two sessions compare as data; the Operator — the one thing allowed to differ — is not in it.
@@ -172,7 +183,10 @@ impl Drop for Session {
 /// Build a session from `spec` (contracts/session-builder.md). `report` receives the lines an operator
 /// should see while it is built — skill warnings, grant outcomes, the advisory banner — in the
 /// wording the headless progress stream has always used. Every refusal happens before a scope exists.
-pub async fn build(spec: SessionSpec, report: &dyn Fn(&str)) -> Result<Session, BuildError> {
+pub async fn build(
+    spec: SessionSpec,
+    report: &(dyn Fn(&str) + Sync),
+) -> Result<Session, BuildError> {
     build_from(spec, report, SystemParts::default()).await
 }
 
@@ -182,16 +196,38 @@ pub async fn build(spec: SessionSpec, report: &dyn Fn(&str)) -> Result<Session, 
 #[cfg(feature = "test-support")]
 pub async fn build_with(
     spec: SessionSpec,
-    report: &dyn Fn(&str),
+    report: &(dyn Fn(&str) + Sync),
     worker_exe: std::path::PathBuf,
     hosts: Vec<(String, std::net::IpAddr)>,
 ) -> Result<Session, BuildError> {
     build_from(
         spec,
         report,
+        // The struct update supplies the feature-gated fields, which a slim build does not have.
+        #[allow(clippy::needless_update)]
         SystemParts {
             worker_exe: Some(worker_exe),
             hosts,
+            ..SystemParts::default()
+        },
+    )
+    .await
+}
+
+/// [`build`], creating the session's scopes on `supervisor` rather than starting an engine of its own
+/// (026 R3): `bee acp` serves several sessions from one process and one eBPF object.
+#[cfg(feature = "enforce")]
+pub async fn build_on(
+    spec: SessionSpec,
+    report: &(dyn Fn(&str) + Sync),
+    supervisor: crate::supervisor::Supervisor,
+) -> Result<Session, BuildError> {
+    build_from(
+        spec,
+        report,
+        SystemParts {
+            supervisor: Some(supervisor),
+            ..SystemParts::default()
         },
     )
     .await
@@ -199,8 +235,12 @@ pub async fn build_with(
 
 async fn build_from(
     mut spec: SessionSpec,
-    report: &dyn Fn(&str),
-    #[cfg_attr(not(feature = "intercept"), allow(unused_variables))] system: SystemParts,
+    report: &(dyn Fn(&str) + Sync),
+    #[cfg_attr(
+        not(any(feature = "intercept", feature = "enforce")),
+        allow(unused_variables)
+    )]
+    system: SystemParts,
 ) -> Result<Session, BuildError> {
     // A sandbox the entry point built is torn down if the session is refused, so its scope does not
     // outlive the refusal.
@@ -267,6 +307,8 @@ async fn build_from(
             .next()
             .is_some()
             .then(|| skills.clone()),
+        // 018: `task` is offered only when there is an agent to delegate to.
+        agents: skills.agents().next().is_some().then(|| skills.clone()),
         ..ToolDeps::default()
     }
     .with_security(&spec.security, Some(&grants.policy), &run_id);
@@ -284,6 +326,8 @@ async fn build_from(
     let label = parts::sanitize(&spec.label);
     let scope_id = match spec.entry {
         EntryPoint::Repl | EntryPoint::Tui => format!("bee-session-{}", std::process::id()),
+        // Several to a process: the session id, not the pid, keeps them apart.
+        EntryPoint::Acp => format!("bee-acp-{label}"),
         EntryPoint::Headless | EntryPoint::Batch { .. } => {
             format!("bee-episode-{label}-{}", std::process::id())
         }
@@ -297,6 +341,10 @@ async fn build_from(
             parts::build_sandbox(&spec, &grants.policy, &scope_id, &system).map_err(BuildError)?
         }
     };
+    // An ACP client names each session's directory; every other entry point runs in bee's own.
+    if spec.entry == EntryPoint::Acp {
+        sandbox.set_cwd(Some(spec.workdir.clone()));
+    }
 
     // 8. The proxy worker, in its sidecar scope or advisory, and the HTTP tools' handle on it.
     #[cfg(feature = "intercept")]
@@ -309,6 +357,12 @@ async fn build_from(
                 None => crate::intercept::sidecar::Enforcement::Kernel,
             };
             let session_id = format!("{label}-{}", std::process::id());
+            let child_proxies = crate::intercept::session::ChildProxies {
+                worker_exe: prepared.worker_exe.clone(),
+                hosts: system.hosts.clone(),
+                project_root: spec.workdir.clone(),
+                enforcement: enforcement.clone(),
+            };
             match crate::intercept::session::start(
                 prepared,
                 &mut sandbox,
@@ -316,13 +370,15 @@ async fn build_from(
                 &spec.workdir,
                 enforcement,
                 crate::intercept::session::worker_resolver(system.hosts.clone()),
+                None,
             )
             .await
             {
                 Ok(h) => {
-                    let deps = (**registry.deps())
+                    let mut deps = (**registry.deps())
                         .clone()
                         .with_interceptor(h.interceptor.clone());
+                    deps.child_proxies = Some(Arc::new(child_proxies));
                     registry.set_deps(Arc::new(deps));
                     Some(h)
                 }

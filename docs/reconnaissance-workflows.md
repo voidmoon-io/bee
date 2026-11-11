@@ -72,7 +72,7 @@ without measuring confidence. These outputs do not establish a verified vulnerab
 | Basic skill discovery and loading | Existing: [`skills.rs`](../src/skills.rs) | One trusted reconnaissance playbook |
 | HTTP request/history/read surface | Planned: [019](../specs/019-http-intercept/plan.md) | Network collection and captured exchanges |
 | Structured results and evidence references | Planned: [020](../specs/020-deterministic-tool-surface/spec.md) | Addressable observations and durable citations |
-| Investigation delegation and hybrid skills | Planned: [018](../specs/018-subagent-scopes/spec.md), [022](../specs/022-hybrid-agent-skills/spec.md) | Later specialist coordination |
+| Investigation delegation and hybrid skills | In progress: [018](../specs/018-subagent-scopes/spec.md), [022](../specs/022-hybrid-agent-skills/spec.md) | Later specialist coordination |
 
 The existing concurrent episode runner does not provide a parent/child investigation supervisor.
 The first milestone does not depend on delegation. It follows 022's direction of organizing work

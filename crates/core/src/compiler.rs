@@ -201,7 +201,33 @@ impl Policy {
         let Some(http) = self.http.as_ref().filter(|h| h.is_active()) else {
             return Ok(None);
         };
+        self.compile_http_section(http, r, worker_exe).map(Some)
+    }
 
+    /// [`compile_http`](Self::compile_http) for a **harness** (026 research R8): its proxy runs even
+    /// with no targets, because its egress — the model provider's hosts, tunnelled by name — is its
+    /// only route out. `Ok(None)` when it has neither targets nor egress.
+    pub fn compile_http_egress(
+        &self,
+        r: &dyn Resolver,
+        worker_exe: &std::path::Path,
+    ) -> Result<Option<CompiledHttp>, CompileError> {
+        let Some(http) = self
+            .http
+            .as_ref()
+            .filter(|h| !h.targets.is_empty() || !h.egress.is_empty())
+        else {
+            return Ok(None);
+        };
+        self.compile_http_section(http, r, worker_exe).map(Some)
+    }
+
+    fn compile_http_section(
+        &self,
+        http: &crate::policy::HttpPolicy,
+        r: &dyn Resolver,
+        worker_exe: &std::path::Path,
+    ) -> Result<CompiledHttp, CompileError> {
         if !self.network.allow.is_empty() {
             return Err(CompileError::HttpWithDirectNetwork(
                 self.network.allow.join(", "),
@@ -296,7 +322,7 @@ impl Policy {
             fs_write_default_deny: true,
             proxy_loopback_required: false,
         };
-        Ok(Some(CompiledHttp {
+        Ok(CompiledHttp {
             proxy_scope,
             http_scope: HttpScope {
                 targets,
@@ -305,7 +331,7 @@ impl Policy {
                 insecure_upstream: http.insecure_upstream.clone(),
                 limits: http.limits,
             },
-        }))
+        })
     }
 }
 
@@ -474,6 +500,18 @@ pub enum EnforcedBy {
 /// Held in **authoring tokens**, not resolved paths, because two callers need it at two different
 /// stages: [`Policy::compile`] resolves and injects it, while [`crate::attenuation`] reasons over it
 /// at the authoring level (where it, too, compares raw patterns). One table, one truth.
+/// The known harness credential stores (026 research R10): one harness must not read another's
+/// sign-in. Denied to a harness subagent unless both its agent and its parent name the store
+/// ([`Policy::derive_harness`]). Not part of [`PROTECTED_DEFAULTS`]: bee's own sessions — and its
+/// skill roots under `~/.claude/skills` — are unchanged.
+pub const HARNESS_STORES: &[&str] = &[
+    "~/.claude",
+    "~/.claude.json",
+    "~/.codex",
+    "~/.local/share/opencode",
+    "~/.config/opencode",
+];
+
 pub const PROTECTED_DEFAULTS: &[(&str, AccessMode)] = &[
     (":project_root/.git", AccessMode::READ),
     (":project_root/.bee", AccessMode::DENY),

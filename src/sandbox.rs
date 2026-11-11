@@ -67,6 +67,8 @@ pub enum CallOrigin {
     Tool,
     /// A long-lived MCP stdio server, named.
     Mcp(String),
+    /// An external harness subagent (026), named by its agent.
+    Harness(String),
 }
 
 /// Extra environment variables for one tool child, applied **after** [`restrict_env`] (research R6).
@@ -187,7 +189,11 @@ impl AuditState {
 struct ChildEnv {
     cleanup_error: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     audit_state: Box<std::sync::Mutex<AuditState>>,
-    strip_env: Vec<String>,
+    // Shared slices rather than owned buffers keep `ChildEnv` — carried unboxed by
+    // `Sandbox::Host` — as small as it was before `cwd` joined it.
+    strip_env: std::sync::Arc<[String]>,
+    /// The directory every child starts in (026: an ACP session's `cwd`). `None`: bee's own.
+    cwd: Option<std::sync::Arc<std::path::Path>>,
     call: Option<CallContext>,
     provider: Option<EnvProvider>,
     hooks: Option<std::sync::Arc<dyn CallHooks>>,
@@ -238,7 +244,7 @@ impl McpAttribution {
 impl ChildEnv {
     fn new(strip_env: Vec<String>) -> Self {
         ChildEnv {
-            strip_env,
+            strip_env: strip_env.into(),
             ..Default::default()
         }
     }
@@ -247,6 +253,9 @@ impl ChildEnv {
     /// current tool call unless one is named).
     fn apply(&self, cmd: &mut Command, call: Option<&CallContext>) -> Result<(), SpawnError> {
         restrict_env(cmd, &self.strip_env);
+        if let Some(dir) = &self.cwd {
+            cmd.current_dir(&**dir);
+        }
         if let (Some(provider), Some(call)) = (&self.provider, call.or(self.call.as_ref())) {
             for (k, v) in provider(call).vars() {
                 refused_overlay_key(k, &self.strip_env)
@@ -267,6 +276,18 @@ pub struct HostSandbox {
     scripted: Option<std::sync::Arc<ScriptedAudit>>,
 }
 
+impl HostSandbox {
+    /// The next scripted audit batch — the proxy's or the tool scope's. Empty outside tests.
+    fn next_scripted(&self, proxy: bool) -> Vec<AuditEvent> {
+        #[cfg(feature = "test-support")]
+        if let Some(s) = &self.scripted {
+            return if proxy { s.pop_proxy() } else { s.pop_tool() };
+        }
+        let _ = proxy;
+        Vec::new()
+    }
+}
+
 /// Audit batches a host test hands the sandbox in place of a kernel (024 R1, `test-support` only).
 ///
 /// Each [`Sandbox::drain_audit`] pops one batch from `tool`, and each
@@ -278,8 +299,8 @@ pub struct HostSandbox {
 /// reloads the policy and retries the call. Fabricated audit is fabricated authority, which is why
 /// this compiles only under `test-support` and never ships.
 ///
-/// **A simplification of the real drains.** A kernel drain returns everything buffered, and the
-/// enforced sidecar drain also moves pending tool-scope events aside for the next tool drain. Here
+/// **A simplification of the real drains.** A kernel drain returns everything its scope has pending
+/// (the supervisor files every scope's events at each drain, 018). Here
 /// each drain returns exactly one queued batch, so a test controls *which* drain sees an event (how
 /// the late-event cases are written). A batch queued beyond the drains a call makes is not lost: it
 /// is returned to the next call's first drain.
@@ -320,18 +341,11 @@ impl ScriptedAudit {
 }
 
 /// A second kernel scope beside the tool scope, holding one long-lived harness child (019 P4,
-/// research R2) — today the interception proxy worker, in its *proxy scope*.
-///
-/// A bridge: the 018 Supervisor generalises "several scopes per session" and absorbs this, deleting
-/// the field (task T092). Until then exactly one sidecar is supported, on [`EnforcedSandbox`] only.
+/// research R2) — the interception proxy worker, in its *proxy scope*. One per sandbox that
+/// intercepts: a session's, and each intercepting subagent's (026, 019 T092). Shared with the
+/// worker's resolver, which admits addresses into it (026 R9).
 #[cfg(feature = "enforce")]
-pub struct SidecarScope {
-    /// Tags this scope's audit events (`"proxy"`).
-    pub label: String,
-    pub scope: bee_userspace::Scope,
-    /// The plan currently installed, kept so a failed widening can be rolled back to it.
-    pub plan: bee_userspace::EnforcementPlan,
-}
+pub type SidecarScope = std::sync::Arc<crate::proxy_scope::ProxyScope>;
 
 /// Why a sandbox cannot host a sidecar scope. Refusing is the fail-closed answer: a proxy that no
 /// kernel scope confines is an unconfined deputy (Constitution III).
@@ -341,66 +355,15 @@ pub struct SidecarUnsupported {
     pub reason: &'static str,
 }
 
-/// An audit event from the drain, tagged with the scope it came from: `None` for the tool scope,
-/// the sidecar's label otherwise.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TaggedAudit {
-    pub event: AuditEvent,
-    pub scope_label: Option<String>,
-}
-
-/// Route one drained event (019 P4). The tool scope's events pass untagged; the sidecar's are tagged
-/// with its label, which also becomes the event's `scope_id` so the tag survives into transcripts;
-/// every other cgroup's are dropped. With no sidecar this is exactly the single-scope filter it
-/// replaces.
-pub fn route_audit(
-    ev: &AuditEvent,
-    tool_cg: u64,
-    sidecar: Option<(u64, &str)>,
-) -> Option<TaggedAudit> {
-    if ev.cgroup_id == tool_cg {
-        return Some(TaggedAudit {
-            event: ev.clone(),
-            scope_label: None,
-        });
-    }
-    match sidecar {
-        Some((cg, label)) if ev.cgroup_id == cg => {
-            let mut event = ev.clone();
-            event.scope_id = Some(label.to_string());
-            Some(TaggedAudit {
-                event,
-                scope_label: Some(label.to_string()),
-            })
-        }
-        _ => None,
-    }
-}
-
-/// The cgroup a sidecar reload writes to. Never falls back to the tool scope: reloading the tool
-/// scope with the proxy scope's rules would hand tool children the targets directly.
-pub fn sidecar_reload_target(_tool_cg: u64, sidecar_cg: Option<u64>) -> Result<u64, String> {
-    sidecar_cg.ok_or_else(|| "no sidecar scope to reload".to_string())
-}
-
-/// A tool child confined to a live bee scope, with its audit ring.
+/// A tool child confined to a live bee scope. The scope's [`Supervisor`](crate::supervisor::Supervisor)
+/// owns the engine and the audit ring; the sandbox holds a handle, so one session's tool scope, a
+/// concurrent batch's episodes and (018) subagents are all this same variant.
 #[cfg(feature = "enforce")]
 pub struct EnforcedSandbox {
-    // The engine owns the loaded eBPF object; it MUST stay alive for the episode or the LSM
-    // programs detach and the scope's map rules stop being enforced. Read mutably by `reload`
-    // (007-dynamic-grants) to re-populate the scope's maps on a grant/narrow.
-    engine: bee_userspace::Engine,
-    pub scope: bee_userspace::Scope,
-    pub reader: bee_userspace::events::AuditReader,
+    pub scope: crate::supervisor::ScopeHandle,
     env: ChildEnv,
-    /// The optional second scope (019 P4). Its events are drained alongside the tool scope's and
-    /// buffered here until [`Sandbox::drain_sidecar_audit`] collects them.
+    /// The optional second scope (019 P4), drained separately by [`Sandbox::drain_sidecar_audit`].
     sidecar: Option<SidecarScope>,
-    sidecar_audit: Vec<AuditEvent>,
-    /// Tool-scope events a sidecar drain pulled off the shared ring, held for the next
-    /// [`Sandbox::drain_audit`] — dropping them would hide denials from the audit trail and from
-    /// reactive escalation.
-    tool_audit: Vec<AuditEvent>,
     /// The session proxy's loopback port, when `[policy.http]` is active (019). Every recompile of
     /// the tool scope — a grant's reload included — re-applies it as the scope's only network rule;
     /// without it the plan refuses to install (`ProxyLoopbackMissing`).
@@ -410,16 +373,6 @@ pub struct EnforcedSandbox {
     /// Set when a reload failed and could not be rolled back: the scope's rules are then a mixture
     /// that may be wider than any policy anyone approved, so no further tool child may start in it.
     poisoned: Option<String>,
-}
-
-/// A tool child confined to a live bee scope whose audit events arrive via a demux subscription
-/// (US4). Unlike [`EnforcedSandbox`] it does **not** own the engine — the concurrent runner owns one
-/// shared engine for all episodes — and it drains an mpsc channel instead of the ring buffer.
-#[cfg(feature = "concurrent")]
-pub struct ConcurrentSandbox {
-    pub scope: bee_userspace::Scope,
-    pub subscription: bee_userspace::AuditSubscription,
-    env: ChildEnv,
 }
 
 /// Borrowed execution boundary for one durable batch member. The parent sandbox owns
@@ -434,17 +387,15 @@ pub struct BatchSandbox {
 pub enum Sandbox {
     #[cfg(feature = "enforce")]
     Batch(Box<BatchSandbox>),
-    Host(HostSandbox),
+    Host(Box<HostSandbox>),
     #[cfg(feature = "enforce")]
     Enforced(Box<EnforcedSandbox>),
-    #[cfg(feature = "concurrent")]
-    Concurrent(Box<ConcurrentSandbox>),
 }
 
 impl Sandbox {
     /// Recompile `policy` and re-populate the live scope's rule maps (007-dynamic-grants). Host is a
-    /// no-op (no kernel scope). A concurrent sandbox cannot reload through here — the runner owns the
-    /// engine — so it returns an error (fail-closed: escalation refuses rather than under-enforce).
+    /// no-op (no kernel scope). Every enforced scope reloads through its supervisor, including a
+    /// concurrent episode's (018 SC-007).
     #[cfg_attr(not(feature = "enforce"), allow(unused_variables))]
     pub fn reload(&mut self, policy: &bee_core::Policy) -> Result<(), String> {
         self.check_cleanup()?;
@@ -462,74 +413,42 @@ impl Sandbox {
             Sandbox::Host(_) => Ok(()),
             #[cfg(feature = "enforce")]
             Sandbox::Enforced(e) => e.reload(policy),
-            #[cfg(feature = "concurrent")]
-            Sandbox::Concurrent(_) => Err(
-                "reload unsupported on a concurrent sandbox (engine owned by the runner)"
-                    .to_string(),
-            ),
         }
     }
 }
 
 #[cfg(feature = "enforce")]
 impl EnforcedSandbox {
-    /// Drain the ring once: return the tool scope's events, buffer the sidecar's (019 P4).
-    fn drain_into_buffers(&mut self) -> Vec<AuditEvent> {
-        let mut batch = Vec::new();
-        let exhausted = self.reader.drain(&mut |ev| batch.push(ev));
-        {
-            let mut state = self.env.audit_state.lock().expect("audit state");
-            state.health.drain_limited |= !exhausted;
-            state.retain(&mut batch);
-        }
-        let side = self
-            .sidecar
-            .as_ref()
-            .map(|s| (s.scope.cgroup_id, s.label.as_str()));
-        let mut tool = Vec::new();
-        for ev in batch {
-            match route_audit(&ev, self.scope.cgroup_id, side) {
-                Some(TaggedAudit {
-                    event,
-                    scope_label: None,
-                }) => tool.push(event),
-                Some(TaggedAudit { event, .. }) => self.sidecar_audit.push(event),
-                None => (),
-            }
-        }
-        tool
+    /// `scope`'s events since its last drain, counted into this sandbox's audit health and bounded
+    /// by its retention limit.
+    fn drain_handle(&self, scope: &crate::supervisor::ScopeHandle) -> Vec<AuditEvent> {
+        let mut drained = scope.drain();
+        let mut state = self.env.audit_state.lock().expect("audit state");
+        state.health.drain_limited |= drained.limited;
+        state.health.queue_dropped = state.health.queue_dropped.saturating_add(drained.dropped);
+        state.retain(&mut drained.events);
+        drained.events
     }
 
-    fn reload_sidecar(&mut self, policy: &bee_core::CompiledPolicy) -> Result<(), String> {
-        use bee_userspace::{EnforcementPlan, ScopeMode};
-        let plan = EnforcementPlan::prepare(policy, ScopeMode::Enforce)
-            .map_err(|e| format!("sidecar reload plan: {e}"))?;
-        self.install_sidecar_plan(plan)
+    /// Why this sandbox's rules are unknown — its own scope's, or its proxy scope's — if a reload
+    /// left either so. Every further tool child is refused while this is `Some`.
+    fn poisoned(&self) -> Option<String> {
+        self.poisoned
+            .clone()
+            .or_else(|| self.sidecar.as_ref().and_then(|p| p.poisoned()))
     }
 
-    fn install_sidecar_plan(&mut self, plan: bee_userspace::EnforcementPlan) -> Result<(), String> {
-        let target = sidecar_reload_target(
-            self.scope.cgroup_id,
-            self.sidecar.as_ref().map(|s| s.scope.cgroup_id),
-        )?;
-        if let Some(why) = &self.poisoned {
+    fn sidecar(&self) -> Result<&SidecarScope, String> {
+        if let Some(why) = self.poisoned() {
             return Err(format!(
-                "sidecar reload scope: already in an unknown state: {why}"
+                "proxy scope reload: already in an unknown state: {why}"
             ));
         }
-        if let Err(e) = self.engine.reload_scope(target, &plan) {
-            if let bee_userspace::ReloadError::Inconsistent(_) = e {
-                // The proxy scope is every tool child's egress path: unknown rules there are as
-                // unsafe as unknown rules on the tool scope itself.
-                self.poisoned = Some(format!("sidecar: {e}"));
-            }
-            return Err(format!("sidecar reload scope: {e}"));
-        }
+        // Never the tool scope: reloading it with the proxy scope's rules would hand tool
+        // children the targets directly.
         self.sidecar
-            .as_mut()
-            .expect("target implies a sidecar")
-            .plan = plan;
-        Ok(())
+            .as_ref()
+            .ok_or_else(|| "no proxy scope to reload".to_string())
     }
 
     /// Compile `policy` and hand the fresh plan to `Engine::reload_scope`. On a refused reload the
@@ -550,10 +469,10 @@ impl EnforcedSandbox {
         let compiled = crate::tools::exec::tool_scope(compiled)?;
         let plan = EnforcementPlan::prepare(&compiled, ScopeMode::Enforce)
             .map_err(|e| format!("reload plan: {e}"))?;
-        if let Some(why) = &self.poisoned {
+        if let Some(why) = self.poisoned() {
             return Err(format!("reload scope: already in an unknown state: {why}"));
         }
-        match self.engine.reload_scope(self.scope.cgroup_id, &plan) {
+        match self.scope.reload(&plan) {
             Ok(()) => Ok(()),
             Err(e @ bee_userspace::ReloadError::Refused(_)) => Err(format!("reload scope: {e}")),
             Err(e @ bee_userspace::ReloadError::Inconsistent(_)) => {
@@ -579,20 +498,20 @@ pub fn key_vars(api_key_env: Option<&str>) -> Vec<String> {
 impl Sandbox {
     /// A no-scope sandbox that strips `strip_env` from every child.
     pub fn host(strip_env: Vec<String>) -> Self {
-        Sandbox::Host(HostSandbox {
+        Sandbox::Host(Box::new(HostSandbox {
             env: ChildEnv::new(strip_env),
             #[cfg(feature = "test-support")]
             scripted: None,
-        })
+        }))
     }
 
     /// A host sandbox whose drains return `audit`'s scripted batches (024 R1). Test-only.
     #[cfg(feature = "test-support")]
     pub fn host_scripted(strip_env: Vec<String>, audit: std::sync::Arc<ScriptedAudit>) -> Self {
-        Sandbox::Host(HostSandbox {
+        Sandbox::Host(Box::new(HostSandbox {
             env: ChildEnv::new(strip_env),
             scripted: Some(audit),
-        })
+        }))
     }
 
     fn child_env(&self) -> &ChildEnv {
@@ -602,8 +521,6 @@ impl Sandbox {
             Sandbox::Host(h) => &h.env,
             #[cfg(feature = "enforce")]
             Sandbox::Enforced(e) => &e.env,
-            #[cfg(feature = "concurrent")]
-            Sandbox::Concurrent(c) => &c.env,
         }
     }
 
@@ -614,8 +531,6 @@ impl Sandbox {
             Sandbox::Host(h) => &mut h.env,
             #[cfg(feature = "enforce")]
             Sandbox::Enforced(e) => &mut e.env,
-            #[cfg(feature = "concurrent")]
-            Sandbox::Concurrent(c) => &mut c.env,
         }
     }
 
@@ -681,17 +596,17 @@ impl Sandbox {
             .ok_or("this session has no interception proxy")?;
         let (proxy_scope, scope) = hook.compile(policy)?;
         #[cfg(feature = "enforce")]
-        let previous = self.sidecar_plan().cloned();
+        let previous = self.sidecar_snapshot();
         #[cfg(feature = "enforce")]
         if previous.is_some() {
-            self.reload_sidecar(&proxy_scope)?;
+            self.reload_sidecar(&proxy_scope, &scope)?;
         }
         #[cfg(not(feature = "enforce"))]
         let _ = proxy_scope;
         let updated = hook.update(scope).await;
         #[cfg(feature = "enforce")]
         if let (Err(e), Some(p)) = (&updated, previous) {
-            if let Err(r) = self.reload_sidecar_plan(&p) {
+            if let Err(r) = self.restore_sidecar(&p) {
                 let detail = format!("{e}; and the proxy scope rollback also failed: {r}");
                 self.cleanup_failed(detail.clone());
                 return Err(detail);
@@ -720,47 +635,32 @@ impl Sandbox {
         self.child_env_mut().provider = Some(provider);
     }
 
-    /// A scope-confined sandbox. Takes ownership of the `engine` so the loaded eBPF programs stay
-    /// attached for the episode's lifetime (`--features enforce`).
+    /// A sandbox confined to `scope` (`--features enforce`). The scope's supervisor keeps the
+    /// engine attached for as long as any handle to it lives.
     #[cfg(feature = "enforce")]
-    pub fn enforced(
-        engine: bee_userspace::Engine,
-        scope: bee_userspace::Scope,
-        reader: bee_userspace::events::AuditReader,
-        strip_env: Vec<String>,
-    ) -> Self {
+    pub fn enforced(scope: crate::supervisor::ScopeHandle, strip_env: Vec<String>) -> Self {
         Sandbox::Enforced(Box::new(EnforcedSandbox {
-            engine,
             scope,
-            reader,
             env: ChildEnv::new(strip_env),
             sidecar: None,
-            sidecar_audit: Vec::new(),
-            tool_audit: Vec::new(),
             proxy_port: None,
             ca_bundle: None,
             poisoned: None,
         }))
     }
 
-    /// A scope-confined sandbox that receives audit events from a demux subscription (US4). The
-    /// engine is owned elsewhere (the concurrent runner), shared across all episodes.
-    #[cfg(feature = "concurrent")]
-    pub fn concurrent(
-        scope: bee_userspace::Scope,
-        subscription: bee_userspace::AuditSubscription,
-        strip_env: Vec<String>,
-    ) -> Self {
-        Sandbox::Concurrent(Box::new(ConcurrentSandbox {
-            scope,
-            subscription,
-            env: ChildEnv::new(strip_env),
-        }))
+    /// The supervisor that owns this sandbox's scope, when it has one — what a scope beside it
+    /// (a sidecar, a subagent) is created on.
+    #[cfg(feature = "enforce")]
+    pub fn supervisor(&self) -> Option<&crate::supervisor::Supervisor> {
+        match self {
+            Sandbox::Enforced(e) => Some(e.scope.supervisor()),
+            _ => None,
+        }
     }
 
     /// Whether this sandbox can host a sidecar scope (019 P4). Only an [`EnforcedSandbox`] can: a host
-    /// sandbox has no kernel scope to give it, and the concurrent runner's engine is shared and owned
-    /// elsewhere (018 generalises this).
+    /// sandbox has no kernel scope to give it, and a batch slot's policy belongs to its parent.
     pub fn sidecar_supported(&self) -> Result<(), SidecarUnsupported> {
         match self {
             #[cfg(feature = "enforce")]
@@ -772,10 +672,6 @@ impl Sandbox {
             }),
             #[cfg(feature = "enforce")]
             Sandbox::Enforced(_) => Ok(()),
-            #[cfg(feature = "concurrent")]
-            Sandbox::Concurrent(_) => Err(SidecarUnsupported {
-                reason: "concurrent runner; see specs/018",
-            }),
         }
     }
 
@@ -821,8 +717,14 @@ impl Sandbox {
     /// The sidecar's cgroup id, when one is attached.
     #[cfg(feature = "enforce")]
     pub fn sidecar_cgroup_id(&self) -> Option<u64> {
+        self.sidecar_scope().map(|s| s.handle().cgroup_id)
+    }
+
+    /// The proxy scope, when one is attached — what the worker's resolver admits into (026 R9).
+    #[cfg(feature = "enforce")]
+    pub fn sidecar_scope(&self) -> Option<&SidecarScope> {
         match self {
-            Sandbox::Enforced(e) => e.sidecar.as_ref().map(|s| s.scope.cgroup_id),
+            Sandbox::Enforced(e) => e.sidecar.as_ref(),
             _ => None,
         }
     }
@@ -833,46 +735,45 @@ impl Sandbox {
     pub fn sidecar_join_closure(
         &self,
     ) -> Result<impl Fn() -> io::Result<()> + Send + Sync + 'static, String> {
-        match self {
-            Sandbox::Enforced(e) => match &e.sidecar {
-                Some(s) => s.scope.join_closure().map_err(|err| err.to_string()),
-                None => Err("no sidecar scope".into()),
-            },
-            _ => Err("no sidecar scope".into()),
+        match self.sidecar_scope() {
+            Some(s) => s.handle().join_closure().map_err(|err| err.to_string()),
+            None => Err("no sidecar scope".into()),
         }
     }
 
-    /// Recompile `policy` into the **sidecar** scope's maps (019 US3). On error the prior maps stay
-    /// in place, exactly as [`Sandbox::reload`] does for the tool scope.
-    #[cfg_attr(not(feature = "enforce"), allow(unused_variables))]
-    pub fn reload_sidecar(&mut self, policy: &bee_core::CompiledPolicy) -> Result<(), String> {
-        match self {
-            #[cfg(feature = "enforce")]
-            Sandbox::Enforced(e) => e.reload_sidecar(policy),
-            _ => Err("no sidecar scope to reload".into()),
-        }
-    }
-
-    /// Restore the sidecar's previous plan — the rollback after a widening the worker could not
-    /// apply (019 US3). Reinstalls exactly what was there.
+    /// Recompile the **sidecar** scope for a widened `[policy.http]` (019 US3): `proxy` is the
+    /// compiled proxy scope, `http` the worker's. Addresses admitted for names still declared are
+    /// kept. On error the prior maps stay in place, exactly as [`Sandbox::reload`] does for the
+    /// tool scope.
     #[cfg(feature = "enforce")]
-    pub fn reload_sidecar_plan(
+    pub fn reload_sidecar(
         &mut self,
-        plan: &bee_userspace::EnforcementPlan,
+        proxy: &bee_core::CompiledPolicy,
+        http: &bee_core::compiler::HttpScope,
     ) -> Result<(), String> {
         match self {
-            Sandbox::Enforced(e) => e.install_sidecar_plan(plan.clone()),
+            Sandbox::Enforced(e) => e.sidecar()?.rescope(proxy, http),
             _ => Err("no sidecar scope to reload".into()),
         }
     }
 
-    /// The sidecar's currently installed plan, for a caller that wants to roll back to it.
+    /// Restore the sidecar as `snap` recorded it — the rollback after a widening the worker could
+    /// not apply (019 US3).
     #[cfg(feature = "enforce")]
-    pub fn sidecar_plan(&self) -> Option<&bee_userspace::EnforcementPlan> {
+    pub fn restore_sidecar(
+        &mut self,
+        snap: &crate::proxy_scope::ProxySnapshot,
+    ) -> Result<(), String> {
         match self {
-            Sandbox::Enforced(e) => e.sidecar.as_ref().map(|s| &s.plan),
-            _ => None,
+            Sandbox::Enforced(e) => e.sidecar()?.restore(snap),
+            _ => Err("no sidecar scope to reload".into()),
         }
+    }
+
+    /// The sidecar's current rules, for a caller that wants to roll back to them.
+    #[cfg(feature = "enforce")]
+    pub fn sidecar_snapshot(&self) -> Option<crate::proxy_scope::ProxySnapshot> {
+        self.sidecar_scope().map(|s| s.snapshot())
     }
 
     /// The sidecar scope's kernel events drained since the last call, each with `scope_id` set to
@@ -881,20 +782,17 @@ impl Sandbox {
     pub fn drain_sidecar_audit(&mut self) -> Vec<AuditEvent> {
         match self {
             #[cfg(feature = "enforce")]
-            Sandbox::Enforced(e) => {
-                let tool = e.drain_into_buffers();
-                e.tool_audit.extend(tool);
-                std::mem::take(&mut e.sidecar_audit)
-            }
-            #[cfg(feature = "test-support")]
-            Sandbox::Host(HostSandbox {
-                scripted: Some(s), ..
-            }) => {
-                let mut events = s.pop_proxy();
+            Sandbox::Enforced(e) => match &e.sidecar {
+                Some(side) => e.drain_handle(side.handle()),
+                None => Vec::new(),
+            },
+            Sandbox::Host(h) => {
+                let mut events = h.next_scripted(true);
                 self.retain_audit(&mut events);
                 events
             }
-            _ => Vec::new(),
+            #[cfg(feature = "enforce")]
+            Sandbox::Batch(_) => Vec::new(),
         }
     }
 
@@ -902,8 +800,6 @@ impl Sandbox {
     #[cfg(feature = "enforce")]
     pub fn cgroup_id(&self) -> Option<u64> {
         match self {
-            #[cfg(feature = "concurrent")]
-            Sandbox::Concurrent(c) => Some(c.scope.cgroup_id),
             Sandbox::Enforced(e) => Some(e.scope.cgroup_id),
             _ => None,
         }
@@ -935,6 +831,18 @@ impl Sandbox {
         }
     }
 
+    /// Run [`CallHooks::end`] for a side call and return the proxy events it produced — e.g.
+    /// revoke a harness's proxy credential once it has exited.
+    pub async fn end_side_call(&self, call: &CallContext) -> Vec<crate::proxy_event::ProxyEvent> {
+        match self.child_env().hooks.clone() {
+            Some(h) => {
+                h.end(call).await;
+                h.take_events(call)
+            }
+            None => Vec::new(),
+        }
+    }
+
     fn tool_command_for(
         &self,
         call: Option<&CallContext>,
@@ -960,7 +868,7 @@ impl Sandbox {
             }
             #[cfg(feature = "enforce")]
             Sandbox::Enforced(e) => {
-                if let Some(why) = &e.poisoned {
+                if let Some(why) = e.poisoned() {
                     return Err(SpawnError::Io(io::Error::other(format!(
                         "scope is in an unknown state after a failed reload; refusing to run: {why}"
                     ))));
@@ -973,16 +881,6 @@ impl Sandbox {
                 e.env.apply(&mut cmd, call)?;
                 Ok(cmd)
             }
-            #[cfg(feature = "concurrent")]
-            Sandbox::Concurrent(c) => {
-                let join = c
-                    .scope
-                    .join_closure()
-                    .map_err(|err| SpawnError::Io(io::Error::other(err.to_string())))?;
-                let mut cmd = hardened_command(program, args, Some(join))?;
-                c.env.apply(&mut cmd, call)?;
-                Ok(cmd)
-            }
         }
     }
 
@@ -991,20 +889,11 @@ impl Sandbox {
     }
 
     pub fn audit_health(&self) -> crate::transcript::AuditHealth {
-        #[allow(unused_mut)]
-        let mut health = self
-            .audit_state()
+        self.audit_state()
             .lock()
             .expect("audit state")
             .health
-            .clone();
-        #[cfg(feature = "concurrent")]
-        if let Self::Concurrent(c) = self {
-            use std::sync::atomic::Ordering;
-            health.queue_dropped = c.subscription.dropped.load(Ordering::Relaxed);
-            health.stream_failed = c.subscription.stream_failed.load(Ordering::Relaxed);
-        }
-        health
+            .clone()
     }
 
     pub(crate) fn audit_warning(&self) -> Option<String> {
@@ -1033,8 +922,8 @@ impl Sandbox {
     pub fn check_cleanup(&self) -> Result<(), String> {
         #[cfg(feature = "enforce")]
         if let Self::Enforced(e) = self {
-            if let Some(reason) = &e.poisoned {
-                return Err(reason.clone());
+            if let Some(reason) = e.poisoned() {
+                return Err(reason);
             }
         }
         match &*self.cleanup_error().lock().expect("cleanup state") {
@@ -1051,14 +940,39 @@ impl Sandbox {
         *self.cleanup_error().lock().expect("cleanup state") = Some(error);
     }
 
+    /// The kernel scope this sandbox's tool children join, when it has its own (018: a subagent's
+    /// scope is created beside it, on the same supervisor).
+    #[cfg(feature = "enforce")]
+    pub fn scope_handle(&self) -> Option<&crate::supervisor::ScopeHandle> {
+        match self {
+            Self::Enforced(e) => Some(&e.scope),
+            _ => None,
+        }
+    }
+
+    /// The environment variables no tool child of this sandbox inherits — what a subagent's sandbox
+    /// must strip too (018).
+    pub fn strip_env(&self) -> Vec<String> {
+        self.child_env().strip_env.to_vec()
+    }
+
+    /// The directory children start in, when one is set (026).
+    pub fn cwd(&self) -> Option<&std::path::Path> {
+        self.child_env().cwd.as_deref()
+    }
+
+    /// Start every child in `dir` (an ACP session's working directory). A tool that names its own
+    /// directory still overrides it.
+    pub fn set_cwd(&mut self, dir: Option<std::path::PathBuf>) {
+        self.child_env_mut().cwd = dir.map(Into::into);
+    }
+
     #[cfg(feature = "enforce")]
     pub(crate) fn scope_path(&self) -> Option<&std::path::Path> {
         match self {
             Self::Batch(b) => Some(&b.path),
             Self::Host(_) => None,
             Self::Enforced(e) => Some(&e.scope.path),
-            #[cfg(feature = "concurrent")]
-            Self::Concurrent(c) => Some(&c.scope.path),
         }
     }
 
@@ -1082,12 +996,14 @@ impl Sandbox {
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
             std::fs::create_dir(&path)?;
-            let mut env = ChildEnv::new(self.child_env().strip_env.clone());
+            let mut env = ChildEnv::new(self.child_env().strip_env.to_vec());
             env.cleanup_error = self.child_env().cleanup_error.clone();
+            env.cwd = self.child_env().cwd.clone();
             return Ok(Self::Batch(Box::new(BatchSandbox { path, env })));
         }
-        let mut slot = Self::host(self.child_env().strip_env.clone());
+        let mut slot = Self::host(self.child_env().strip_env.to_vec());
         slot.child_env_mut().cleanup_error = self.child_env().cleanup_error.clone();
+        slot.child_env_mut().cwd = self.child_env().cwd.clone();
         Ok(slot)
     }
 
@@ -1128,17 +1044,11 @@ impl Sandbox {
         self.tool_command(program, args).map(|cmd| (cmd, None))
     }
 
-    /// Give the async audit path a moment to deliver this call's events before a drain. No-op for
-    /// `Host`/`Enforced` (their drains read a source that is already up to date — the ring directly);
-    /// for `Concurrent` the events travel kernel→ring→demux task→channel, so we yield briefly so the
-    /// demux can dispatch before [`drain_audit`](Self::drain_audit) reads the channel (US4 AS-2 —
-    /// still well within the 100ms budget).
-    pub async fn settle(&mut self) {
-        #[cfg(feature = "concurrent")]
-        if let Sandbox::Concurrent(_) = self {
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-    }
+    /// A point at which every event the kernel wrote for this call is drainable. Every sandbox
+    /// already is: an enforced drain reads the ring itself, through its supervisor (018), so there
+    /// is nothing in flight to wait for. Kept as the loops' one place to wait should an audit source
+    /// ever be asynchronous again.
+    pub async fn settle(&mut self) {}
 
     /// Drain and return the audit events for this scope since the last drain (empty for `Host`).
     /// Non-blocking (research H5): the records are already buffered in the ring (sync) or channel
@@ -1195,40 +1105,13 @@ impl Sandbox {
 
     fn drain_scope_audit(&mut self) -> Vec<AuditEvent> {
         let mut out = match self {
-            #[cfg(feature = "test-support")]
-            Sandbox::Host(HostSandbox {
-                scripted: Some(s), ..
-            }) => s.pop_tool(),
             #[cfg(feature = "enforce")]
             Sandbox::Batch(_) => Vec::new(),
-            Sandbox::Host(_) => Vec::new(),
+            Sandbox::Host(h) => h.next_scripted(false),
             #[cfg(feature = "enforce")]
-            Sandbox::Enforced(e) => {
-                let mut out = std::mem::take(&mut e.tool_audit);
-                out.extend(e.drain_into_buffers());
-                out
-            }
-            #[cfg(feature = "concurrent")]
-            Sandbox::Concurrent(c) => {
-                // The demux already routes only this scope's events here; re-filter by cgroup_id
-                // anyway as a fail-safe against cross-contamination (SC-004).
-                let cg = c.scope.cgroup_id;
-                let mut out = Vec::new();
-                for _ in 0..1024 {
-                    let Ok(ev) = c.subscription.rx.try_recv() else {
-                        break;
-                    };
-                    if ev.cgroup_id == cg {
-                        out.push(ev);
-                    }
-                }
-                out
-            }
+            // Retained inside the drain, with the scope's own health counters.
+            Sandbox::Enforced(e) => return e.drain_handle(&e.scope),
         };
-        #[cfg(feature = "enforce")]
-        if matches!(self, Self::Enforced(_)) {
-            return out;
-        }
         self.retain_audit(&mut out);
         out
     }
@@ -1242,9 +1125,10 @@ impl Sandbox {
             // Sidecar scope first, then the tool scope (019 P4). The caller has already stopped the
             // sidecar's process; the kill here is the backstop for anything it left behind. A
             // sidecar failure is reported, but the tool scope is still torn down — leaving it up
-            // would compound one escape with a second.
+            // would compound one escape with a second. (The tool scope's teardown also covers its
+            // userspace children, the sidecar included; one already gone is not torn down twice.)
             let side = e.sidecar.as_ref().map(|s| {
-                s.scope
+                s.handle()
                     .teardown()
                     .map_err(|err| format!("sidecar scope teardown failed: {err}"))
             });
@@ -1257,13 +1141,6 @@ impl Sandbox {
                 (Some(Err(a)), Ok(())) => Err(a),
                 (_, r) => r,
             };
-        }
-        #[cfg(feature = "concurrent")]
-        if let Sandbox::Concurrent(c) = self {
-            return c
-                .scope
-                .teardown()
-                .map_err(|err| format!("scope teardown failed: {err}"));
         }
         Ok(())
     }
@@ -1302,59 +1179,37 @@ mod tests {
         assert!(second.tool_command("true", &[]).is_err());
     }
 
-    fn ev(cg: u64) -> AuditEvent {
-        AuditEvent {
-            ts: "1970-01-01T00:00:00Z".into(),
-            scope_id: Some("bee-session-1".into()),
-            cgroup_id: cg,
-            executor_cgroup_id: None,
-            pid: Some(1),
-            tgid: Some(1),
-            op: "connect".into(),
-            decision: "denied".into(),
-            errno: -1,
-            target: "10.0.0.5:443".into(),
-        }
+    // 026 T005: every child starts in the session's directory when one is set, else in bee's.
+    #[test]
+    fn children_start_in_the_sandbox_cwd_when_one_is_set() {
+        let mut sb = Sandbox::host(Vec::new());
+        assert_eq!(
+            sb.tool_command("true", &[]).unwrap().get_current_dir(),
+            None
+        );
+        let dir = std::env::temp_dir();
+        sb.set_cwd(Some(dir.clone()));
+        assert_eq!(sb.cwd(), Some(dir.as_path()));
+        let cmd = sb.tool_command("true", &[]).unwrap();
+        assert_eq!(cmd.get_current_dir(), Some(dir.as_path()));
+        let (cmd, _) = sb.invocation_command("true", &[]).unwrap();
+        assert_eq!(cmd.get_current_dir(), Some(dir.as_path()));
     }
 
-    // 019 P4 (T016): the drain keeps the tool scope's events untagged, tags the sidecar's with its
-    // label, and drops every other cgroup's — so a second scope can never contaminate the first's
-    // audit, and nothing from an unrelated scope leaks into either.
     #[test]
-    fn route_audit_separates_tool_and_sidecar_scopes() {
-        let side = Some((20u64, "proxy"));
-        let t = route_audit(&ev(10), 10, side).expect("tool event kept");
-        assert_eq!(t.scope_label, None);
-        assert_eq!(t.event.cgroup_id, 10);
-
-        let s = route_audit(&ev(20), 10, side).expect("sidecar event kept");
-        assert_eq!(s.scope_label.as_deref(), Some("proxy"));
-        assert_eq!(s.event.scope_id.as_deref(), Some("proxy"));
-
-        assert!(
-            route_audit(&ev(30), 10, side).is_none(),
-            "foreign cgroup dropped"
+    fn a_child_reports_the_sandbox_cwd_as_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut sb = Sandbox::host(Vec::new());
+        sb.set_cwd(Some(dir.path().to_path_buf()));
+        let out = sb.tool_command("pwd", &[]).unwrap().output().unwrap();
+        let got = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        assert_eq!(
+            std::fs::canonicalize(got).unwrap(),
+            std::fs::canonicalize(dir.path()).unwrap()
         );
     }
 
-    #[test]
-    fn route_audit_without_a_sidecar_is_the_single_scope_filter() {
-        assert!(route_audit(&ev(10), 10, None).is_some());
-        assert!(route_audit(&ev(20), 10, None).is_none());
-        assert_eq!(route_audit(&ev(10), 10, None).unwrap().event, ev(10));
-    }
-
-    #[test]
-    fn a_sidecar_reload_targets_the_sidecar_cgroup() {
-        assert_eq!(sidecar_reload_target(10, Some(20)), Ok(20));
-        assert_ne!(sidecar_reload_target(10, Some(20)), Ok(10));
-        assert!(
-            sidecar_reload_target(10, None).is_err(),
-            "no sidecar ⇒ refuse, never the tool scope"
-        );
-    }
-
-    // T018: the concurrent runner and the host sandbox refuse a sidecar — fail closed rather than run
+    // T018: the host sandbox refuses a sidecar — fail closed rather than run
     // a proxy that no kernel scope confines.
     #[test]
     fn a_host_sandbox_refuses_a_sidecar_scope() {

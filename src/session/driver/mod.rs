@@ -984,6 +984,7 @@ impl Driver {
                                 timed_out: false,
                                 not_run: false,
                                 refused_by_hook: None,
+                                child: None,
                                 call,
                                 result,
                                 audit,

@@ -17,24 +17,7 @@ use crate::sandbox::{CallContext, CallHooks, CallOrigin, EnvOverlay};
 use super::control::WireCtx;
 use super::sidecar::Interceptor;
 
-/// The variables a credentialed child receives.
-pub const PROXY_VARS: &[&str] = &[
-    "HTTP_PROXY",
-    "HTTPS_PROXY",
-    "http_proxy",
-    "https_proxy",
-    "ALL_PROXY",
-    "all_proxy",
-];
-
-/// TLS trust variables, set when the session decrypts anything (US4).
-pub const CA_VARS: &[&str] = &[
-    "SSL_CERT_FILE",
-    "CURL_CA_BUNDLE",
-    "REQUESTS_CA_BUNDLE",
-    "NODE_EXTRA_CA_CERTS",
-    "GIT_SSL_CAINFO",
-];
+pub use comb::client::{CA_VARS, PROXY_VARS};
 
 /// The [`CallHooks`] and environment provider for an interception session.
 pub struct ProxyCredentials {
@@ -55,24 +38,12 @@ impl ProxyCredentials {
     /// (the worker is down, or issuing failed) still gets the proxy URL, without userinfo — its
     /// traffic is then refused with a `407` naming the reason, rather than going anywhere else.
     pub fn overlay(&self, call: &CallContext) -> EnvOverlay {
-        let port = self.interceptor.port();
-        let url = match self.interceptor.token_for(&call.call_id) {
-            Some(token) => format!(
-                "http://{}:{token}@127.0.0.1:{port}",
-                userinfo_escape(&call.call_id)
-            ),
-            None => format!("http://127.0.0.1:{port}"),
-        };
-        let mut vars: Vec<(String, String)> = PROXY_VARS
-            .iter()
-            .map(|k| (k.to_string(), url.clone()))
-            .collect();
-        vars.push(("NO_PROXY".into(), String::new()));
-        vars.push(("no_proxy".into(), String::new()));
-        if let Some(b) = &self.ca_bundle {
-            let p = b.display().to_string();
-            vars.extend(CA_VARS.iter().map(|k| (k.to_string(), p.clone())));
-        }
+        let token = self.interceptor.token_for(&call.call_id);
+        let url = comb::client::proxy_url(
+            self.interceptor.port(),
+            token.as_deref().map(|t| (call.call_id.as_str(), t)),
+        );
+        let vars = comb::client::child_env(&url, self.ca_bundle.as_deref());
         EnvOverlay::new(vars).expect("proxy variables are never stripped names")
     }
 
@@ -143,31 +114,7 @@ pub fn wire_ctx(call: &CallContext) -> WireCtx {
         origin: match &call.origin {
             CallOrigin::Tool => "tool".into(),
             CallOrigin::Mcp(s) => format!("mcp:{s}"),
+            CallOrigin::Harness(s) => format!("harness:{s}"),
         },
-    }
-}
-
-/// Percent-escape what URL userinfo cannot carry raw. Provider call ids are `[A-Za-z0-9_-]`, but
-/// nothing guarantees it, and a `@` or `:` would split the URL in the wrong place.
-fn userinfo_escape(s: &str) -> String {
-    s.bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                (b as char).to_string()
-            }
-            _ => format!("%{b:02X}"),
-        })
-        .collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn userinfo_is_escaped() {
-        assert_eq!(userinfo_escape("toolu_01AbC-x"), "toolu_01AbC-x");
-        assert_eq!(userinfo_escape("a:b@c"), "a%3Ab%40c");
-        assert_eq!(userinfo_escape("mcp:fs"), "mcp%3Afs");
     }
 }

@@ -21,7 +21,9 @@ use bee_core::compiler::CompiledHttp;
 use bee_core::{Mode, Policy, Resolver};
 
 use super::creds::ProxyCredentials;
-use super::sidecar::{Enforcement, HarnessResolver, Interceptor, InterceptorConfig, SpawnFn};
+use super::sidecar::{
+    Attribution, Enforcement, HarnessResolver, Interceptor, InterceptorConfig, SpawnFn,
+};
 use crate::sandbox::Sandbox;
 
 /// The operator flag that accepts proxy-only enforcement. Not readable from any configuration file.
@@ -108,6 +110,11 @@ pub fn prepare_for(
     else {
         return Ok(None);
     };
+    bind(compiled, worker_exe).map(Some)
+}
+
+/// Bind the proxy listener for `compiled`.
+fn bind(compiled: CompiledHttp, worker_exe: PathBuf) -> Result<Prepared, String> {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
         .map_err(|e| format!("cannot bind the proxy listener: {e}"))?;
     let port = listener
@@ -119,13 +126,99 @@ pub fn prepare_for(
     } else {
         Some(ca_bundle_dir()?.join("ca-bundle.pem"))
     };
-    Ok(Some(Prepared {
+    Ok(Prepared {
         compiled,
         listener,
         port,
         worker_exe,
         ca_bundle,
-    }))
+    })
+}
+
+/// How a subagent of an intercepting session gets a proxy of its own (026 T058, 019 T092): the
+/// session's interception settings, reused for each child's derived `[policy.http]`.
+///
+/// Each child gets its own listener, its own proxy scope beside its tool scope, its own worker and
+/// so its own credential namespace — a sibling's credential names a call the other worker never
+/// issued, and the child's tool scope can reach only its own proxy's port anyway — and its own
+/// store session, attributed to its scope and delegation.
+#[derive(Clone)]
+pub struct ChildProxies {
+    pub worker_exe: PathBuf,
+    /// Names answered before the system resolver (tests only).
+    pub hosts: Vec<(String, std::net::IpAddr)>,
+    pub project_root: PathBuf,
+    /// The session's: a child is enforced exactly as its parent's proxy is, and an advisory parent
+    /// was accepted by the operator for the whole session.
+    pub enforcement: Enforcement,
+}
+
+impl ChildProxies {
+    /// Compile a child's `[policy.http]` and bind its listener. `Ok(None)` when it is inactive.
+    pub fn prepare(&self, policy: &Policy) -> Result<Option<Prepared>, String> {
+        let resolver = WithHosts {
+            system: bee_userspace::SystemResolver::current(),
+            hosts: &self.hosts,
+        };
+        prepare_for(policy, &resolver, self.worker_exe.clone())
+    }
+
+    /// The settings for a harness's proxy under a session that does not intercept (026 R8): this
+    /// bee as the worker, the system resolver, kernel enforcement — a harness only ever runs in a
+    /// kernel scope.
+    pub fn for_harness(project_root: PathBuf) -> Result<ChildProxies, String> {
+        let worker_exe = std::env::current_exe()
+            .and_then(|p| p.canonicalize())
+            .map_err(|e| format!("cannot resolve the bee binary for the proxy worker: {e}"))?;
+        Ok(ChildProxies {
+            worker_exe,
+            hosts: Vec::new(),
+            project_root,
+            enforcement: Enforcement::Kernel,
+        })
+    }
+
+    /// Compile a **harness's** `[policy.http]` — egress alone is enough (026 R8) — and bind its
+    /// listener. `Ok(None)` when it can reach nothing at all.
+    pub fn prepare_harness(&self, policy: &Policy) -> Result<Option<Prepared>, String> {
+        let resolver = WithHosts {
+            system: bee_userspace::SystemResolver::current(),
+            hosts: &self.hosts,
+        };
+        let Some(compiled) = policy
+            .compile_http_egress(&resolver, &self.worker_exe)
+            .map_err(|e| format!("[policy.http]: {e}"))?
+        else {
+            return Ok(None);
+        };
+        bind(compiled, self.worker_exe.clone()).map(Some)
+    }
+
+    /// Whether the child's proxy runs in a kernel scope of its own.
+    pub fn kernel(&self) -> bool {
+        self.enforcement == Enforcement::Kernel
+    }
+
+    /// Start the child's worker into `sandbox` (its proxy scope already attached under kernel
+    /// enforcement), recording for `attribution`.
+    pub async fn start(
+        &self,
+        prepared: Prepared,
+        sandbox: &mut Sandbox,
+        session_id: &str,
+        attribution: Attribution,
+    ) -> Result<HttpSession, String> {
+        start(
+            prepared,
+            sandbox,
+            session_id,
+            &self.project_root,
+            self.enforcement.clone(),
+            worker_resolver(self.hosts.clone()),
+            Some(attribution),
+        )
+        .await
+    }
 }
 
 /// A running interception session: the handle the HTTP tools use, and the credentials installed on
@@ -156,6 +249,19 @@ impl HttpSession {
     }
 }
 
+/// A session dropped without [`HttpSession::shutdown`] — a subagent whose delegation was cancelled
+/// mid-run — still stops its worker (when a runtime is there to do it) and deletes its CA bundle.
+/// After an explicit shutdown both are no-ops.
+impl Drop for HttpSession {
+    fn drop(&mut self) {
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            let icpt = self.interceptor.clone();
+            rt.spawn(async move { icpt.shutdown().await });
+        }
+        self.remove_ca_bundle();
+    }
+}
+
 /// A fresh private directory for this session's CA bundle: `$XDG_RUNTIME_DIR/bee/<id>/`, or under
 /// the temp directory when there is no runtime dir. Outside `.bee/` on purpose — the bundle must be
 /// readable by tool children, and `.bee/` is denied to them (research R7).
@@ -182,36 +288,7 @@ fn ca_bundle_dir() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-/// System roots plus the session CA. The roots matter: tunnelled hosts present their real
-/// certificates, and a bundle of the session CA alone would break every one of them (research R7).
-pub fn write_ca_bundle(path: &Path, ca_pem: &str) -> Result<(), String> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let system = [
-        "/etc/ssl/certs/ca-certificates.crt",
-        "/etc/pki/tls/certs/ca-bundle.crt",
-        "/etc/ssl/cert.pem",
-    ]
-    .iter()
-    .find_map(|p| std::fs::read_to_string(p).ok())
-    .unwrap_or_default();
-    let tmp = path.with_extension("pem.tmp");
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o644)
-        .open(&tmp)
-        .map_err(|e| format!("CA bundle {}: {e}", tmp.display()))?;
-    f.write_all(system.as_bytes())
-        .and_then(|_| {
-            if !system.is_empty() && !system.ends_with('\n') {
-                f.write_all(b"\n")?;
-            }
-            f.write_all(ca_pem.as_bytes())
-        })
-        .map_err(|e| format!("CA bundle: {e}"))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("CA bundle: {e}"))
-}
+pub use comb::client::write_ca_bundle;
 
 /// The system resolver, with `hosts` answered first. Only a test names hosts (024 T048).
 pub(crate) struct WithHosts<'a> {
@@ -266,8 +343,11 @@ fn named(hosts: &[(String, std::net::IpAddr)], host: &str) -> Option<Vec<std::ne
 }
 
 /// Spawn the worker and wire it into `sandbox`. Under enforcement the sandbox must already carry the
-/// sidecar scope; the worker joins it. In advisory mode the worker is a hardened child with no scope.
+/// sidecar scope; the worker joins it, and every name it resolves is admitted into that scope's
+/// kernel rules first (026 R9). In advisory mode the worker is a hardened child with no scope.
 /// `resolver` is how the worker resolves names ([`super::sidecar::system_resolver`] outside tests).
+/// `attribution` names the subagent this proxy records for; `None` for a session's own.
+#[allow(clippy::too_many_arguments)]
 pub async fn start(
     prepared: Prepared,
     sandbox: &mut Sandbox,
@@ -275,8 +355,10 @@ pub async fn start(
     project_root: &Path,
     enforcement: Enforcement,
     resolver: HarnessResolver,
+    attribution: Option<Attribution>,
 ) -> Result<HttpSession, String> {
     let spawn = spawn_fn(sandbox, &prepared.worker_exe, session_id, &enforcement)?;
+    let admit = admitter(sandbox, &enforcement)?;
     let prepared_exe = prepared.worker_exe.clone();
     let prepared_bundle = prepared.ca_bundle.clone();
     sandbox.set_proxy_loopback(prepared.port, prepared.ca_bundle.clone());
@@ -287,6 +369,8 @@ pub async fn start(
             http_scope: prepared.compiled.http_scope,
             enforcement,
             resolver,
+            admit,
+            attribution,
         },
         prepared.listener,
         spawn,
@@ -360,32 +444,62 @@ fn kernel_spawn_fn(_: &Sandbox, _: String, _: Vec<String>) -> Result<SpawnFn, St
     Err("kernel enforcement is not compiled into this bee".into())
 }
 
-/// Create the proxy scope on `engine` and attach it to `sandbox` (enforce builds).
+/// Create the proxy scope on the tool scope's supervisor, as its userspace child so it is torn down
+/// first (enforce builds).
 #[cfg(feature = "enforce")]
 pub fn attach_sidecar(
-    engine: &mut bee_userspace::Engine,
-    sandbox_scope_id: &str,
+    tool_scope: &crate::supervisor::ScopeHandle,
     compiled: &CompiledHttp,
 ) -> Result<crate::sandbox::SidecarScope, String> {
-    use bee_userspace::{EnforcementPlan, ScopeMode};
-    let mode = match compiled.proxy_scope.mode {
-        Mode::Enforce => ScopeMode::Enforce,
-        Mode::Observe => ScopeMode::Observe,
-    };
-    let plan = EnforcementPlan::prepare(&compiled.proxy_scope, mode)
-        .map_err(|e| format!("proxy scope plan: {e}"))?;
-    let scope = engine
-        .create_scope(
-            &format!("{sandbox_scope_id}-proxy"),
-            bee_userspace::cgroup::DEFAULT_PARENT,
-            &plan,
-        )
-        .map_err(|e| format!("create proxy scope: {e}"))?;
-    Ok(crate::sandbox::SidecarScope {
-        label: "proxy".into(),
-        scope,
-        plan,
-    })
+    crate::proxy_scope::ProxyScope::create(tool_scope, compiled).map(Arc::new)
+}
+
+/// The resolve-and-admit hook for a kernel-enforced worker: its sandbox's proxy scope (026 R9).
+/// Advisory has no kernel rules to admit into, so the compile-time addresses stay the only ones.
+#[cfg(feature = "enforce")]
+fn admitter(
+    sandbox: &Sandbox,
+    enforcement: &Enforcement,
+) -> Result<Option<Arc<dyn super::sidecar::Admit>>, String> {
+    match enforcement {
+        Enforcement::Advisory { .. } => Ok(None),
+        Enforcement::Kernel => {
+            let scope = sandbox
+                .sidecar_scope()
+                .ok_or("a kernel-enforced proxy needs its proxy scope attached first")?;
+            Ok(Some(Arc::new(ScopeAdmit(Arc::downgrade(scope)))))
+        }
+    }
+}
+
+#[cfg(not(feature = "enforce"))]
+fn admitter(
+    _: &Sandbox,
+    _: &Enforcement,
+) -> Result<Option<Arc<dyn super::sidecar::Admit>>, String> {
+    Ok(None)
+}
+
+/// Admits into a proxy scope the sandbox owns. Weak: a resolve racing the sandbox's teardown is
+/// refused, never a reason to keep the scope alive.
+#[cfg(feature = "enforce")]
+struct ScopeAdmit(std::sync::Weak<crate::proxy_scope::ProxyScope>);
+
+#[cfg(feature = "enforce")]
+impl super::sidecar::Admit for ScopeAdmit {
+    fn admit(
+        &self,
+        host: &str,
+        addrs: &[std::net::IpAddr],
+    ) -> Result<super::sidecar::AdmitOutcome, String> {
+        let scope = self.0.upgrade().ok_or("the proxy scope is gone")?;
+        let a = scope.admit(host, addrs)?;
+        Ok(super::sidecar::AdmitOutcome {
+            addrs: a.answer,
+            added: a.added,
+            evicted: a.evicted,
+        })
+    }
 }
 
 /// The [`crate::sandbox::HttpScopeHook`] for `interceptor`: how a consented target-scope widening

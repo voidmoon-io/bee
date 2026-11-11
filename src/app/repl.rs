@@ -355,6 +355,11 @@ async fn repl(args: ReplArgs) -> ExitCode {
         mcp_summary: built.mcp.as_ref().map(|b| b.summary()),
         tool_refresh: built.tool_refresh.clone(),
         skills: built.skills.clone(),
+        // The REPL shows a delegation's report, not the child's live progress (018).
+        delegation: built.delegation(None).map(|d| {
+            d.with_limits(cfg.delegation)
+                .with_harness_env(cfg.acp.harness_env_passthrough.clone().unwrap_or_default())
+        }),
         visual: cfg.visual,
         escalation: match built
             .escalation

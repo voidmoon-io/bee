@@ -65,6 +65,8 @@ pub enum CallOrigin {
     Tool,
     /// A long-lived MCP stdio server, named.
     Mcp(String),
+    /// An external harness subagent (026), named by its agent.
+    Harness(String),
 }
 
 /// Extra environment variables for one tool child, applied **after** [`restrict_env`] (research R6).
@@ -185,7 +187,11 @@ impl AuditState {
 struct ChildEnv {
     cleanup_error: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     audit_state: Box<std::sync::Mutex<AuditState>>,
-    strip_env: Vec<String>,
+    // Shared slices rather than owned buffers keep `ChildEnv` — carried unboxed by
+    // `Sandbox::Host` — as small as it was before `cwd` joined it.
+    strip_env: std::sync::Arc<[String]>,
+    /// The directory every child starts in (026: an ACP session's `cwd`). `None`: bee's own.
+    cwd: Option<std::sync::Arc<std::path::Path>>,
     call: Option<CallContext>,
     provider: Option<EnvProvider>,
     hooks: Option<std::sync::Arc<dyn CallHooks>>,
@@ -236,7 +242,7 @@ impl McpAttribution {
 impl ChildEnv {
     fn new(strip_env: Vec<String>) -> Self {
         ChildEnv {
-            strip_env,
+            strip_env: strip_env.into(),
             ..Default::default()
         }
     }
@@ -245,6 +251,9 @@ impl ChildEnv {
     /// current tool call unless one is named).
     fn apply(&self, cmd: &mut Command, call: Option<&CallContext>) -> Result<(), SpawnError> {
         restrict_env(cmd, &self.strip_env);
+        if let Some(dir) = &self.cwd {
+            cmd.current_dir(&**dir);
+        }
         if let (Some(provider), Some(call)) = (&self.provider, call.or(self.call.as_ref())) {
             for (k, v) in provider(call).vars() {
                 refused_overlay_key(k, &self.strip_env)
@@ -263,6 +272,18 @@ pub struct HostSandbox {
     /// denials that drive grants, so this never compiles into a shipping build.
     #[cfg(feature = "test-support")]
     scripted: Option<std::sync::Arc<ScriptedAudit>>,
+}
+
+impl HostSandbox {
+    /// The next scripted audit batch — the proxy's or the tool scope's. Empty outside tests.
+    fn next_scripted(&self, proxy: bool) -> Vec<AuditEvent> {
+        #[cfg(feature = "test-support")]
+        if let Some(s) = &self.scripted {
+            return if proxy { s.pop_proxy() } else { s.pop_tool() };
+        }
+        let _ = proxy;
+        Vec::new()
+    }
 }
 
 /// Audit batches a host test hands the sandbox in place of a kernel (024 R1, `test-support` only).
@@ -318,19 +339,11 @@ impl ScriptedAudit {
 }
 
 /// A second kernel scope beside the tool scope, holding one long-lived harness child (019 P4,
-/// research R2) — today the interception proxy worker, in its *proxy scope*.
-///
-/// The proxy scope is created on the session's [`Supervisor`](crate::supervisor::Supervisor) as a
-/// userspace child of the tool scope (018), so it is torn down before it. Exactly one sidecar is
-/// supported, on [`EnforcedSandbox`] only.
+/// research R2) — the interception proxy worker, in its *proxy scope*. One per sandbox that
+/// intercepts: a session's, and each intercepting subagent's (026, 019 T092). Shared with the
+/// worker's resolver, which admits addresses into it (026 R9).
 #[cfg(feature = "enforce")]
-pub struct SidecarScope {
-    /// Tags this scope's audit events (`"proxy"`); the supervisor stamps it as their `scope_id`.
-    pub label: String,
-    pub scope: crate::supervisor::ScopeHandle,
-    /// The plan currently installed, kept so a failed widening can be rolled back to it.
-    pub plan: bee_userspace::EnforcementPlan,
-}
+pub type SidecarScope = std::sync::Arc<crate::proxy_scope::ProxyScope>;
 
 /// Why a sandbox cannot host a sidecar scope. Refusing is the fail-closed answer: a proxy that no
 /// kernel scope confines is an unconfined deputy (Constitution III).
@@ -372,7 +385,7 @@ pub struct BatchSandbox {
 pub enum Sandbox {
     #[cfg(feature = "enforce")]
     Batch(Box<BatchSandbox>),
-    Host(HostSandbox),
+    Host(Box<HostSandbox>),
     #[cfg(feature = "enforce")]
     Enforced(Box<EnforcedSandbox>),
 }
@@ -415,34 +428,25 @@ impl EnforcedSandbox {
         drained.events
     }
 
-    fn reload_sidecar(&mut self, policy: &bee_core::CompiledPolicy) -> Result<(), String> {
-        use bee_userspace::{EnforcementPlan, ScopeMode};
-        let plan = EnforcementPlan::prepare(policy, ScopeMode::Enforce)
-            .map_err(|e| format!("sidecar reload plan: {e}"))?;
-        self.install_sidecar_plan(plan)
+    /// Why this sandbox's rules are unknown — its own scope's, or its proxy scope's — if a reload
+    /// left either so. Every further tool child is refused while this is `Some`.
+    fn poisoned(&self) -> Option<String> {
+        self.poisoned
+            .clone()
+            .or_else(|| self.sidecar.as_ref().and_then(|p| p.poisoned()))
     }
 
-    fn install_sidecar_plan(&mut self, plan: bee_userspace::EnforcementPlan) -> Result<(), String> {
-        // Never the tool scope: reloading it with the proxy scope's rules would hand tool children
-        // the targets directly.
-        let Some(sidecar) = &self.sidecar else {
-            return Err("no sidecar scope to reload".into());
-        };
-        if let Some(why) = &self.poisoned {
+    fn sidecar(&self) -> Result<&SidecarScope, String> {
+        if let Some(why) = self.poisoned() {
             return Err(format!(
-                "sidecar reload scope: already in an unknown state: {why}"
+                "proxy scope reload: already in an unknown state: {why}"
             ));
         }
-        if let Err(e) = sidecar.scope.reload(&plan) {
-            if let bee_userspace::ReloadError::Inconsistent(_) = e {
-                // The proxy scope is every tool child's egress path: unknown rules there are as
-                // unsafe as unknown rules on the tool scope itself.
-                self.poisoned = Some(format!("sidecar: {e}"));
-            }
-            return Err(format!("sidecar reload scope: {e}"));
-        }
-        self.sidecar.as_mut().expect("checked above").plan = plan;
-        Ok(())
+        // Never the tool scope: reloading it with the proxy scope's rules would hand tool
+        // children the targets directly.
+        self.sidecar
+            .as_ref()
+            .ok_or_else(|| "no proxy scope to reload".to_string())
     }
 
     /// Compile `policy` and hand the fresh plan to `Engine::reload_scope`. On a refused reload the
@@ -462,7 +466,7 @@ impl EnforcedSandbox {
         }
         let plan = EnforcementPlan::prepare(&compiled, ScopeMode::Enforce)
             .map_err(|e| format!("reload plan: {e}"))?;
-        if let Some(why) = &self.poisoned {
+        if let Some(why) = self.poisoned() {
             return Err(format!("reload scope: already in an unknown state: {why}"));
         }
         match self.scope.reload(&plan) {
@@ -491,20 +495,20 @@ pub fn key_vars(api_key_env: Option<&str>) -> Vec<String> {
 impl Sandbox {
     /// A no-scope sandbox that strips `strip_env` from every child.
     pub fn host(strip_env: Vec<String>) -> Self {
-        Sandbox::Host(HostSandbox {
+        Sandbox::Host(Box::new(HostSandbox {
             env: ChildEnv::new(strip_env),
             #[cfg(feature = "test-support")]
             scripted: None,
-        })
+        }))
     }
 
     /// A host sandbox whose drains return `audit`'s scripted batches (024 R1). Test-only.
     #[cfg(feature = "test-support")]
     pub fn host_scripted(strip_env: Vec<String>, audit: std::sync::Arc<ScriptedAudit>) -> Self {
-        Sandbox::Host(HostSandbox {
+        Sandbox::Host(Box::new(HostSandbox {
             env: ChildEnv::new(strip_env),
             scripted: Some(audit),
-        })
+        }))
     }
 
     fn child_env(&self) -> &ChildEnv {
@@ -589,17 +593,17 @@ impl Sandbox {
             .ok_or("this session has no interception proxy")?;
         let (proxy_scope, scope) = hook.compile(policy)?;
         #[cfg(feature = "enforce")]
-        let previous = self.sidecar_plan().cloned();
+        let previous = self.sidecar_snapshot();
         #[cfg(feature = "enforce")]
         if previous.is_some() {
-            self.reload_sidecar(&proxy_scope)?;
+            self.reload_sidecar(&proxy_scope, &scope)?;
         }
         #[cfg(not(feature = "enforce"))]
         let _ = proxy_scope;
         let updated = hook.update(scope).await;
         #[cfg(feature = "enforce")]
         if let (Err(e), Some(p)) = (&updated, previous) {
-            if let Err(r) = self.reload_sidecar_plan(&p) {
+            if let Err(r) = self.restore_sidecar(&p) {
                 let detail = format!("{e}; and the proxy scope rollback also failed: {r}");
                 self.cleanup_failed(detail.clone());
                 return Err(detail);
@@ -710,8 +714,14 @@ impl Sandbox {
     /// The sidecar's cgroup id, when one is attached.
     #[cfg(feature = "enforce")]
     pub fn sidecar_cgroup_id(&self) -> Option<u64> {
+        self.sidecar_scope().map(|s| s.handle().cgroup_id)
+    }
+
+    /// The proxy scope, when one is attached — what the worker's resolver admits into (026 R9).
+    #[cfg(feature = "enforce")]
+    pub fn sidecar_scope(&self) -> Option<&SidecarScope> {
         match self {
-            Sandbox::Enforced(e) => e.sidecar.as_ref().map(|s| s.scope.cgroup_id),
+            Sandbox::Enforced(e) => e.sidecar.as_ref(),
             _ => None,
         }
     }
@@ -722,46 +732,45 @@ impl Sandbox {
     pub fn sidecar_join_closure(
         &self,
     ) -> Result<impl Fn() -> io::Result<()> + Send + Sync + 'static, String> {
-        match self {
-            Sandbox::Enforced(e) => match &e.sidecar {
-                Some(s) => s.scope.join_closure().map_err(|err| err.to_string()),
-                None => Err("no sidecar scope".into()),
-            },
-            _ => Err("no sidecar scope".into()),
+        match self.sidecar_scope() {
+            Some(s) => s.handle().join_closure().map_err(|err| err.to_string()),
+            None => Err("no sidecar scope".into()),
         }
     }
 
-    /// Recompile `policy` into the **sidecar** scope's maps (019 US3). On error the prior maps stay
-    /// in place, exactly as [`Sandbox::reload`] does for the tool scope.
-    #[cfg_attr(not(feature = "enforce"), allow(unused_variables))]
-    pub fn reload_sidecar(&mut self, policy: &bee_core::CompiledPolicy) -> Result<(), String> {
-        match self {
-            #[cfg(feature = "enforce")]
-            Sandbox::Enforced(e) => e.reload_sidecar(policy),
-            _ => Err("no sidecar scope to reload".into()),
-        }
-    }
-
-    /// Restore the sidecar's previous plan — the rollback after a widening the worker could not
-    /// apply (019 US3). Reinstalls exactly what was there.
+    /// Recompile the **sidecar** scope for a widened `[policy.http]` (019 US3): `proxy` is the
+    /// compiled proxy scope, `http` the worker's. Addresses admitted for names still declared are
+    /// kept. On error the prior maps stay in place, exactly as [`Sandbox::reload`] does for the
+    /// tool scope.
     #[cfg(feature = "enforce")]
-    pub fn reload_sidecar_plan(
+    pub fn reload_sidecar(
         &mut self,
-        plan: &bee_userspace::EnforcementPlan,
+        proxy: &bee_core::CompiledPolicy,
+        http: &bee_core::compiler::HttpScope,
     ) -> Result<(), String> {
         match self {
-            Sandbox::Enforced(e) => e.install_sidecar_plan(plan.clone()),
+            Sandbox::Enforced(e) => e.sidecar()?.rescope(proxy, http),
             _ => Err("no sidecar scope to reload".into()),
         }
     }
 
-    /// The sidecar's currently installed plan, for a caller that wants to roll back to it.
+    /// Restore the sidecar as `snap` recorded it — the rollback after a widening the worker could
+    /// not apply (019 US3).
     #[cfg(feature = "enforce")]
-    pub fn sidecar_plan(&self) -> Option<&bee_userspace::EnforcementPlan> {
+    pub fn restore_sidecar(
+        &mut self,
+        snap: &crate::proxy_scope::ProxySnapshot,
+    ) -> Result<(), String> {
         match self {
-            Sandbox::Enforced(e) => e.sidecar.as_ref().map(|s| &s.plan),
-            _ => None,
+            Sandbox::Enforced(e) => e.sidecar()?.restore(snap),
+            _ => Err("no sidecar scope to reload".into()),
         }
+    }
+
+    /// The sidecar's current rules, for a caller that wants to roll back to them.
+    #[cfg(feature = "enforce")]
+    pub fn sidecar_snapshot(&self) -> Option<crate::proxy_scope::ProxySnapshot> {
+        self.sidecar_scope().map(|s| s.snapshot())
     }
 
     /// The sidecar scope's kernel events drained since the last call, each with `scope_id` set to
@@ -771,18 +780,16 @@ impl Sandbox {
         match self {
             #[cfg(feature = "enforce")]
             Sandbox::Enforced(e) => match &e.sidecar {
-                Some(side) => e.drain_handle(&side.scope),
+                Some(side) => e.drain_handle(side.handle()),
                 None => Vec::new(),
             },
-            #[cfg(feature = "test-support")]
-            Sandbox::Host(HostSandbox {
-                scripted: Some(s), ..
-            }) => {
-                let mut events = s.pop_proxy();
+            Sandbox::Host(h) => {
+                let mut events = h.next_scripted(true);
                 self.retain_audit(&mut events);
                 events
             }
-            _ => Vec::new(),
+            #[cfg(feature = "enforce")]
+            Sandbox::Batch(_) => Vec::new(),
         }
     }
 
@@ -821,6 +828,18 @@ impl Sandbox {
         }
     }
 
+    /// Run [`CallHooks::end`] for a side call and return the proxy events it produced — e.g.
+    /// revoke a harness's proxy credential once it has exited.
+    pub async fn end_side_call(&self, call: &CallContext) -> Vec<crate::proxy_event::ProxyEvent> {
+        match self.child_env().hooks.clone() {
+            Some(h) => {
+                h.end(call).await;
+                h.take_events(call)
+            }
+            None => Vec::new(),
+        }
+    }
+
     fn tool_command_for(
         &self,
         call: Option<&CallContext>,
@@ -846,7 +865,7 @@ impl Sandbox {
             }
             #[cfg(feature = "enforce")]
             Sandbox::Enforced(e) => {
-                if let Some(why) = &e.poisoned {
+                if let Some(why) = e.poisoned() {
                     return Err(SpawnError::Io(io::Error::other(format!(
                         "scope is in an unknown state after a failed reload; refusing to run: {why}"
                     ))));
@@ -900,8 +919,8 @@ impl Sandbox {
     pub fn check_cleanup(&self) -> Result<(), String> {
         #[cfg(feature = "enforce")]
         if let Self::Enforced(e) = self {
-            if let Some(reason) = &e.poisoned {
-                return Err(reason.clone());
+            if let Some(reason) = e.poisoned() {
+                return Err(reason);
             }
         }
         match &*self.cleanup_error().lock().expect("cleanup state") {
@@ -931,7 +950,18 @@ impl Sandbox {
     /// The environment variables no tool child of this sandbox inherits — what a subagent's sandbox
     /// must strip too (018).
     pub fn strip_env(&self) -> Vec<String> {
-        self.child_env().strip_env.clone()
+        self.child_env().strip_env.to_vec()
+    }
+
+    /// The directory children start in, when one is set (026).
+    pub fn cwd(&self) -> Option<&std::path::Path> {
+        self.child_env().cwd.as_deref()
+    }
+
+    /// Start every child in `dir` (an ACP session's working directory). A tool that names its own
+    /// directory still overrides it.
+    pub fn set_cwd(&mut self, dir: Option<std::path::PathBuf>) {
+        self.child_env_mut().cwd = dir.map(Into::into);
     }
 
     #[cfg(feature = "enforce")]
@@ -963,12 +993,14 @@ impl Sandbox {
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
             std::fs::create_dir(&path)?;
-            let mut env = ChildEnv::new(self.child_env().strip_env.clone());
+            let mut env = ChildEnv::new(self.child_env().strip_env.to_vec());
             env.cleanup_error = self.child_env().cleanup_error.clone();
+            env.cwd = self.child_env().cwd.clone();
             return Ok(Self::Batch(Box::new(BatchSandbox { path, env })));
         }
-        let mut slot = Self::host(self.child_env().strip_env.clone());
+        let mut slot = Self::host(self.child_env().strip_env.to_vec());
         slot.child_env_mut().cleanup_error = self.child_env().cleanup_error.clone();
+        slot.child_env_mut().cwd = self.child_env().cwd.clone();
         Ok(slot)
     }
 
@@ -1070,13 +1102,9 @@ impl Sandbox {
 
     fn drain_scope_audit(&mut self) -> Vec<AuditEvent> {
         let mut out = match self {
-            #[cfg(feature = "test-support")]
-            Sandbox::Host(HostSandbox {
-                scripted: Some(s), ..
-            }) => s.pop_tool(),
             #[cfg(feature = "enforce")]
             Sandbox::Batch(_) => Vec::new(),
-            Sandbox::Host(_) => Vec::new(),
+            Sandbox::Host(h) => h.next_scripted(false),
             #[cfg(feature = "enforce")]
             // Retained inside the drain, with the scope's own health counters.
             Sandbox::Enforced(e) => return e.drain_handle(&e.scope),
@@ -1097,7 +1125,7 @@ impl Sandbox {
             // would compound one escape with a second. (The tool scope's teardown also covers its
             // userspace children, the sidecar included; one already gone is not torn down twice.)
             let side = e.sidecar.as_ref().map(|s| {
-                s.scope
+                s.handle()
                     .teardown()
                     .map_err(|err| format!("sidecar scope teardown failed: {err}"))
             });
@@ -1146,6 +1174,36 @@ mod tests {
         first.cleanup_failed("descendant remains".into());
         assert!(sandbox.tool_command("true", &[]).is_err());
         assert!(second.tool_command("true", &[]).is_err());
+    }
+
+    // 026 T005: every child starts in the session's directory when one is set, else in bee's.
+    #[test]
+    fn children_start_in_the_sandbox_cwd_when_one_is_set() {
+        let mut sb = Sandbox::host(Vec::new());
+        assert_eq!(
+            sb.tool_command("true", &[]).unwrap().get_current_dir(),
+            None
+        );
+        let dir = std::env::temp_dir();
+        sb.set_cwd(Some(dir.clone()));
+        assert_eq!(sb.cwd(), Some(dir.as_path()));
+        let cmd = sb.tool_command("true", &[]).unwrap();
+        assert_eq!(cmd.get_current_dir(), Some(dir.as_path()));
+        let (cmd, _) = sb.invocation_command("true", &[]).unwrap();
+        assert_eq!(cmd.get_current_dir(), Some(dir.as_path()));
+    }
+
+    #[test]
+    fn a_child_reports_the_sandbox_cwd_as_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut sb = Sandbox::host(Vec::new());
+        sb.set_cwd(Some(dir.path().to_path_buf()));
+        let out = sb.tool_command("pwd", &[]).unwrap().output().unwrap();
+        let got = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        assert_eq!(
+            std::fs::canonicalize(got).unwrap(),
+            std::fs::canonicalize(dir.path()).unwrap()
+        );
     }
 
     // T018: the host sandbox refuses a sidecar — fail closed rather than run

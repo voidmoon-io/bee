@@ -152,10 +152,20 @@ pub(super) fn build_sandbox(
     spec: &SessionSpec,
     policy: &Policy,
     scope_id: &str,
-    #[cfg_attr(not(feature = "intercept"), allow(unused_variables))] system: &SystemParts,
+    #[cfg_attr(
+        not(any(feature = "intercept", feature = "enforce")),
+        allow(unused_variables)
+    )]
+    system: &SystemParts,
 ) -> Result<(Sandbox, HttpPrepared), String> {
     match spec.enforcement {
-        Enforcement::Kernel => kernel_sandbox(policy, scope_id, spec.strip_env.clone()),
+        Enforcement::Kernel => {
+            #[cfg(feature = "enforce")]
+            let supervisor = system.supervisor.clone();
+            #[cfg(not(feature = "enforce"))]
+            let supervisor = None;
+            kernel_sandbox(policy, scope_id, spec.strip_env.clone(), supervisor)
+        }
         Enforcement::Host => {
             #[cfg(feature = "intercept")]
             let prepared = if policy.http.as_ref().is_some_and(|h| h.is_active()) {
@@ -184,6 +194,7 @@ pub(crate) fn kernel_sandbox(
     policy: &Policy,
     scope_id: &str,
     strip_env: Vec<String>,
+    supervisor: Option<crate::supervisor::Supervisor>,
 ) -> Result<(Sandbox, HttpPrepared), String> {
     use bee_userspace::{EnforcementPlan, ScopeMode, SystemResolver};
 
@@ -204,9 +215,13 @@ pub(crate) fn kernel_sandbox(
     }
     let plan = EnforcementPlan::prepare(&compiled, ScopeMode::Enforce)
         .map_err(|e| format!("enforcement plan: {e}"))?;
-    // The session's one enforcement owner (018). The sandbox's scope handle keeps it, and so the
-    // engine's programs, alive for the whole session.
-    let supervisor = crate::supervisor::Supervisor::start()?;
+    // The session's enforcement owner (018) — its own, or the process's when several sessions share
+    // one engine (026). The sandbox's scope handle keeps it, and so the engine's programs, alive for
+    // the whole session.
+    let supervisor = match supervisor {
+        Some(s) => s,
+        None => crate::supervisor::Supervisor::start()?,
+    };
     let scope = supervisor.create_scope(scope_id, scope_id, None, &plan)?;
     // The proxy scope is created on the same supervisor, as the tool scope's child (019 P4).
     #[cfg(feature = "intercept")]
@@ -223,7 +238,7 @@ pub(crate) fn kernel_sandbox(
     #[cfg(feature = "intercept")]
     if let Some(sc) = sidecar {
         sandbox = sandbox.with_sidecar(sc).map_err(|(sb, sc, e)| {
-            let _ = sc.scope.teardown();
+            let _ = sc.handle().teardown();
             let _ = sb.teardown();
             e.to_string()
         })?;
@@ -238,6 +253,7 @@ fn kernel_sandbox(
     _policy: &Policy,
     _scope_id: &str,
     _strip_env: Vec<String>,
+    _supervisor: Option<std::convert::Infallible>,
 ) -> Result<(Sandbox, HttpPrepared), String> {
     Err("kernel enforcement is not compiled into this bee".into())
 }

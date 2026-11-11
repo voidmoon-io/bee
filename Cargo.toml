@@ -114,6 +114,9 @@ concurrent = ["enforce"]
 # the optional `rmcp` dep below. Stdio (`transport-child-process`) ships first; the remote
 # Streamable-HTTP transport feature is added with the domain-gating slice (US9, task T024).
 mcp = ["dep:rmcp"]
+# ACP (026): `bee acp`, bee as an Agent Client Protocol agent for clients such as t3code. The library
+# is runtime-neutral; tokio-util adapts tokio's stdio to its `futures` I/O.
+acp = ["dep:agent-client-protocol", "dep:tokio-util", "tokio/io-std", "tokio/io-util"]
 # Full-screen TUI front-end (008-grid-tui, M3–M4), and `bee repl`'s default. On by default; build with
 # `--no-default-features` for a headless binary free of a terminal backend (Constitution V / SC-005).
 # It turns on ratatui's crossterm backend and pulls the optional terminal deps below. Without it,
@@ -270,6 +273,8 @@ tachyonfx = { version = "0.25", default-features = false, features = [
 # sandboxed stdio transport (research R3); `transport-streamable-http-client-reqwest` is the
 # domain-gated remote transport (US9 — rmcp 2.x removed the SSE client, so `transport = "sse"` is a
 # deprecated alias routed here, research R2).
+agent-client-protocol = { version = "5.1", default-features = false, optional = true }
+tokio-util = { version = "0.7", features = ["compat"], optional = true }
 rmcp = { version = "2.2", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"], optional = true }
 
 # Markdown → ratatui `Text` (010, application package only — MUST NOT propagate to bee-core/bee-common).
@@ -437,6 +442,11 @@ required-features = ["test-support"]
 [[test]]
 name = "intercept_tools"
 path = "tests/intercept_tools.rs"
+required-features = ["intercept", "test-support"]
+
+[[test]]
+name = "intercept_delegation"
+path = "tests/intercept_delegation.rs"
 required-features = ["intercept", "test-support"]
 
 [[test]]

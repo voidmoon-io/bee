@@ -6,6 +6,9 @@
 //! consumer (ADR-0002); keeping them in separate module trees keeps the direction of that
 //! dependency visible.
 
+// `bee acp` — bee as an Agent Client Protocol agent (026-acp).
+#[cfg(feature = "acp")]
+pub mod acp;
 pub mod config;
 pub mod durable;
 // `bee findings` — the operator's half of the finding ledger (016-native-tools US2). Gated with the

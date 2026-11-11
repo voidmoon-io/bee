@@ -1433,6 +1433,210 @@ else
   echo "RESULT|subagent-escalate-beyond|SKIP|no bee at $BEE"
 fi
 
+# ------------------------------------------------- 026: bee as an ACP agent (US1, US2)
+# A minimal ACP client (newline-delimited JSON-RPC over `bee acp`'s stdio) runs a plan of steps and
+# prints what it saw as JSON. Each session builds its own model from the provider file, so every
+# session replays the same script; what differs between sessions is only their cwd and policy.
+if [ -x "$BEE" ] && "$BEE" acp --help >/dev/null 2>&1; then
+  AC=/home/ubuntu/acp
+  sudo rm -rf "$AC"; mkdir -p "$AC/pa/.bee" "$AC/pb/.bee" "$AC/work" "$AC/grant"
+  cat >"$WORK/acpc.py" <<'PY'
+import json, os, subprocess, sys, threading, time
+bee, plan = sys.argv[1], json.load(open(sys.argv[2]))
+p = subprocess.Popen([bee, "acp", *plan.get("args", [])], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                     stderr=open(plan["log"], "w"), text=True, bufsize=1)
+lock, results, updates, perms = threading.Lock(), {}, [], []
+answers = list(plan.get("answers", []))
+events = {}
+def reader():
+    for line in p.stdout:
+        m = json.loads(line)
+        if "method" in m and "id" in m:  # a request from bee: only permission requests are expected
+            if m["method"] == "session/request_permission":
+                with lock:
+                    perms.append(m["params"])
+                    a = answers.pop(0) if answers else None
+                out = {"outcome": {"outcome": "selected", "optionId": a}} if a else {"outcome": {"outcome": "cancelled"}}
+                send({"jsonrpc": "2.0", "id": m["id"], "result": out})
+            else:
+                with lock: perms.append({"unexpected": m["method"]})
+                send({"jsonrpc": "2.0", "id": m["id"], "error": {"code": -32601, "message": "no"}})
+        elif "method" in m:
+            with lock: updates.append(m["params"])
+        else:
+            with lock: results[m["id"]] = m
+            events.setdefault(m["id"], threading.Event()).set()
+def send(m):
+    p.stdin.write(json.dumps(m) + "\n"); p.stdin.flush()
+nid = [0]
+def call(method, params, timeout=120):
+    nid[0] += 1; i = nid[0]; ev = events.setdefault(i, threading.Event())
+    send({"jsonrpc": "2.0", "id": i, "method": method, "params": params})
+    if not ev.wait(timeout): return {"error": "timeout"}
+    return results[i]
+threading.Thread(target=reader, daemon=True).start()
+call("initialize", {"protocolVersion": 1, "clientCapabilities": {"fs": {"readTextFile": True, "writeTextFile": True}, "terminal": True}})
+out = {"sessions": {}, "prompts": []}
+for step in plan["steps"]:
+    if "new" in step:
+        r = call("session/new", {"cwd": step["cwd"], "mcpServers": []})
+        out["sessions"][step["new"]] = r.get("result", {}).get("sessionId") or r
+    else:
+        sid = out["sessions"][step["prompt"]]
+        if "cancel_after" in step:
+            def later(sid=sid, t=step["cancel_after"]):
+                time.sleep(t); send({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": sid}})
+            threading.Thread(target=later, daemon=True).start()
+        t0 = time.time()
+        r = call("session/prompt", {"sessionId": sid, "prompt": [{"type": "text", "text": step["text"]}]})
+        out["prompts"].append({"session": step["prompt"], "stop": r.get("result", {}).get("stopReason"),
+                               "error": r.get("error"), "secs": round(time.time() - t0, 2)})
+p.stdin.close()
+try: rc = p.wait(30)
+except Exception: p.kill(); rc = "killed"
+with lock:
+    out["updates"], out["permissions"], out["rc"] = updates, perms, rc
+print(json.dumps(out))
+PY
+  cat >"$WORK/acp-a.policy.toml" <<EOF
+[policy]
+name = "acp-a"
+mode = "enforce"
+[policy.filesystem]
+"$AC/pa" = "write"
+EOF
+  cat >"$WORK/acp-b.policy.toml" <<EOF
+[policy]
+name = "acp-b"
+mode = "enforce"
+[policy.filesystem]
+"$AC/pb" = "write"
+EOF
+  printf '[policy]\npath = "%s"\n' "$WORK/acp-a.policy.toml" >"$AC/pa/.bee/config.toml"
+  printf '[policy]\npath = "%s"\n' "$WORK/acp-b.policy.toml" >"$AC/pb/.bee/config.toml"
+  cat >"$WORK/acp-two.prov.toml" <<EOF
+[provider]
+provider = "mock"
+[[provider.script]]
+tool = "bash"
+args = { command = "pwd; echo hi > $AC/pb/from-\$(basename \$(pwd)); echo rc=\$?" }
+[[provider.script]]
+text = "Done."
+EOF
+  cat >"$WORK/acp-two.plan.json" <<EOF
+{"log": "$WORK/acp-two.log", "args": ["--provider", "$WORK/acp-two.prov.toml", "--tools", "bash"],
+ "steps": [{"new": "A", "cwd": "$AC/pa"}, {"new": "B", "cwd": "$AC/pb"},
+           {"prompt": "A", "text": "go"}, {"prompt": "B", "text": "go"}]}
+EOF
+  sudo python3 "$WORK/acpc.py" "$BEE" "$WORK/acp-two.plan.json" >"$WORK/acp-two.json" 2>>"$WORK/acp-two.log"
+  verdict=$(python3 - "$WORK/acp-two.json" "$AC" <<'PY' 2>&1
+import json, os, sys
+o, ac = json.load(open(sys.argv[1])), sys.argv[2]
+sid = o["sessions"]
+def calls(s):
+    ups = [u["update"] for u in o["updates"] if u["sessionId"] == sid[s]]
+    return [u for u in ups if u.get("sessionUpdate") == "tool_call_update"]
+def text(us): return json.dumps([u.get("content") for u in us])
+a, b = calls("A"), calls("B")
+checks = {
+  "both prompts ended end_turn": [p["stop"] for p in o["prompts"]] == ["end_turn", "end_turn"],
+  "A's denial shown on its call": "kernel denied" in text(a) and "from-pa" in text(a),
+  "A ran in its cwd": ac + "/pa" in text(a),
+  # The LSM's file_open hook runs after O_CREAT has made the inode, so a denied redirect leaves an
+  # empty file: what must not land is the content (as skill-grant-deny checks).
+  "A's write did not land": not os.path.exists(ac + "/pb/from-pa") or os.path.getsize(ac + "/pb/from-pa") == 0,
+  "B ran in its cwd and wrote": ac + "/pb" in text(b) and os.path.exists(ac + "/pb/from-pb"),
+  "no denial in B": "kernel denied" not in text(b),
+  "no client method used": not [p for p in o["permissions"] if "unexpected" in p],
+  "clean exit": o["rc"] == 0,
+}
+bad = [k for k, v in checks.items() if not v]
+print("OK" if not bad else "failed: " + ", ".join(bad))
+PY
+)
+  case "$verdict" in
+    OK) emit acp-denial-reported PASS "denied write shown on its tool call (kernel denied …)"
+        emit acp-two-sessions-isolated PASS "one process, two scopes: same command denied in A, allowed in B, each in its own cwd" ;;
+    *)  emit acp-denial-reported FAIL "$verdict"
+        emit acp-two-sessions-isolated FAIL "$verdict ($(tail -1 "$WORK/acp-two.log" 2>/dev/null))" ;;
+  esac
+
+  # acp-cancel — a cancelled prompt ends `cancelled` promptly and leaves no process behind.
+  cat >"$WORK/acp-cancel.prov.toml" <<'EOF'
+[provider]
+provider = "mock"
+[[provider.script]]
+tool = "bash"
+args = { command = "sleep 313 & sleep 313; echo never" }
+[[provider.script]]
+text = "never"
+EOF
+  cat >"$WORK/acp-cancel.plan.json" <<EOF
+{"log": "$WORK/acp-cancel.log", "args": ["--provider", "$WORK/acp-cancel.prov.toml", "--tools", "bash", "--policy", "$WORK/acp-a.policy.toml"],
+ "steps": [{"new": "A", "cwd": "$AC/pa"}, {"prompt": "A", "text": "go", "cancel_after": 2}]}
+EOF
+  sudo python3 "$WORK/acpc.py" "$BEE" "$WORK/acp-cancel.plan.json" >"$WORK/acp-cancel.json" 2>>"$WORK/acp-cancel.log"
+  sleep 1
+  left=$(pgrep -fc "sleep 313" || true)
+  stop=$(python3 -c 'import json,sys; o=json.load(open(sys.argv[1])); p=o["prompts"][0]; print(p["stop"], p["secs"] < 7)' "$WORK/acp-cancel.json" 2>&1)
+  if [ "$stop" = "cancelled True" ] && [ "${left:-0}" = 0 ]; then
+    emit acp-cancel PASS "prompt cancelled within 5 s of the request; no process from the turn survives"
+  else
+    emit acp-cancel FAIL "stop/fast=$stop survivors=$left ($(tail -1 "$WORK/acp-cancel.log" 2>/dev/null))"
+    sudo pkill -f "sleep 313" 2>/dev/null
+  fi
+
+  # acp-consent — a denied write within the ceiling becomes a permission request. Session 1's client
+  # allows it (the retried write lands); session 2's rejects it (the write stays kernel-denied).
+  cat >"$WORK/acp-ceil.policy.toml" <<EOF
+[policy]
+name = "acp-ceil"
+mode = "enforce"
+[policy.filesystem]
+"$AC/work" = "write"
+"$AC/grant" = "write"
+EOF
+  cat >"$WORK/acp-work.policy.toml" <<EOF
+[policy]
+name = "acp-work"
+mode = "enforce"
+[policy.filesystem]
+"$AC/work" = "write"
+EOF
+  cat >"$WORK/acp-consent.prov.toml" <<EOF
+[provider]
+provider = "mock"
+[[provider.script]]
+tool = "write_file"
+args = { path = "$AC/grant/x", content = "granted" }
+[[provider.script]]
+text = "Done."
+EOF
+  cat >"$WORK/acp-consent.plan.json" <<EOF
+{"log": "$WORK/acp-consent.log", "answers": ["allow", "reject"],
+ "args": ["--provider", "$WORK/acp-consent.prov.toml", "--tools", "write_file", "--policy", "$WORK/acp-work.policy.toml", "--ceiling-policy", "$WORK/acp-ceil.policy.toml"],
+ "steps": [{"new": "A", "cwd": "$AC/work"}, {"prompt": "A", "text": "go"}]}
+EOF
+  sudo python3 "$WORK/acpc.py" "$BEE" "$WORK/acp-consent.plan.json" >"$WORK/acp-consent-1.json" 2>>"$WORK/acp-consent.log"
+  allowed=$(cat "$AC/grant/x" 2>/dev/null)
+  rm -f "$AC/grant/x"
+  sed -i 's/"answers": \["allow", "reject"\]/"answers": ["reject"]/' "$WORK/acp-consent.plan.json"
+  sudo python3 "$WORK/acpc.py" "$BEE" "$WORK/acp-consent.plan.json" >"$WORK/acp-consent-2.json" 2>>"$WORK/acp-consent.log"
+  rejected=$(cat "$AC/grant/x" 2>/dev/null)
+  asked=$(python3 -c 'import json,sys; print(sum(len(json.load(open(f))["permissions"]) for f in sys.argv[1:]))' "$WORK/acp-consent-1.json" "$WORK/acp-consent-2.json" 2>&1)
+  shows=$(grep -c "filesystem: $AC/grant/x = write" "$WORK/acp-consent-1.json" 2>/dev/null)
+  if [ "$allowed" = granted ] && [ -z "$rejected" ] && [ "$asked" = 2 ] && [ "${shows:-0}" -ge 1 ]; then
+    emit acp-consent PASS "client allow → scope widened, write landed; client reject → write kernel-denied"
+  else
+    emit acp-consent FAIL "allowed='$allowed' rejected='$rejected' asked=$asked shows=$shows ($(tail -1 "$WORK/acp-consent.log" 2>/dev/null))"
+  fi
+  sudo rm -rf "$AC"
+else
+  for c in acp-denial-reported acp-two-sessions-isolated acp-cancel acp-consent; do
+    echo "RESULT|$c|SKIP|bee built without --features acp"
+  done
+fi
+
 # ---------------------------------------------------------------- 019: HTTP interception (US1)
 # One scripted episode under `[policy.http]`, one tool call per probe. Each call is its own credential
 # (its own call id), so every probe is attributed separately in the transcript. The in-VM targets are
@@ -1593,6 +1797,325 @@ PYCHECK
 else
   for c in $HTTP_CASES; do
     emit "$c" FAIL "bee was not built with --features vm-test (see test/vm/README.md)"
+  done
+fi
+
+# ------------------------------------- 026 PR2: per-subagent proxy scopes and resolve-and-admit
+# proxy-admit-on-resolve (T047, research R9): an egress host whose address changes mid-session is
+# still reached. `prov.test` starts at 127.0.0.2 in /etc/hosts; after the first fetch the matrix moves
+# it to 127.0.0.3 and kills the .2 server, so the second fetch succeeds only through the new address —
+# which the proxy scope's kernel rules held only after bee admitted it (a recorded reload).
+# subagent-intercept-attributed (T056, S9b): an intercepting session delegates; each child records
+# through a proxy of its own, attributed to its scope and delegation, none to the parent. Child B
+# offers child A's credential to its own proxy (refused: not its namespace) and tries the parent's
+# proxy port directly (kernel-denied: its tool scope reaches only its own proxy).
+PS_CASES="proxy-admit-on-resolve subagent-intercept-attributed"
+if [ -x "$BEE" ] && "$BEE" proxy-worker --help >/dev/null 2>&1; then
+  PW=/home/ubuntu/pscope
+  rm -rf "$PW"; mkdir -p "$PW/www" "$PW/skills/web"
+  echo "app-ok" >"$PW/www/index.html"
+  cp /etc/hosts "$PW/hosts.bak"
+  printf '127.0.0.2 prov.test\n' >>/etc/hosts
+  ( cd "$PW/www" && exec python3 -m http.server 18090 --bind 127.0.0.1 ) >/dev/null 2>&1 &
+  PA=$!
+  openssl req -x509 -newkey rsa:2048 -nodes -subj "/CN=prov.test" -days 1 \
+    -keyout "$PW/key.pem" -out "$PW/cert.pem" >/dev/null 2>&1
+  openssl s_server -accept 127.0.0.2:18443 -cert "$PW/cert.pem" -key "$PW/key.pem" -www -quiet \
+    >/dev/null 2>&1 &
+  P2=$!
+  openssl s_server -accept 127.0.0.3:18443 -cert "$PW/cert.pem" -key "$PW/key.pem" -www -quiet \
+    >/dev/null 2>&1 &
+  P3=$!
+  sleep 1
+  printf '%s\n' '[policy]' 'name = "pscope"' 'mode = "enforce"' \
+    '[policy.exec]' 'allow = ["dash", "bash", "curl", "cat", "sleep"]' \
+    '[policy.filesystem]' "\"$PW\" = \"write\"" \
+    '[policy.http]' 'targets = ["127.0.0.1:18090"]' 'egress = ["prov.test:18443"]' >"$PW/policy.toml"
+
+  # --- proxy-admit-on-resolve
+  printf '%s\n' '[scenario]' 'id = "admit"' "policy_path = \"$PW/policy.toml\"" \
+    'system_prompt = "test"' 'task = "probe"' 'turn_limit = 6' 'timeout_secs = 120' \
+    'tools = ["bash"]' >"$PW/admit.scn.toml"
+  FETCH="curl -sk --max-time 10 -o page.html -w 'code=%{http_code}' https://prov.test:18443/; echo"
+  python3 - "$FETCH" >"$PW/admit.prov.toml" <<'PYPROV'
+import json, sys
+fetch = sys.argv[1]
+wait = ": > flip; i=0; while [ ! -f flipped ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i+1)); done; [ -f flipped ] && echo FLIPPED"
+print('[provider]\nprovider = "mock"')
+for cmd in (fetch, wait, fetch):
+    print(f'[[provider.script]]\ntool = "bash"\nargs = {{ command = {json.dumps(cmd)} }}')
+print('[[provider.script]]\ntext = "done"')
+PYPROV
+  # The flip, from outside every scope: move prov.test and take its old address away.
+  ( for _ in $(seq 1 300); do [ -f "$PW/flip" ] && break; sleep 0.1; done
+    sed -i 's/^127\.0\.0\.2 prov\.test$/127.0.0.3 prov.test/' /etc/hosts
+    kill "$P2" 2>/dev/null; sleep 0.3; : >"$PW/flipped" ) &
+  FL=$!
+  ( cd "$PW" && "$BEE" run --scenario "$PW/admit.scn.toml" --provider "$PW/admit.prov.toml" \
+      --out "$PW/admit.json" ) >"$PW/admit.log" 2>&1
+  kill "$FL" 2>/dev/null
+  cp "$PW/hosts.bak" /etc/hosts
+  while IFS='|' read -r c st note; do emit "$c" "$st" "$note"; done < <(python3 - "$PW/admit.json" "$PW/.bee/http/index.sqlite" 2>&1 <<'PYCHECK'
+import json, sqlite3, sys
+try:
+    t = json.load(open(sys.argv[1]))
+    calls = [c for turn in t["turns"] for c in turn.get("calls", [])]
+    res = [c["result"]["content"] for c in calls]
+    db = sqlite3.connect(f"file:{sys.argv[2]}?mode=ro", uri=True)
+    admits = db.execute("SELECT added FROM admits WHERE host = 'prov.test'").fetchall()
+    added = [a for (row,) in admits for a in json.loads(row)]
+    pden = [a for c in calls for a in c.get("audit", [])
+            if a.get("scope_id") == "proxy" and a["decision"] == "denied"]
+    checks = {
+        "reached at the first address": len(res) > 0 and "code=200" in res[0],
+        "flipped mid-session": len(res) > 1 and "FLIPPED" in res[1],
+        "reached at the new address": len(res) > 2 and "code=200" in res[2],
+        "admit reload recorded for 127.0.0.3": "127.0.0.3" in added,
+        "no proxy-scope denial": not pden,
+    }
+    bad = [k for k, v in checks.items() if not v]
+    note = f"results={[r.strip()[:20] for r in res]}, admits={added}, proxy denials={[a['target'] for a in pden]}"
+    print(f"proxy-admit-on-resolve|{'PASS' if not bad else 'FAIL'}|{'; '.join(bad) or 'ok'}: {note}")
+except Exception as e:
+    print(f"proxy-admit-on-resolve|FAIL|could not judge: {e}")
+PYCHECK
+)
+
+  # --- subagent-intercept-attributed
+  cat >"$PW/skills/web/SKILL.md" <<'EOF'
+---
+name: web
+kind: agent
+description: Fetches pages through its proxy.
+tools: [bash]
+turn-limit: 3
+---
+Fetch what you are asked to and report the status.
+EOF
+  # Its own policy: /etc/hosts no longer names prov.test, and every egress name must resolve.
+  sed '/^egress = /d' "$PW/policy.toml" >"$PW/sub.policy.toml"
+  printf '%s\n' '[scenario]' 'finish = false' 'id = "sub-intercept"' \
+    "policy_path = \"$PW/sub.policy.toml\"" 'system_prompt = "test"' 'task = "delegate"' \
+    'turn_limit = 12' 'timeout_secs = 120' 'tools = ["task", "bash"]' \
+    "skills = [\"$PW/skills\"]" >"$PW/sub.scn.toml"
+  python3 - >"$PW/sub.prov.toml" <<'PYPROV'
+import json
+steps = [
+    ("bash", {"command": "echo \"$HTTP_PROXY\" > parent.proxy && echo SAVED"}),
+    ("task", {"agent": "web", "prompt": "A"}),
+    ("bash", {"command": "echo \"$HTTP_PROXY\" > a.proxy; curl -sS --max-time 10 -o a.html -w 'code=%{http_code}' http://127.0.0.1:18090/; echo"}),
+    ("finish", {"outcome": "completed", "summary": "A fetched"}),
+    ("task", {"agent": "web", "prompt": "B"}),
+    ("bash", {"command": "A=$(cat a.proxy); P=$(cat parent.proxy); U=${A#http://}; U=${U%@*}; MINE=${HTTP_PROXY##*@}; "
+                         "curl -sS --max-time 10 -o b1.html -w 'cred=%{http_code}' -x \"http://$U@$MINE\" http://127.0.0.1:18090/; echo; "
+                         "curl -sS --max-time 5 -o b2.html -w 'port=%{http_code}' -x \"$P\" http://127.0.0.1:18090/; echo"}),
+    ("finish", {"outcome": "completed", "summary": "B probed"}),
+]
+print('[provider]\nprovider = "mock"')
+for tool, args in steps:
+    inline = ", ".join(f"{k} = {json.dumps(v)}" for k, v in args.items())
+    print(f'[[provider.script]]\ntool = "{tool}"\nargs = {{ {inline} }}')
+print('[[provider.script]]\ntext = "done"')
+PYPROV
+  ( cd "$PW" && "$BEE" run --scenario "$PW/sub.scn.toml" --provider "$PW/sub.prov.toml" \
+      --out "$PW/sub.json" ) >"$PW/sub.log" 2>&1
+  while IFS='|' read -r c st note; do emit "$c" "$st" "$note"; done < <(python3 - "$PW/sub.json" "$PW/.bee/http/index.sqlite" 2>&1 <<'PYCHECK'
+import json, sqlite3, sys
+try:
+    t = json.load(open(sys.argv[1]))
+    calls = [c for turn in t["turns"] for c in turn.get("calls", [])]
+    tasks = [c for c in calls if c["call"]["name"] == "task"]
+    kids = [c.get("child") or {} for c in tasks]
+    def out(tr):
+        return "\n".join(c["result"]["content"] for turn in tr.get("turns", []) for c in turn.get("calls", []))
+    a, b = (kids + [{}, {}])[:2]
+    a_out, b_out = out(a.get("transcript") or {}), out(b.get("transcript") or {})
+    db = sqlite3.connect(f"file:{sys.argv[2]}?mode=ro", uri=True)
+    attr = {r[1]: r for r in db.execute(
+        "SELECT session_id, delegation_id, scope_id, parent_session FROM attribution")}
+    ta, tb = (tasks + [None, None])[0], (tasks + [None, None])[1]
+    ra = attr.get(ta["call"]["id"]) if ta else None
+    rb = attr.get(tb["call"]["id"]) if tb else None
+    count = lambda table, sid: db.execute(f"SELECT COUNT(*) FROM {table} WHERE session_id = ?", (sid,)).fetchone()[0]
+    parent = ra[3] if ra else None
+    bden = [e for e in (b.get("transcript") or {}).get("audit_trail", [])
+            if e["op"] == "connect" and e["decision"] == "denied"]
+    bref = db.execute("SELECT COUNT(*) FROM refusals WHERE session_id = ? AND kind = 'refused_bad_credential'",
+                      (rb[0] if rb else "",)).fetchone()[0]
+    checks = {
+        "delegations not refused": len(kids) == 2 and all((k.get("outcome") or {}).get("kind") == "completed" for k in kids),
+        "both enforced": all(k.get("enforced") is True for k in kids),
+        "A fetched through its proxy": "code=200" in a_out,
+        "A attributed to its scope and delegation": bool(ra) and ra[2] == a.get("scope_id"),
+        "B attributed to its scope and delegation": bool(rb) and rb[2] == b.get("scope_id"),
+        "A's exchange is A's": bool(ra) and count("exchanges", ra[0]) == 1,
+        "none on the parent": bool(parent) and count("exchanges", parent) == 0 and count("tunnels", parent) == 0,
+        "A's credential refused by B's proxy": "cred=407" in b_out and bref >= 1,
+        "parent's proxy port kernel-denied to B": "port=000" in b_out and bool(bden)
+            and all(e.get("scope_id") == b.get("scope_id") for e in bden),
+    }
+    bad = [k for k, v in checks.items() if not v]
+    note = f"A={a_out.strip()[:30]!r} B={b_out.strip()[:60]!r} attr={list(attr)} bden={[e['target'] for e in bden]}"
+    print(f"subagent-intercept-attributed|{'PASS' if not bad else 'FAIL'}|{'; '.join(bad) or 'ok'}: {note}")
+except Exception as e:
+    print(f"subagent-intercept-attributed|FAIL|could not judge: {e}")
+PYCHECK
+)
+  kill "$PA" "$P2" "$P3" 2>/dev/null
+  cp "$PW/hosts.bak" /etc/hosts
+  rm -rf "$PW"
+else
+  for c in $PS_CASES; do
+    emit "$c" FAIL "bee was not built with --features intercept (see test/vm/README.md)"
+  done
+fi
+
+# ------------------------------------------------ 026 PR3: external harnesses as scoped subagents
+# One headless session delegates to three agents run by `bee acp-fake-harness` (a scripted ACP agent)
+# through `runtime.acp`. Each harness runs in its own child scope with a proxy scope of its own.
+# harness-contained (S7): an in-scope write lands, an outside write is kernel-denied in the
+#   delegation's own audit under the child scope; `fs/read_text_file` is refused and recorded; a
+#   detached sleeper it forked is gone afterwards, and so is its scope.
+# harness-credentials (S9a): an agent naming ~/.claude (which its parent names too) reads it; another
+#   harness's store, ~/.codex, is kernel-denied.
+# harness-egress-by-name (S8): its provider host is reached through its proxy by name and tunnelled
+#   (a TunnelRecord); another name on the same address is refused by the proxy; a direct connect is
+#   kernel-denied; after the provider's address moves, it is reached again (resolve-and-admit).
+HN_CASES="harness-contained harness-credentials harness-egress-by-name"
+if [ -x "$BEE" ] && "$BEE" acp-fake-harness --help >/dev/null 2>&1; then
+  HW=/home/ubuntu/hwork
+  rm -rf "$HW" /home/ubuntu/harness-outside.txt; mkdir -p "$HW/skills/contained" "$HW/skills/creds" "$HW/skills/egress"
+  cp /etc/hosts "$HW/hosts.bak"
+  printf '127.0.0.2 prov.test\n127.0.0.2 other.test\n' >>/etc/hosts
+  HOME_CREATED=""
+  for f in "$HOME/.claude/.credentials.json" "$HOME/.codex/auth.json"; do
+    if [ ! -e "$f" ]; then mkdir -p "$(dirname "$f")"; echo '{"test":true}' >"$f"; HOME_CREATED="$HOME_CREATED $f"; fi
+  done
+  openssl req -x509 -newkey rsa:2048 -nodes -subj "/CN=prov.test" -days 1 \
+    -keyout "$HW/key.pem" -out "$HW/cert.pem" >/dev/null 2>&1
+  openssl s_server -accept 127.0.0.2:18443 -cert "$HW/cert.pem" -key "$HW/key.pem" -www -quiet >/dev/null 2>&1 &
+  H2=$!
+  openssl s_server -accept 127.0.0.3:18443 -cert "$HW/cert.pem" -key "$HW/key.pem" -www -quiet >/dev/null 2>&1 &
+  H3=$!
+  sleep 1
+  printf '%s\n' '[policy]' 'name = "harness-vm"' 'mode = "enforce"' \
+    '[policy.exec]' "allow = [\"$BEE\", \"curl\", \"sleep\", \"dash\"]" \
+    '[policy.filesystem]' "\"$HW\" = \"write\"" '"~/.claude" = "write"' '"/dev/null" = "write"' \
+    '[policy.network]' 'allow = ["prov.test:18443"]' >"$HW/policy.toml"
+  agent() { # name script-json extra-requires
+    cat >"$HW/skills/$1/SKILL.md" <<EOF
+---
+name: $1
+kind: agent
+description: A scripted harness ($1).
+runtime:
+  acp:
+    command: $BEE
+    args: [acp-fake-harness]
+    env:
+      FAKE_HARNESS_SCRIPT: '$2'
+requires:
+  net: ["prov.test:18443"]
+$3
+---
+unused
+EOF
+  }
+  agent contained "[{\"write\": {\"path\": \"$HW/in.txt\", \"text\": \"inside\"}}, {\"write\": {\"path\": \"/home/ubuntu/harness-outside.txt\", \"text\": \"outside\"}}, {\"call_fs_read\": \"/etc/hostname\"}, {\"fork_sleeper\": 300}, {\"say\": \"contained done\"}]" ""
+  agent creds "[{\"read\": \"$HOME/.claude/.credentials.json\"}, {\"read\": \"$HOME/.codex/auth.json\"}, {\"say\": \"creds done\"}]" "  filesystem:
+    \"~/.claude\": write"
+  CURL='"curl", "-sk", "--max-time", "10", "-w", "code=%{http_code}"'
+  agent egress "[{\"run\": [$CURL, \"-o\", \"$HW/e1.html\", \"https://prov.test:18443/\"]}, {\"run\": [$CURL, \"-o\", \"$HW/e2.html\", \"https://other.test:18443/\"]}, {\"connect_direct\": {\"host\": \"127.0.0.2\", \"port\": 18443}}, {\"write\": {\"path\": \"$HW/flip\", \"text\": \"1\"}}, {\"wait_file\": {\"path\": \"$HW/flipped\", \"secs\": 15}}, {\"run\": [$CURL, \"-o\", \"$HW/e3.html\", \"https://prov.test:18443/\"]}, {\"say\": \"egress done\"}]" ""
+  printf '%s\n' '[scenario]' 'finish = false' 'id = "harness"' "policy_path = \"$HW/policy.toml\"" \
+    'system_prompt = "test"' 'task = "delegate"' 'turn_limit = 8' 'timeout_secs = 120' \
+    'tools = ["task"]' "skills = [\"$HW/skills\"]" >"$HW/scn.toml"
+  printf '%s\n' '[provider]' 'provider = "mock"' \
+    '[[provider.script]]' 'tool = "task"' 'args = { agent = "contained", prompt = "go" }' \
+    '[[provider.script]]' 'tool = "task"' 'args = { agent = "creds", prompt = "go" }' \
+    '[[provider.script]]' 'tool = "task"' 'args = { agent = "egress", prompt = "go" }' \
+    '[[provider.script]]' 'text = "done"' >"$HW/prov.toml"
+  ( for _ in $(seq 1 900); do [ -f "$HW/flip" ] && break; sleep 0.1; done
+    sed -i 's/^127\.0\.0\.2 prov\.test$/127.0.0.3 prov.test/' /etc/hosts
+    kill "$H2" 2>/dev/null; sleep 0.3; : >"$HW/flipped" ) &
+  HF=$!
+  ( cd "$HW" && "$BEE" run --scenario "$HW/scn.toml" --provider "$HW/prov.toml" \
+      --out "$HW/t.json" ) >"$HW/run.log" 2>&1
+  kill "$HF" "$H2" "$H3" 2>/dev/null
+  cp "$HW/hosts.bak" /etc/hosts
+  while IFS='|' read -r c st note; do emit "$c" "$st" "$note"; done < <(python3 - "$HW" 2>&1 <<'PYCHECK'
+import json, os, re, sqlite3, sys
+hw = sys.argv[1]
+def out(case, checks, note):
+    bad = [k for k, v in checks.items() if not v]
+    print(f"{case}|{'PASS' if not bad else 'FAIL'}|{'; '.join(bad) or 'ok'}: {note}".replace("\n", " "))
+try:
+    t = json.load(open(f"{hw}/t.json"))
+except Exception as e:
+    for c in ("harness-contained", "harness-credentials", "harness-egress-by-name"):
+        print(f"{c}|FAIL|no transcript: {e}")
+    sys.exit()
+calls = [c for turn in t["turns"] for c in turn.get("calls", []) if c["call"]["name"] == "task"]
+by = {c["call"]["arguments"]["agent"]: c for c in calls}
+def kid(n): return (by.get(n) or {}).get("child") or {}
+def res(n): return ((by.get(n) or {}).get("result") or {}).get("content", "")
+def denied(k, op, frag):
+    return [e for e in k.get("audit", []) if e["op"] == op and e["decision"] == "denied" and frag in e.get("target", "")]
+NOTE = "NOTE: this subagent is an external harness"
+
+k, r = kid("contained"), res("contained")
+pid = re.search(r"fork_sleeper: pid (\d+)", r)
+alive = bool(pid) and os.path.exists(f"/proc/{pid.group(1)}")
+outside = open("/home/ubuntu/harness-outside.txt").read() if os.path.exists("/home/ubuntu/harness-outside.txt") else ""
+dn = denied(k, "file_open", "harness-outside")
+leftover = [d for d in os.listdir("/sys/fs/cgroup/bee") if d.startswith("fs-")] if os.path.isdir("/sys/fs/cgroup/bee") else []
+out("harness-contained", {
+    "completed and enforced": (k.get("outcome") or {}).get("kind") == "completed" and k.get("enforced") is True,
+    "harness record": bool(k.get("harness")) and k.get("transcript") is None,
+    "in-scope write": "in.txt: ok" in r and open(f"{hw}/in.txt").read() == "inside",
+    "outside write kernel-denied": "harness-outside.txt: denied" in r and outside != "outside" and bool(dn),
+    "denial under the child scope": bool(dn) and all(e.get("scope_id") == k.get("scope_id") for e in dn),
+    "fs/read_text_file refused and recorded": "fs/read_text_file: refused" in r and (k.get("harness") or {}).get("refused_methods") == ["fs/read_text_file"],
+    "FR-021 note": NOTE in r,
+    "sleeper gone": bool(pid) and not alive,
+    "scope gone": not any(k.get("scope_id", "?") in d for d in leftover),
+}, f"report={r[:160]!r} sleeper={pid.group(1) if pid else None} alive={alive} leftover={leftover}")
+
+k, r = kid("creds"), res("creds")
+out("harness-credentials", {
+    "completed": (k.get("outcome") or {}).get("kind") == "completed",
+    "its own store readable": ".credentials.json: ok" in r,
+    "another harness's store denied": "auth.json: denied" in r and bool(denied(k, "file_open", ".codex")),
+}, f"report={r[:200]!r}")
+
+k, r = kid("egress"), res("egress")
+runs = re.findall(r"run curl: exit -?\d+: (code=\d+)", r)
+try:
+    db = sqlite3.connect(f"file:{hw}/.bee/http/index.sqlite?mode=ro", uri=True)
+    sid = db.execute("SELECT session_id FROM attribution WHERE delegation_id = ?", (by["egress"]["call"]["id"],)).fetchone()
+    sid = sid[0] if sid else ""
+    tunnels = db.execute("SELECT COUNT(*) FROM tunnels WHERE session_id = ? AND host = 'prov.test'", (sid,)).fetchone()[0]
+    oos = db.execute("SELECT COUNT(*) FROM refusals WHERE session_id = ? AND host = 'other.test' AND kind = 'refused_out_of_scope'", (sid,)).fetchone()[0]
+    added = [a for (row,) in db.execute("SELECT added FROM admits WHERE session_id = ?", (sid,)) for a in json.loads(row)]
+except Exception as e:
+    sid, tunnels, oos, added = f"<{e}>", 0, 0, []
+out("harness-egress-by-name", {
+    "completed": (k.get("outcome") or {}).get("kind") == "completed",
+    "provider reached by name": runs[:1] == ["code=200"],
+    "other name refused": len(runs) > 1 and runs[1] == "code=000" and oos >= 1,
+    "direct connect kernel-denied": "connect_direct 127.0.0.2:18443: shut" in r and bool(denied(k, "connect", "127.0.0.2:18443")),
+    "flipped": "wait_file" in r and "flipped: true" in r,
+    "reached after the move": len(runs) > 2 and runs[2] == "code=200",
+    "tunnels recorded, no content": tunnels >= 2,
+    "admitted 127.0.0.3": "127.0.0.3" in added,
+}, f"runs={runs} session={sid} tunnels={tunnels} oos={oos} admits={added}")
+PYCHECK
+)
+  for f in $HOME_CREATED; do rm -f "$f"; done
+  rmdir "$HOME/.codex" "$HOME/.claude" 2>/dev/null
+  rm -rf "$HW" /home/ubuntu/harness-outside.txt
+else
+  for c in $HN_CASES; do
+    emit "$c" FAIL "bee was not built with --features acp,vm-test (see test/vm/README.md)"
   done
 fi
 

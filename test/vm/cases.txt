@@ -10,6 +10,10 @@ subagent-overgrant-no-cgroup
 subagent-siblings-isolated
 subagent-escalate
 subagent-escalate-beyond
+acp-denial-reported
+acp-two-sessions-isolated
+acp-cancel
+acp-consent
 episode-allow
 episode-file-deny
 exec-allow
@@ -54,3 +58,8 @@ http-sni-mismatch
 http-store-protected
 http-proxy-fs-deny
 http-latency
+proxy-admit-on-resolve
+subagent-intercept-attributed
+harness-contained
+harness-credentials
+harness-egress-by-name

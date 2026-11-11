@@ -19,7 +19,8 @@ use std::time::Duration;
 
 use bee::intercept::control::{OriginKind, ProxyEventKind, RawTarget, WireCtx};
 use bee::intercept::sidecar::{
-    Enforcement, HarnessResolver, InterceptError, Interceptor, InterceptorConfig,
+    Admit, AdmitOutcome, Enforcement, HarnessResolver, InterceptError, Interceptor,
+    InterceptorConfig,
 };
 use bee_core::compiler::HttpScope;
 use bee_core::{CompileError, ExecIdentity, Policy, Resolver};
@@ -80,6 +81,15 @@ struct Proxy {
 
 impl Proxy {
     async fn start(scope: HttpScope, resolver: HarnessResolver) -> Proxy {
+        Proxy::start_admitting(scope, resolver, None).await
+    }
+
+    /// [`Proxy::start`], with resolve-and-admit through `admit` (026 R9).
+    async fn start_admitting(
+        scope: HttpScope,
+        resolver: HarnessResolver,
+        admit: Option<Arc<dyn Admit>>,
+    ) -> Proxy {
         let dir = tempfile::tempdir().unwrap();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let session = format!("test-{}", std::process::id());
@@ -98,6 +108,8 @@ impl Proxy {
                     reason: "host test".into(),
                 },
                 resolver,
+                admit,
+                attribution: None,
             },
             listener,
             spawn,
@@ -490,6 +502,84 @@ async fn dns_drift_is_refused_naming_both_addresses() {
             .load(std::sync::atomic::Ordering::SeqCst),
         0,
         "no connect was attempted"
+    );
+}
+
+/// The admission bookkeeping a proxy scope keeps, with its kernel reload counted instead of made
+/// (the VM case `proxy-admit-on-resolve` makes it).
+struct CountingAdmit {
+    admissions: std::sync::Mutex<bee::proxy_scope::Admissions>,
+    reloads: std::sync::atomic::AtomicU32,
+}
+
+impl Admit for CountingAdmit {
+    fn admit(&self, host: &str, addrs: &[IpAddr]) -> Result<AdmitOutcome, String> {
+        let mut a = self.admissions.lock().unwrap();
+        let (next, admitted) = a.propose(host, addrs)?;
+        if !admitted.added.is_empty() || !admitted.evicted.is_empty() {
+            self.reloads
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            *a = next;
+        }
+        Ok(AdmitOutcome {
+            addrs: admitted.answer,
+            added: admitted.added,
+            evicted: admitted.evicted,
+        })
+    }
+}
+
+// 026 T045/R9: the same move that `dns_drift_is_refused_naming_both_addresses` refuses is admitted
+// when bee admits it — one reload, recorded, then the request goes through; the same address again
+// reloads nothing; an undeclared name is never resolved into the scope.
+#[tokio::test]
+async fn a_moved_address_is_admitted_once_then_reached() {
+    let (http, _, fx) = vuln_target::start_with(false);
+    // Compiled: moved.test → 127.0.0.2. Now it resolves to 127.0.0.1, where the fixture listens.
+    let scope = scope(
+        &format!("targets = [\"moved.test:{}\"]", http.port()),
+        &[("moved.test", "127.0.0.2")],
+    );
+    let admit = Arc::new(CountingAdmit {
+        admissions: std::sync::Mutex::new(bee::proxy_scope::Admissions::new(&scope)),
+        reloads: Default::default(),
+    });
+    let p = Proxy::start_admitting(
+        scope,
+        names_resolver(&[("moved.test", "127.0.0.1"), ("other.test", "127.0.0.1")]),
+        Some(admit.clone()),
+    )
+    .await;
+    for call in ["toolu_a1", "toolu_a2"] {
+        let tok = p.cred(call).await;
+        let resp = through(
+            p.addr(),
+            get(
+                &format!("http://moved.test:{}/echo", http.port()),
+                Some(&basic(call, &tok)),
+            ),
+        )
+        .await;
+        assert_eq!(status(&resp), 200, "{resp}");
+    }
+    assert_eq!(
+        admit.reloads.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "admitted once; the second lookup found it held"
+    );
+    assert_eq!(
+        p.icpt.with_store(|s| s.admit_count("moved.test")).unwrap(),
+        1
+    );
+    assert_eq!(
+        fx.counters
+            .requests
+            .load(std::sync::atomic::Ordering::SeqCst),
+        2
+    );
+    assert_eq!(
+        admit.admit("other.test", &[ip("127.0.0.1")]).unwrap_err(),
+        "other.test is not one of this proxy scope's targets or egress hosts"
     );
 }
 

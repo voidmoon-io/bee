@@ -111,3 +111,10 @@ production build. You have no shell; do not ask for one.
 Delegated from a session that *does* hold network access, this child is denied every outbound
 connection in the kernel — not because it was told not to, but because its scope has no `NET_ALLOW`
 entry. That denial is the acceptance test for US1.
+
+## External harnesses (026)
+
+An agent with a `runtime.acp` block (`command`, `args`, `env`) is run as an external harness —
+Claude Code, Codex, OpenCode — spoken to over ACP inside its own kernel scope, rather than by bee's
+loop. It takes no `tools`, and `turn-limit` is ignored. Its `requires.net` entries are provider hosts
+by name, routed to a proxy scope of its own. See `specs/026-acp/contracts/harness-runtime.md`.

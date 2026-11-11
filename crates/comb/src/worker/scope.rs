@@ -60,7 +60,16 @@ pub trait HostResolver: Send + Sync {
     fn resolve(
         &self,
         host: &str,
-    ) -> std::pin::Pin<Box<dyn Future<Output = Result<Vec<IpAddr>, String>> + Send + '_>>;
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<Resolution, String>> + Send + '_>>;
+}
+
+/// The harness's answer to a name lookup.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Resolution {
+    pub addrs: Vec<IpAddr>,
+    /// The harness reloaded this scope's kernel rules to hold every address in `addrs` for the
+    /// name (resolve-and-admit, 026 R9), so the compile-time set no longer bounds them.
+    pub admitted: bool,
 }
 
 /// The worker's view of the scope. Replaced wholesale by `scope.update`.
@@ -171,10 +180,15 @@ impl ScopeChecker {
         self.scope.insecure_upstream.iter().any(|p| p.matches(host))
     }
 
-    /// Resolve `host` **now** and keep only addresses in the entry's compiled set. Every upstream
-    /// connect goes through this. When none remain the request is refused with
-    /// `refused_address_drift`, naming both sets, *before* any connect: the operator sees why,
-    /// instead of an anonymous kernel denial (spec edge case "DNS changes mid-session").
+    /// Resolve `host` **now** and pick the address to connect to. Every upstream connect goes
+    /// through this.
+    ///
+    /// When the harness **admitted** the answer (resolve-and-admit: it reloaded this scope's kernel
+    /// rules to hold those addresses for this declared name before replying), the first address is
+    /// used. Otherwise only an address in the entry's compiled set is, and when none remains the
+    /// request is refused with `refused_address_drift`, naming both sets, *before* any connect: the
+    /// operator sees why, instead of an anonymous kernel denial (spec edge case "DNS changes
+    /// mid-session").
     pub async fn resolve_checked(
         &self,
         host: &str,
@@ -185,18 +199,27 @@ impl ScopeChecker {
             .entry(host, port)
             .ok_or_else(|| Refusal::new(ProxyEventKind::RefusedOutOfScope, host, port))?;
         let bare = strip_brackets(host);
-        let now: Vec<IpAddr> = match bare.parse::<IpAddr>() {
+        let now = match bare.parse::<IpAddr>() {
             // An IP literal entry *is* its compiled address.
-            Ok(ip) => vec![ip],
+            Ok(ip) => Resolution {
+                addrs: vec![ip],
+                admitted: false,
+            },
             Err(_) => resolver.resolve(&entry.host).await.unwrap_or_default(),
         };
-        match now.iter().find(|a| entry.resolved.contains(a)) {
+        let pick = if now.admitted {
+            now.addrs.first()
+        } else {
+            now.addrs.iter().find(|a| entry.resolved.contains(a))
+        };
+        match pick {
             Some(a) => Ok(SocketAddr::new(*a, port)),
             None => {
                 let mut r = Refusal::new(ProxyEventKind::RefusedAddressDrift, host, port);
                 r.detail = serde_json::json!({
-                    "now_resolves_to": now,
+                    "now_resolves_to": now.addrs,
                     "compiled": entry.resolved,
+                    "admitted": now.admitted,
                 });
                 Err(r)
             }
@@ -257,10 +280,33 @@ mod tests {
         fn resolve(
             &self,
             _h: &str,
-        ) -> std::pin::Pin<Box<dyn Future<Output = Result<Vec<IpAddr>, String>> + Send + '_>>
+        ) -> std::pin::Pin<Box<dyn Future<Output = Result<Resolution, String>> + Send + '_>>
         {
-            let v = self.0.clone();
-            Box::pin(async move { Ok(v) })
+            let addrs = self.0.clone();
+            Box::pin(async move {
+                Ok(Resolution {
+                    addrs,
+                    admitted: false,
+                })
+            })
+        }
+    }
+
+    /// An answer the harness admitted (026 R9).
+    struct Admitted(Vec<IpAddr>);
+    impl HostResolver for Admitted {
+        fn resolve(
+            &self,
+            _h: &str,
+        ) -> std::pin::Pin<Box<dyn Future<Output = Result<Resolution, String>> + Send + '_>>
+        {
+            let addrs = self.0.clone();
+            Box::pin(async move {
+                Ok(Resolution {
+                    addrs,
+                    admitted: true,
+                })
+            })
         }
     }
 
@@ -326,6 +372,38 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(lit, "10.0.0.5:8080".parse().unwrap());
+    }
+
+    // 026 R9: an address the harness admitted is used though it is not in the compiled set; an
+    // admitted answer with no address is still refused, and an undeclared name never resolves.
+    #[tokio::test]
+    async fn an_admitted_address_is_used_beyond_the_compiled_set() {
+        let c = checker();
+        let moved = c
+            .resolve_checked(
+                "app.test",
+                443,
+                &Admitted(vec!["127.0.0.3".parse().unwrap()]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(moved, "127.0.0.3:443".parse().unwrap());
+
+        let empty = c
+            .resolve_checked("app.test", 443, &Admitted(vec![]))
+            .await
+            .unwrap_err();
+        assert_eq!(empty.kind, ProxyEventKind::RefusedAddressDrift);
+
+        let out = c
+            .resolve_checked(
+                "other.test",
+                443,
+                &Admitted(vec!["127.0.0.3".parse().unwrap()]),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(out.kind, ProxyEventKind::RefusedOutOfScope);
     }
 
     #[test]

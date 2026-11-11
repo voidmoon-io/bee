@@ -141,12 +141,90 @@ pub struct DelegationRecord {
     pub depth: u32,
     pub outcome: DelegationOutcome,
     /// Tokens the child's model calls used, input plus output, as the provider reported them.
-    #[serde(default, skip_serializing_if = "is_zero_u64")]
-    pub tokens_used: u64,
-    /// The child's own record. `None` when it never ran.
+    /// `None`: not counted — a harness's model use is not visible to bee (026 R14) — never zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_used: Option<u64>,
+    /// The child's own record. `None` when it never ran, and for a harness (see `harness`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript: Option<Box<EpisodeTranscript>>,
-    pub turns_used: u32,
+    /// The child's model turns. `None`: not counted (a harness), never zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turns_used: Option<u32>,
+    /// What an external harness did (026): its turns, tool calls, the permissions bee answered for
+    /// it, and the client methods it was refused. `None` for bee's own loop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<Box<HarnessRecord>>,
+    /// The child's kernel events, when it has no transcript of its own to hold them (a harness).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audit: Vec<AuditEvent>,
+}
+
+/// An external harness's run, as bee saw it over ACP (026 data-model.md, research R13).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct HarnessRecord {
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    /// Keys only: values may be credentials.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env_keys: Vec<String>,
+    pub protocol_version: u16,
+    /// The harness's `agentInfo`, `name version`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_info: Option<String>,
+    /// One per prompt bee sent (one in this feature).
+    #[serde(default)]
+    pub turns: Vec<HarnessTurn>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub permissions: Vec<PermissionRecord>,
+    /// Client methods the harness called anyway (`fs/*`, `terminal/*`, …), each refused.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refused_methods: Vec<String>,
+    /// The prompt's `stopReason`, or why there was none (`exited`, `protocol_error`, `deadline`).
+    pub stop_reason: String,
+    /// The last 4 KiB of its stderr.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub stderr_tail: String,
+}
+
+/// What one prompt produced.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct HarnessTurn {
+    /// Its `agent_message_chunk` text, concatenated.
+    pub text: String,
+    /// Bytes of `agent_thought_chunk` text (the thoughts themselves are not kept).
+    #[serde(default)]
+    pub thoughts_len: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<HarnessToolCall>,
+}
+
+/// A tool call the harness reported, merged across its updates. Raw values are capped.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct HarnessToolCall {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_input: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_output: Option<String>,
+}
+
+/// A permission the harness asked for and bee answered (research R11). Never shown to a person.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PermissionRecord {
+    /// The tool call it was about.
+    pub tool_call: String,
+    pub title: String,
+    /// Each offered option as `kind:id`.
+    pub offered: Vec<String>,
+    /// The chosen option as `kind:id`, or `cancelled`.
+    pub chosen: String,
+    pub ts: String,
 }
 
 /// How a delegation ended.
@@ -172,10 +250,6 @@ pub enum CutShortReason {
     SharedTurns,
     /// The shared wall-clock deadline.
     Deadline,
-}
-
-fn is_zero_u64(n: &u64) -> bool {
-    *n == 0
 }
 
 /// Why a delegation was refused (contracts/task-tool.md). Each names its cause.

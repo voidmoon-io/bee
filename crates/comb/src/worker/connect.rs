@@ -72,7 +72,27 @@ pub async fn handle(
         let hello = tokio::time::timeout(HELLO_TIMEOUT, read_client_hello(&mut client)).await;
         let (hello, sni) = match hello {
             Ok(Ok(v)) => v,
-            Ok(Err(why)) => return refuse_hello(&worker, &ctx, &host, port, &why),
+            Ok(Err(HelloError::Bad(why))) => return refuse_hello(&worker, &ctx, &host, port, &why),
+            // The client hung up before offering a name: nothing was refused, the tunnel was
+            // abandoned (an HTTP client dropping a pre-connect does this). Recorded as a tunnel,
+            // so the record still shows every CONNECT.
+            Ok(Err(HelloError::Gone(why))) => {
+                worker.emit(
+                    FromWorker::Tunnel(TunnelRecord {
+                        call_id: Some(ctx.call_id.clone()),
+                        host: host.clone(),
+                        port,
+                        sni: None,
+                        started,
+                        ended: now_rfc3339(),
+                        bytes_up: 0,
+                        bytes_down: 0,
+                        outcome: format!("abandoned before a ClientHello: {why}"),
+                    }),
+                    Vec::new(),
+                );
+                return;
+            }
             Err(_) => {
                 return refuse_hello(
                     &worker,
@@ -175,16 +195,27 @@ fn refuse_hello(worker: &Worker, ctx: &WireCtx, host: &str, port: u16, why: &str
     worker.refuse(&r, Some(&ctx.call_id));
 }
 
+/// Why no ClientHello was read.
+enum HelloError {
+    /// The client closed or reset the tunnel before a complete hello: it abandoned it.
+    Gone(String),
+    /// What it sent is not an acceptable ClientHello: refused.
+    Bad(String),
+}
+
 /// Read until rustls has a complete ClientHello; return the bytes read and its SNI.
 async fn read_client_hello<S: tokio::io::AsyncRead + Unpin>(
     s: &mut S,
-) -> Result<(Vec<u8>, Option<String>), String> {
+) -> Result<(Vec<u8>, Option<String>), HelloError> {
     let mut buf = Vec::with_capacity(1024);
     loop {
         let mut chunk = [0u8; 4096];
-        let n = s.read(&mut chunk).await.map_err(|e| e.to_string())?;
+        let n = s
+            .read(&mut chunk)
+            .await
+            .map_err(|e| HelloError::Gone(e.to_string()))?;
         if n == 0 {
-            return Err("client closed before a ClientHello".into());
+            return Err(HelloError::Gone("client closed".into()));
         }
         buf.extend_from_slice(&chunk[..n]);
         // A fresh acceptor over everything buffered so far: cheap, and a partial hello just asks
@@ -202,10 +233,10 @@ async fn read_client_hello<S: tokio::io::AsyncRead + Unpin>(
                 return Ok((buf, sni));
             }
             Ok(None) => {}
-            Err(_) => return Err("not a TLS ClientHello".into()),
+            Err(_) => return Err(HelloError::Bad("not a TLS ClientHello".into())),
         }
         if buf.len() > MAX_CLIENT_HELLO {
-            return Err("ClientHello exceeds 16 KiB".into());
+            return Err(HelloError::Bad("ClientHello exceeds 16 KiB".into()));
         }
     }
 }

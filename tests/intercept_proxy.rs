@@ -711,6 +711,65 @@ async fn a_mismatched_sni_closes_the_tunnel() {
 
 // ── T033: fail closed when the worker dies ───────────────────────────────────────────────────────
 
+// A client that opens a tunnel and hangs up before sending a ClientHello (an HTTP client abandoning
+// a pre-connect) was not refused: no SNI was ever offered. It is recorded as an abandoned tunnel,
+// never as an SNI mismatch (found running a real Claude harness, 026 S10).
+#[tokio::test]
+async fn a_tunnel_abandoned_before_a_client_hello_is_not_a_refusal() {
+    let (_, https, _fx) = vuln_target::start_with(true);
+    let https = https.unwrap();
+    let p = Proxy::start(
+        scope(
+            &format!(
+                "targets = [\"app.test:1\"]\negress = [\"egress.test:{}\"]",
+                https.port()
+            ),
+            &[("app.test", "127.0.0.9"), ("egress.test", "127.0.0.1")],
+        ),
+        names_resolver(&[("egress.test", "127.0.0.1")]),
+    )
+    .await;
+    let tok = p.cred("toolu_a").await;
+    let mut s = TcpStream::connect(p.addr()).await.unwrap();
+    s.write_all(
+        format!(
+            "CONNECT egress.test:{port} HTTP/1.1\r\nHost: egress.test:{port}\r\nProxy-Authorization: Basic {}\r\n\r\n",
+            basic("toolu_a", &tok),
+            port = https.port()
+        )
+        .as_bytes(),
+    )
+    .await
+    .unwrap();
+    let mut head = vec![0u8; 19]; // "HTTP/1.1 200 OK\r\n\r\n"
+    s.read_exact(&mut head).await.unwrap();
+    drop(s);
+
+    let mut outcome = None;
+    for _ in 0..100 {
+        outcome = p.icpt.with_store(|st| {
+            st.conn()
+                .query_row(
+                    "SELECT outcome FROM tunnels WHERE call_id = 'toolu_a'",
+                    [],
+                    |r| r.get::<_, String>(0),
+                )
+                .ok()
+        });
+        if outcome.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let outcome = outcome.expect("the abandoned tunnel is recorded");
+    assert!(outcome.starts_with("abandoned"), "{outcome}");
+    assert!(
+        !p.events("toolu_a", ProxyEventKind::RefusedSniMismatch)
+            .await,
+        "an abandoned tunnel is not an SNI refusal"
+    );
+}
+
 #[tokio::test]
 async fn a_dead_worker_restarts_once_then_fails_closed() {
     let (http, _, _fx) = vuln_target::start_with(false);

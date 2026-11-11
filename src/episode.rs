@@ -996,7 +996,7 @@ fn write_with_parents(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<(
 
 /// Operator choices for one episode that the scenario file does not carry: command-line flags, and
 /// settings from the operator's own configuration.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct EpisodeOptions {
     /// `--http-scope-advisory`: run `[policy.http]` interception even though the kernel will not
     /// block (host mode, a build without `enforce`, or an observe-mode policy) — research R17.
@@ -1011,6 +1011,9 @@ pub struct EpisodeOptions {
     pub enforcement: Option<crate::session::Enforcement>,
     /// User and project `[delegation]` (018 US4): how deep and how wide the session may delegate.
     pub delegation: crate::delegate::DelegationLimits,
+    /// `[acp] harness_env_passthrough` (026): the credential variables a harness subagent may
+    /// receive from bee's environment.
+    pub harness_env: Vec<String>,
 }
 
 /// Run a full episode: build the sandbox (a real bee scope under `--features enforce`), materialize
@@ -1153,7 +1156,10 @@ async fn run_episode_inner(
         .delegation(progress.clone().map(|p| {
             std::sync::Arc::new(move |line: &str| p(line)) as crate::delegate::SharedProgress
         }))
-        .map(|d| d.with_limits(eopts.delegation));
+        .map(|d| {
+            d.with_limits(eopts.delegation)
+                .with_harness_env(eopts.harness_env.clone())
+        });
     // A delegating episode draws every turn — its own and its subagents' — from one pool the size
     // of its turn limit, so delegating cannot buy it more (SC-005). A run that cannot delegate
     // keeps exactly the limits it had.

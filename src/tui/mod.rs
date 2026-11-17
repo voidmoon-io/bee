@@ -55,8 +55,8 @@ const SPINNER_TICK: Duration = Duration::from_millis(120);
 /// queue, and a metrics recorder — minus the readline editor, since input arrives through
 /// crossterm instead. Each submitted line drives one [`run_exchange`] turn via a [`SessionSink`];
 /// the loop pumps streaming tokens, tool results, and denials into the model as they arrive, so the
-/// screen stays live and Ctrl-C quits promptly even mid-turn. Returns once the user quits (or the
-/// input stream closes), with the terminal already restored.
+/// screen stays live and Ctrl-C cancels the turn promptly (twice quits). Returns once the user
+/// quits (or the input stream closes), with the terminal already restored.
 pub async fn run(
     model: &dyn Model,
     registry: &mut ToolRegistry,
@@ -245,7 +245,8 @@ fn drain_intents(app: &mut App, terminal: &mut Tui) -> bool {
 /// The [`run_exchange`] future borrows the conversation core; we poll it inside `tokio::select!`
 /// beside the `SessionEvent` channel (streaming output), terminal input (so Ctrl-C / resize stay
 /// responsive), and an on-demand tick (redraws the "working…" indicator). Every branch redraws on
-/// the next loop turn. Quitting mid-turn drops the exchange future, cancelling the in-flight call.
+/// the next loop turn. Cancelling or quitting mid-turn drops the exchange future, which kills the
+/// in-flight call.
 #[allow(clippy::too_many_arguments)]
 async fn run_turn(
     app: &mut App,
@@ -348,11 +349,23 @@ async fn run_turn(
                         if drain_intents(app, terminal) {
                             terminal.clear()?;
                         }
-                        if let Some(text) = app.take_outbox() {
+                        #[cfg(feature = "durable-sessions")]
+                        let durable = config.durable.as_ref();
+                        #[cfg(not(feature = "durable-sessions"))]
+                        let durable: Option<&()> = None;
+                        // Esc or Ctrl-C: the same cancellation `/cancel` asks for.
+                        if app.take_cancel_request() && !turn_done {
                             #[cfg(feature = "durable-sessions")]
-                            let durable = config.durable.as_ref();
-                            #[cfg(not(feature = "durable-sessions"))]
-                            let durable: Option<&()> = None;
+                            if let Some(session) = durable {
+                                if let Err(error) = session.cancel() {
+                                    crate::repl::ReplOutput::error(&sink, &error.to_string());
+                                }
+                            }
+                            if durable.is_none() {
+                                break true;
+                            }
+                        }
+                        if let Some(text) = app.take_outbox() {
                             match route_mid_turn(text, durable.is_some()) {
                                 MidTurn::Cancel if durable.is_none() => break true,
                                 MidTurn::Next(text) => {
@@ -388,7 +401,7 @@ async fn run_turn(
             }
         }
     };
-    // Only a non-durable `/cancel` gets here: the exchange (and its in-flight call) is dropped.
+    // Only a non-durable cancel gets here: the exchange (and its in-flight call) is dropped.
     debug_assert!(cancelled);
     while let Ok(ev) = rx.try_recv() {
         update(app, Message::session(ev));
@@ -398,7 +411,7 @@ async fn run_turn(
         app,
         Message::ExchangeFinished(crate::repl::ExchangeOutcome::Terminated("cancelled".into())),
     );
-    app.system_line("turn cancelled — it was not added to the conversation");
+    app.system_line(crate::repl::TURN_CANCELLED);
     Ok(())
 }
 

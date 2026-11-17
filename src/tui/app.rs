@@ -81,6 +81,14 @@ pub struct App {
     /// panels already have their own column.
     pub panels_visible: bool,
     pub should_quit: bool,
+    /// An exchange is running: set when it starts, cleared when it finishes. Unlike [`App::turn`],
+    /// it stays set between the model calls of one exchange.
+    pub exchange_running: bool,
+    /// The operator asked to cancel the running turn (Esc or Ctrl-C); the event loop cancels it
+    /// (drained via [`App::take_cancel_request`]).
+    pub cancel_requested: bool,
+    /// The last Ctrl-C, so a second one close behind it quits.
+    last_interrupt: Option<Instant>,
     /// One-key `gg` state: a `g` was pressed and we're waiting for the second.
     pub pending_g: bool,
     /// A submitted line the event loop must send to the model (drained via [`App::take_outbox`]).
@@ -161,6 +169,9 @@ impl App {
             help_open: false,
             panels_visible: false,
             should_quit: false,
+            exchange_running: false,
+            cancel_requested: false,
+            last_interrupt: None,
             pending_g: false,
             outbox: None,
             yank: None,
@@ -217,12 +228,16 @@ impl App {
         self.mascot_had_error = false;
         self.mascot_pending_tools = 0;
         self.turn = TurnState::Streaming;
+        self.exchange_running = true;
+        self.cancel_requested = false;
         self.set_mascot_mood(Mood::Thinking);
     }
 
     fn finish_exchange(&mut self, outcome: crate::repl::ExchangeOutcome) {
         use crate::repl::ExchangeOutcome;
         self.turn = TurnState::Idle;
+        self.exchange_running = false;
+        self.cancel_requested = false;
         self.mascot_pending_tools = 0;
         let mood = match outcome {
             ExchangeOutcome::ApiError(_)
@@ -327,6 +342,22 @@ impl App {
     /// Take the pending outgoing user message, if any (the loop sends it to the model).
     pub fn take_outbox(&mut self) -> Option<String> {
         self.outbox.take()
+    }
+
+    /// Take the operator's request to cancel the running turn, if they made one.
+    pub fn take_cancel_request(&mut self) -> bool {
+        std::mem::take(&mut self.cancel_requested)
+    }
+
+    /// Ctrl-C: cancel the running turn, or quit when there is none — or when this is the second
+    /// press in quick succession, so a turn that will not die never traps the operator.
+    fn interrupt(&mut self) {
+        let second = crate::repl::second_interrupt(&mut self.last_interrupt);
+        if self.exchange_running && !second {
+            self.cancel_requested = true;
+        } else {
+            self.should_quit = true;
+        }
     }
 
     /// Take the pending yank text, if any (the loop copies it via OSC 52).
@@ -444,15 +475,13 @@ pub fn update(app: &mut App, msg: Message) {
 }
 
 fn handle_key(app: &mut App, key: KeyEvent) {
-    // A consent question outranks everything: `y` grants, `n` or Esc refuses, Ctrl-C still quits
-    // (which refuses), and every other key is swallowed, so the input buffer is left as it was.
+    // A consent question outranks everything: `y` grants, `n`, Esc or Ctrl-C refuses, and every
+    // other key is swallowed, so the input buffer is left as it was. Ctrl-C answers the question
+    // and nothing more: quitting takes a press of its own.
     if app.consent.is_some() {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let answer = match key.code {
-            KeyCode::Char('c') if ctrl => {
-                app.should_quit = true;
-                Some(crate::operator::Decision::Denied)
-            }
+            KeyCode::Char('c') if ctrl => Some(crate::operator::Decision::Denied),
             KeyCode::Char('y' | 'Y') if !ctrl => Some(crate::operator::Decision::Granted),
             KeyCode::Char('n' | 'N') if !ctrl => Some(crate::operator::Decision::Denied),
             KeyCode::Esc => Some(crate::operator::Decision::Denied),
@@ -490,9 +519,10 @@ fn handle_key(app: &mut App, key: KeyEvent) {
     // Raw mode delivers them as key events rather than signals, so we re-create the semantics.
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         match key.code {
-            // SIGINT → clean quit (the loop restores on the way out).
+            // SIGINT → cancel the running turn; with none running, or pressed twice, a clean quit
+            // (the loop restores on the way out).
             KeyCode::Char('c') => {
-                app.should_quit = true;
+                app.interrupt();
                 return;
             }
             // SIGTSTP → suspend; the loop leaves the alt-screen, re-raises, and redraws on resume.
@@ -594,6 +624,10 @@ fn handle_input_key(app: &mut App, key: KeyEvent) {
         }
         KeyCode::PageUp => app.scroll_up(10),
         KeyCode::PageDown => app.scroll_down(10),
+        // Esc clears what is typed; with nothing typed it cancels the running turn.
+        KeyCode::Esc if app.input.text().is_empty() && app.exchange_running => {
+            app.cancel_requested = true
+        }
         KeyCode::Esc => app.input.clear(),
         _ => {}
     }
@@ -644,6 +678,7 @@ fn handle_chat_key(app: &mut App, key: KeyEvent) {
 /// untrusted string passes through; styling and markdown rendering happen downstream, on clean text.
 fn handle_session(app: &mut App, ev: SessionEvent) {
     use crate::safe_text::{safe_block, safe_line};
+    use crate::viz::glyph;
 
     // Every session event is data arriving; the header's working indicator phases off this count.
     app.activity = app.activity.wrapping_add(1);
@@ -756,7 +791,10 @@ fn handle_session(app: &mut App, ev: SessionEvent) {
                 Some(target) => format!(" {target}"),
                 None => safe_line(&compact_args(&arguments)).into_owned(),
             };
-            app.push_line(Role::Tool, format!("▸ {}{what}", safe_line(&name)));
+            app.push_line(
+                Role::Tool,
+                format!("{} {}{what}", glyph::ARROW, safe_line(&name)),
+            );
             app.last_tool_call = Some((name, arguments));
         }
         SessionEvent::ToolResult { result, audit } => {
@@ -770,7 +808,11 @@ fn handle_session(app: &mut App, ev: SessionEvent) {
             } else {
                 Mood::Thinking
             });
-            let mark = if result.is_error { "✗" } else { "✓" };
+            let mark = if result.is_error {
+                glyph::CROSS
+            } else {
+                glyph::CHECK
+            };
             let call = app.last_tool_call.take();
             let outcome = call
                 .as_ref()
@@ -784,6 +826,19 @@ fn handle_session(app: &mut App, ev: SessionEvent) {
             let name = call.as_ref().map_or("", |(name, _)| name.as_str());
             for line in crate::repl::summary::preview(name, &result) {
                 app.push_line(Role::Tool, format!("  {line}"));
+            }
+            // A kernel denial stands out whatever the result's own mark says: a call can exit 0
+            // having been refused something. The target is a string the model chose.
+            for event in audit.iter().filter(|event| event.decision == "denied") {
+                app.push_line(
+                    Role::Alert,
+                    format!(
+                        "  {} DENIED {} {}",
+                        glyph::WARN,
+                        safe_line(&event.op),
+                        safe_line(&event.target)
+                    ),
+                );
             }
             // Flash the chat so the eye finds the result that belongs to the call above it — accent
             // for the ordinary case, the verdict colors when a run actually ended (FR-026).
@@ -821,7 +876,7 @@ fn handle_session(app: &mut App, ev: SessionEvent) {
         SessionEvent::Error(s) => {
             app.mascot_had_error = true;
             app.set_mascot_mood(Mood::Concerned);
-            app.push_line(Role::System, format!("error: {}", safe_block(&s)));
+            app.push_line(Role::Alert, format!("error: {}", safe_block(&s)));
         }
         SessionEvent::Info(s) | SessionEvent::Footer(s) | SessionEvent::Steering(s) => {
             app.push_line(Role::System, safe_block(&s).into_owned())
@@ -1127,11 +1182,63 @@ mod tests {
                 audit: vec![audit],
             }),
         );
+        // The call exited 0, so it keeps its check — and the denial has a line of its own that
+        // says so, as the inline REPL's does.
+        let lines = chat_lines(&a);
+        assert!(lines[0].starts_with(glyph_check()), "{lines:?}");
+        assert_eq!(lines[1], "  \u{26A0} DENIED file_open /private");
+        assert_eq!(a.chat[1].role, Role::Alert);
         update(
             &mut a,
             Message::ExchangeFinished(crate::repl::ExchangeOutcome::Responded),
         );
         assert_eq!(a.mascot_mood, Mood::Concerned);
+    }
+
+    fn glyph_check() -> &'static str {
+        crate::viz::glyph::CHECK
+    }
+
+    #[test]
+    fn ctrl_c_cancels_a_running_turn_and_quits_only_when_pressed_twice() {
+        let ctrl_c = || Message::char_mods('c', KeyModifiers::CONTROL);
+        let mut a = app();
+        update(&mut a, Message::ExchangeStarted);
+        // Between the model calls of one exchange the header is idle; the turn is still running.
+        update(&mut a, Message::session(SessionEvent::TurnDone));
+        update(&mut a, ctrl_c());
+        assert!(!a.should_quit, "the first press cancels the turn");
+        assert!(a.take_cancel_request());
+        assert!(!a.take_cancel_request(), "a request is taken once");
+        // A durable turn is still winding down when the second press lands.
+        update(&mut a, ctrl_c());
+        assert!(a.should_quit, "the second press quits");
+
+        // With no turn running there is nothing to cancel.
+        let mut idle = app();
+        update(&mut idle, ctrl_c());
+        assert!(idle.should_quit && !idle.take_cancel_request());
+    }
+
+    #[test]
+    fn esc_cancels_a_running_turn_once_nothing_is_typed() {
+        let mut a = app();
+        update(&mut a, Message::ExchangeStarted);
+        type_str(&mut a, "half a thought");
+        update(&mut a, Message::key(KeyCode::Esc));
+        assert!(a.input.is_empty(), "the first Esc clears the line");
+        assert!(!a.take_cancel_request());
+        update(&mut a, Message::key(KeyCode::Esc));
+        assert!(a.take_cancel_request());
+        assert!(!a.should_quit);
+
+        // Idle, Esc is only ever the line-clear it was.
+        update(
+            &mut a,
+            Message::ExchangeFinished(crate::repl::ExchangeOutcome::Responded),
+        );
+        update(&mut a, Message::key(KeyCode::Esc));
+        assert!(!a.take_cancel_request());
     }
 
     #[test]
@@ -1215,11 +1322,13 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_quits_and_refuses() {
+    fn ctrl_c_refuses_the_question_without_quitting() {
         let mut a = app();
+        update(&mut a, Message::ExchangeStarted);
         a.ask_consent(vec!["x".into()]);
         update(&mut a, Message::char_mods('c', KeyModifiers::CONTROL));
-        assert!(a.should_quit);
+        assert!(!a.should_quit);
+        assert!(!a.take_cancel_request(), "it answers the question, no more");
         assert_eq!(a.take_consent_answer(), Some(Decision::Denied));
     }
 

@@ -350,6 +350,11 @@ async fn repl(args: ReplArgs) -> ExitCode {
             .unwrap_or_else(|| ReplConfig::default().system_prompt),
         agent_turn_budget: cfg.budget,
         policy_label: policy_label.clone(),
+        // How long a model stream may send nothing before the turn is ended; 0 turns it off.
+        stream_idle_secs: std::env::var("BEE_STREAM_IDLE_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(bee::repl::DEFAULT_STREAM_IDLE_SECS),
         mascot: !args.no_bee && std::env::var_os("BEE_MASCOT").is_none_or(|v| v != "0"),
         #[cfg(feature = "mcp")]
         mcp_summary: built.mcp.as_ref().map(|b| b.summary()),

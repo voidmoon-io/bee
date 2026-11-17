@@ -71,6 +71,9 @@ pub struct ReplConfig {
     pub tool_timeout_secs: u64,
     /// Max retries on transient provider errors (429/5xx).
     pub max_retries: u32,
+    /// How long an open model stream may send nothing before the turn is ended with an error
+    /// (seconds). 0 turns the limit off.
+    pub stream_idle_secs: u64,
     /// Human-readable label for the active policy/enforcement mode, shown by `/policy`.
     pub policy_label: String,
     /// Play the bee mascot animation once at startup (003-visual-render, Slice 2, FR-032). On by
@@ -214,6 +217,7 @@ impl Default for ReplConfig {
             agent_turn_budget: 25,
             tool_timeout_secs: 30,
             max_retries: 3,
+            stream_idle_secs: DEFAULT_STREAM_IDLE_SECS,
             policy_label: "none".to_string(),
             mascot: true,
             mcp_summary: None,
@@ -350,6 +354,16 @@ pub enum ExchangeOutcome {
     },
 }
 
+/// The default for [`ReplConfig::stream_idle_secs`]. Long enough for a model that thinks in silence
+/// before its first token, short enough that a stalled provider does not hold the session.
+pub const DEFAULT_STREAM_IDLE_SECS: u64 = 120;
+
+/// Two Ctrl-C presses this close together quit; one alone cancels the turn (or the typed line).
+pub const DOUBLE_INTERRUPT: Duration = Duration::from_secs(1);
+
+/// The line both front-ends show when the operator cancels a turn.
+pub const TURN_CANCELLED: &str = "turn cancelled — it was not added to the conversation";
+
 /// The longest a summary call made while preparing a REPL request may take (025).
 const SUMMARY_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -378,6 +392,26 @@ pub struct ExchangeResult {
     /// Characters of reasoning the model streamed during the exchange (display-only; providers
     /// that report `reasoning_tokens` are counted there too).
     pub reasoning_chars: u64,
+}
+
+impl ExchangeResult {
+    /// The exchange the operator cancelled: its future was dropped, so nothing it did is recorded.
+    pub fn cancelled() -> ExchangeResult {
+        ExchangeResult {
+            #[cfg(feature = "durable-sessions")]
+            durable_budget: None,
+            outcome: ExchangeOutcome::Terminated("cancelled".into()),
+            model_calls: 0,
+            tool_calls: 0,
+            denials: 0,
+            turns: Vec::new(),
+            audit: Vec::new(),
+            usage: None,
+            compactions: Vec::new(),
+            last_stop: None,
+            reasoning_chars: 0,
+        }
+    }
 }
 
 /// The session record produced when the REPL exits.
@@ -529,7 +563,8 @@ const HELP_TEXT: &str = "commands:\n  \
     /save [path]    write the session transcript to a JSON file (default: bee-repl-session.json)\n  \
     /audit          summarize the audit events seen so far\n  \
     /clear          clear the conversation history (keeps the system prompt)\n  \
-    /quit, /exit    end the session\n\
+    /cancel         while the agent is working: cancel the turn (so does Ctrl-C)\n  \
+    /quit, /exit    end the session (so does Ctrl-C twice, or Ctrl-D)\n\
     anything else is sent to the agent. while the agent is working, what you type is queued as a \
     steering message and reaches it on its next turn.";
 
@@ -575,16 +610,20 @@ struct Streamed {
 /// Consume one model stream: render text deltas live and return the assembled turn. The "working"
 /// indicator (started by the caller when the call was dispatched) is stopped the instant the first
 /// event arrives. A stream that ends without its final `Done` event is an error, not an empty turn:
-/// read as an empty reply it would end the exchange as if the model had answered.
+/// read as an empty reply it would end the exchange as if the model had answered. So is a stream
+/// that sends nothing for `idle`: a provider that stalls after partial text would otherwise hold the
+/// turn open forever, looking finished.
 async fn consume_stream(
     mut stream: crate::provider::EventStream,
     output: &dyn ReplOutput,
     call_start: Instant,
+    idle: Option<Duration>,
 ) -> Result<Streamed, String> {
     // Wait for the first event, then drop the "working" indicator — from here on the stream itself
     // (tokens, tool calls) shows liveness.
-    let first = stream.next().await;
+    let first = next_within(&mut stream, idle).await;
     output.busy_stop();
+    let first = first?;
     let ttft_ms = first
         .is_some()
         .then(|| call_start.elapsed().as_millis() as u64);
@@ -613,12 +652,33 @@ async fn consume_stream(
             Some(Err(e)) => break Err(e.to_string()),
             None => break Err("model stream ended without a final response".to_string()),
         }
-        ev = stream.next().await;
+        ev = match next_within(&mut stream, idle).await {
+            Ok(ev) => ev,
+            Err(stalled) => break Err(stalled),
+        };
     };
     if saw_text {
         output.assistant_end();
     }
     result
+}
+
+/// The stream's next event, or an error once it has sent nothing for `idle`.
+async fn next_within(
+    stream: &mut crate::provider::EventStream,
+    idle: Option<Duration>,
+) -> Result<Option<Result<StreamEvent, crate::provider::ModelError>>, String> {
+    let Some(limit) = idle else {
+        return Ok(stream.next().await);
+    };
+    tokio::time::timeout(limit, stream.next())
+        .await
+        .map_err(|_| {
+            format!(
+                "the model sent nothing for {}s, so the turn was ended. /retry re-sends your message",
+                limit.as_secs()
+            )
+        })
 }
 
 /// Tell the user what an escalation did. Only a grant or a refusal is worth a line: `AlreadyHeld` is
@@ -889,7 +949,14 @@ pub async fn run_exchange(
             turn,
             ttft_ms,
             reasoning_chars: turn_reasoning,
-        } = match consume_stream(stream, output, turn_start).await {
+        } = match consume_stream(
+            stream,
+            output,
+            turn_start,
+            (config.stream_idle_secs > 0).then(|| Duration::from_secs(config.stream_idle_secs)),
+        )
+        .await
+        {
             Ok(t) => t,
             Err(detail) => {
                 output.error(&detail);
@@ -1173,6 +1240,14 @@ fn exchange_error(detail: String) -> ExchangeOutcome {
     } else {
         ExchangeOutcome::ApiError(detail)
     }
+}
+
+/// Record a Ctrl-C, and say whether it follows the last one closely enough to mean quit.
+pub fn second_interrupt(last: &mut Option<Instant>) -> bool {
+    let now = Instant::now();
+    let second = last.is_some_and(|t| now.duration_since(t) < DOUBLE_INTERRUPT);
+    *last = (!second).then_some(now);
+    second
 }
 
 /// A count formatted with its noun, pluralized: `1 exchange`, `3 exchanges`.
@@ -1781,6 +1856,8 @@ pub async fn run_repl(
     let prompt = "bee> ".to_string();
     // Exactly one readline is outstanding at all times. A read left over from start-up consent is
     // that read: the operator stopped waiting while it was open, so an answer typed into it is late.
+    // The last Ctrl-C, so a second one close behind it quits.
+    let mut last_interrupt: Option<Instant> = None;
     let mut late_startup_answer = startup_read.is_some();
     let mut pending = match (startup_read, editor) {
         (Some(read), _) => read,
@@ -1796,9 +1873,14 @@ pub async fn run_repl(
             let (mut editor, line_res) = pending.await.expect("readline task panicked");
             let line = match line_res {
                 Ok(l) => l,
-                // Ctrl-D (EOF) ends the session; Ctrl-C cancels the current line and re-prompts.
+                // Ctrl-D (EOF) ends the session; Ctrl-C cancels the current line and re-prompts, and
+                // a second one straight after it quits.
                 Err(ReadlineError::Eof) => break,
                 Err(ReadlineError::Interrupted) => {
+                    if second_interrupt(&mut last_interrupt) {
+                        break;
+                    }
+                    output.info("(Ctrl-C again to quit)");
                     pending = issue_read(editor, prompt.clone());
                     continue;
                 }
@@ -1945,7 +2027,10 @@ pub async fn run_repl(
         // Run the exchange, folding in any line the user submits mid-flight as a steering message.
         let ex_start = Instant::now();
         let mut quit_after = false;
-        let result = {
+        // A cancelled turn leaves the conversation as it found it, so no half-finished tool call
+        // reaches the next request.
+        let before = conversation.messages.len();
+        let finished = {
             let fut = run_exchange(
                 &msg,
                 model,
@@ -1962,7 +2047,7 @@ pub async fn run_repl(
             let mut asking: Option<consent_input::Pending> = None;
             loop {
                 tokio::select! {
-                    r = &mut fut => break r,
+                    r = &mut fut => break Some(r),
                     Some(ask) = next_ask(&mut consent_rx) => {
                         let question = consent_input::Pending::new(ask);
                         question.show(output);
@@ -1970,7 +2055,10 @@ pub async fn run_repl(
                     }
                     joined = &mut pending, if !quit_after => {
                         let (mut editor, line_res) = joined.expect("readline task panicked");
+                        // `/cancel` or Ctrl-C: cancel the turn. Never sent to the model.
+                        let mut cancel = false;
                         match line_res {
+                            Ok(l) if l.trim() == "/cancel" => cancel = true,
                             Ok(l) => {
                                 let l = l.trim().to_string();
                                 match consent_input::route(&mut asking, &l) {
@@ -1984,8 +2072,7 @@ pub async fn run_repl(
                                             output.steering(&format!("↳ queued: {l}"));
                                             #[cfg(feature = "durable-sessions")]
                                             if let Some(session) = &config.durable {
-                                                let queued = if l == "/cancel" { session.cancel() } else { session.steer(l) };
-                                                if let Err(error) = queued { output.error(&error.to_string()); }
+                                                if let Err(error) = session.steer(l) { output.error(&error.to_string()); }
                                                 pending = issue_read(editor, prompt.clone());
                                                 continue;
                                             }
@@ -1999,13 +2086,40 @@ pub async fn run_repl(
                             }
                             // Ctrl-D mid-exchange: quit once this exchange finishes.
                             Err(ReadlineError::Eof) => quit_after = true,
-                            // Ctrl-C mid-exchange: drop the partial line, keep going.
-                            Err(ReadlineError::Interrupted) => {}
+                            // Ctrl-C mid-exchange cancels the turn; a second one close behind it
+                            // also quits.
+                            Err(ReadlineError::Interrupted) => {
+                                quit_after |= second_interrupt(&mut last_interrupt);
+                                cancel = true;
+                            }
                             Err(e) => output.error(&format!("input error: {e}")),
                         }
                         pending = issue_read(editor, prompt.clone());
+                        if cancel {
+                            // A durable session commits its own cancellation and the exchange then
+                            // returns; any other is cancelled by dropping it, which kills its
+                            // running call.
+                            #[cfg(feature = "durable-sessions")]
+                            if let Some(session) = &config.durable {
+                                if let Err(error) = session.cancel() {
+                                    output.error(&error.to_string());
+                                }
+                                continue;
+                            }
+                            break None;
+                        }
                     }
                 }
+            }
+        };
+        let result = match finished {
+            Some(result) => result,
+            None => {
+                output.busy_stop();
+                output.assistant_end();
+                conversation.messages.truncate(before);
+                output.info(TURN_CANCELLED);
+                ExchangeResult::cancelled()
             }
         };
 
@@ -2647,6 +2761,96 @@ mod tests {
         );
         // The partial prose that did arrive was closed off, not left dangling.
         assert!(out.contains("TEXT partial"), "output: {}", out.dump());
+    }
+
+    /// A provider that sends `events`, then stalls: its stream neither ends nor sends anything more.
+    struct StallingModel(Vec<StreamEvent>);
+
+    #[async_trait::async_trait]
+    impl Model for StallingModel {
+        fn id(&self) -> &str {
+            "mock/stalling"
+        }
+        async fn complete(
+            &self,
+            _: &Conversation,
+            _: &[ToolSchema],
+        ) -> Result<Turn, crate::provider::ModelError> {
+            unreachable!("the REPL streams")
+        }
+        async fn stream(
+            &self,
+            _: &Conversation,
+            _: &[ToolSchema],
+        ) -> Result<crate::provider::EventStream, crate::provider::ModelError> {
+            Ok(Box::pin(
+                futures_util::stream::iter(self.0.clone().into_iter().map(Ok))
+                    .chain(futures_util::stream::pending()),
+            ))
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stream_that_stalls_after_partial_text_ends_the_turn_with_an_error() {
+        let model = StallingModel(vec![StreamEvent::TextDelta("partial".into())]);
+        let (res, out) = exchange(&model, &ReplConfig::default()).await;
+        assert!(
+            matches!(&res.outcome, ExchangeOutcome::ApiError(d) if d.contains("sent nothing for 120s")),
+            "{:?}",
+            res.outcome
+        );
+        assert!(
+            out.contains("ERROR the model sent nothing for 120s"),
+            "output: {}",
+            out.dump()
+        );
+        // The partial prose that did arrive was closed off, not left dangling.
+        assert!(out.contains("TEXT partial"), "output: {}", out.dump());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stream_that_never_starts_is_ended_too() {
+        let (res, _) = exchange(&StallingModel(Vec::new()), &ReplConfig::default()).await;
+        assert!(
+            matches!(&res.outcome, ExchangeOutcome::ApiError(d) if d.contains("sent nothing")),
+            "{:?}",
+            res.outcome
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_idle_limit_is_configurable_and_zero_turns_it_off() {
+        let short = ReplConfig {
+            stream_idle_secs: 5,
+            ..Default::default()
+        };
+        let (res, _) = exchange(&StallingModel(Vec::new()), &short).await;
+        assert!(
+            matches!(&res.outcome, ExchangeOutcome::ApiError(d) if d.contains("for 5s")),
+            "{:?}",
+            res.outcome
+        );
+
+        let off = ReplConfig {
+            stream_idle_secs: 0,
+            ..Default::default()
+        };
+        let model = StallingModel(Vec::new());
+        let waited = tokio::time::timeout(Duration::from_secs(86_400), exchange(&model, &off));
+        assert!(waited.await.is_err(), "with no limit the stream is awaited");
+    }
+
+    #[test]
+    fn only_a_second_interrupt_close_behind_the_first_means_quit() {
+        let mut last = None;
+        assert!(!second_interrupt(&mut last));
+        assert!(second_interrupt(&mut last), "twice in a row quits");
+        // The pair is spent: a third press starts over.
+        assert!(!second_interrupt(&mut last));
+        // A press long after the last one is a first press again.
+        last = Instant::now().checked_sub(DOUBLE_INTERRUPT * 2);
+        assert!(last.is_some());
+        assert!(!second_interrupt(&mut last));
     }
 
     /// Terminates the exchange at the named step.

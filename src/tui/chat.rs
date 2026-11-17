@@ -20,6 +20,8 @@ pub enum Role {
     System,
     /// Tool calls and their results.
     Tool,
+    /// What the operator must not miss: an error, a kernel denial.
+    Alert,
 }
 
 /// A message's content: prose (appendable while streaming), markdown, or a rendered widget.

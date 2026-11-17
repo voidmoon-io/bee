@@ -818,6 +818,7 @@ fn line_style(role: Role) -> Style {
         Role::Assistant => role_style(ThemeRole::Text),
         Role::System => dim_style(),
         Role::Tool => dim_style(),
+        Role::Alert => role_style_bold(ThemeRole::Error),
     }
 }
 
@@ -844,7 +845,8 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
         ("j k  Space  x", "panels focus: select · collapse · close"),
         ("y", "yank newest message (OSC 52)"),
         ("? Esc", "close this help"),
-        ("q  Ctrl-C", "quit"),
+        ("Esc  Ctrl-C", "while the agent works: cancel the turn"),
+        ("q  Ctrl-C", "quit (Ctrl-C twice while the agent works)"),
         ("Ctrl-Z", "suspend (fg to resume)"),
     ];
     // No inner heading: the box's " help " title already names it, and two labels for one popup is
